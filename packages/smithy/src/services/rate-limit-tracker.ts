@@ -13,11 +13,17 @@
  * - Query soonest reset time for scheduling retries
  * - Optional persistence to SQLite via SettingsService (survives restarts)
  *
+ * Executables are keyed by normalised account key (see
+ * `utils/account-key.ts`): every markLimited / isLimited / chain lookup
+ * normalises its argument, so a bare command name and its resolved
+ * absolute path address the same entry.
+ *
  * @module
  */
 
 import type { SettingsService } from './settings-service.js';
 import { createLogger } from '../utils/logger.js';
+import { normalizeExecutableKey } from '../utils/account-key.js';
 
 const logger = createLogger('rate-limit-tracker');
 
@@ -143,12 +149,13 @@ class RateLimitTrackerImpl implements RateLimitTracker {
   }
 
   markLimited(executable: string, resetsAt: Date): void {
-    const existing = this.limits.get(executable);
+    const key = normalizeExecutableKey(executable);
+    const existing = this.limits.get(key);
     if (existing && existing.resetsAt.getTime() >= resetsAt.getTime()) {
       // Existing entry has a later (or equal) reset time — don't downgrade
       return;
     }
-    this.limits.set(executable, {
+    this.limits.set(key, {
       resetsAt,
       recordedAt: new Date(),
     });
@@ -156,13 +163,14 @@ class RateLimitTrackerImpl implements RateLimitTracker {
   }
 
   isLimited(executable: string): boolean {
-    const entry = this.limits.get(executable);
+    const key = normalizeExecutableKey(executable);
+    const entry = this.limits.get(key);
     if (!entry) {
       return false;
     }
     if (entry.resetsAt.getTime() <= Date.now()) {
       // Stale — auto-expire
-      this.limits.delete(executable);
+      this.limits.delete(key);
       return false;
     }
     return true;
@@ -268,7 +276,7 @@ class RateLimitTrackerImpl implements RateLimitTracker {
           continue;
         }
 
-        this.limits.set(executable, { resetsAt, recordedAt });
+        this.limits.set(normalizeExecutableKey(executable), { resetsAt, recordedAt });
         hydratedCount++;
       }
 

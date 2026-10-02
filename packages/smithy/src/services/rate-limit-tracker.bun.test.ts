@@ -7,9 +7,35 @@
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import * as fs from 'fs';
+import * as path from 'path';
 import { createStorage, initializeSchema } from '@stoneforge/storage';
 import { createSettingsService, type SettingsService } from './settings-service.js';
 import { createRateLimitTracker, RATE_LIMITS_SETTING_KEY, type RateLimitTracker } from './rate-limit-tracker.js';
+import { clearExecutableResolutionCache } from '../utils/account-key.js';
+
+// The tracker normalises executable keys by resolving bare command names
+// on PATH. Pin PATH to an empty directory for every test in this file so
+// the bare names used here ('claude', 'gpt-4', ...) never resolve against
+// real binaries installed on the host machine.
+let pinnedPathDir: string;
+let originalPath: string | undefined;
+
+beforeEach(() => {
+  pinnedPathDir = fs.mkdtempSync('/tmp/rate-limit-tracker-path-');
+  originalPath = process.env.PATH;
+  process.env.PATH = pinnedPathDir;
+  clearExecutableResolutionCache();
+});
+
+afterEach(() => {
+  if (originalPath === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = originalPath;
+  }
+  fs.rmSync(pinnedPathDir, { recursive: true, force: true });
+  clearExecutableResolutionCache();
+});
 
 describe('RateLimitTracker', () => {
   let tracker: RateLimitTracker;
@@ -427,5 +453,121 @@ describe('RateLimitTracker persistence', () => {
     expect(Object.keys(persisted)).toHaveLength(1);
     expect(persisted['claude']).toBeDefined();
     expect(persisted['expired']).toBeUndefined();
+  });
+});
+
+// ============================================================================
+// Account Key Normalisation Tests
+// ============================================================================
+
+describe('RateLimitTracker account key normalisation', () => {
+  let tracker: RateLimitTracker;
+  let tempDir: string;
+
+  beforeEach(() => {
+    tracker = createRateLimitTracker();
+    tempDir = fs.mkdtempSync('/tmp/rate-limit-tracker-key-');
+    // Point PATH at the temp dir so bare command names resolve there
+    process.env.PATH = tempDir;
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  /** Creates an executable file in tempDir and returns its absolute path. */
+  function makeExecutable(name: string): string {
+    const filePath = path.join(tempDir, name);
+    fs.writeFileSync(filePath, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(filePath, 0o755);
+    return filePath;
+  }
+
+  test('markLimited under an absolute path is seen by isLimited under the bare name', () => {
+    const wrapperPath = makeExecutable('claude-glm');
+    const futureDate = new Date(Date.now() + 60_000);
+
+    tracker.markLimited(wrapperPath, futureDate);
+
+    expect(tracker.isLimited('claude-glm')).toBe(true);
+  });
+
+  test('markLimited under the bare name is seen by isLimited under the absolute path', () => {
+    const wrapperPath = makeExecutable('claude-glm');
+    const futureDate = new Date(Date.now() + 60_000);
+
+    tracker.markLimited('claude-glm', futureDate);
+
+    expect(tracker.isLimited(wrapperPath)).toBe(true);
+    // The stored key is the normalised spelling
+    expect(tracker.getAllLimits()).toHaveLength(1);
+    expect(tracker.getAllLimits()[0]!.executable).toBe(wrapperPath);
+  });
+
+  test('both spellings address the same entry (no duplicate keys)', () => {
+    makeExecutable('claude-glm');
+    const futureDate = new Date(Date.now() + 60_000);
+
+    tracker.markLimited('claude-glm', futureDate);
+    tracker.markLimited(path.join(tempDir, 'claude-glm'), futureDate);
+
+    expect(tracker.getAllLimits()).toHaveLength(1);
+  });
+
+  test('unresolvable commands keep their raw spelling as key', () => {
+    const futureDate = new Date(Date.now() + 60_000);
+
+    tracker.markLimited('not-on-path', futureDate);
+
+    expect(tracker.isLimited('not-on-path')).toBe(true);
+    expect(tracker.getAllLimits()[0]!.executable).toBe('not-on-path');
+  });
+
+  test('getAvailableExecutable skips a chain entry limited under a different spelling', () => {
+    makeExecutable('claude-glm');
+    makeExecutable('claude-alt');
+    const futureDate = new Date(Date.now() + 60_000);
+
+    tracker.markLimited(path.join(tempDir, 'claude-glm'), futureDate);
+
+    expect(tracker.getAvailableExecutable(['claude-glm', 'claude-alt'])).toBe('claude-alt');
+  });
+
+  test('isAllLimited accounts for alternate spellings', () => {
+    makeExecutable('claude-glm');
+    makeExecutable('claude-alt');
+    const futureDate = new Date(Date.now() + 60_000);
+
+    tracker.markLimited(path.join(tempDir, 'claude-glm'), futureDate);
+    tracker.markLimited('claude-alt', futureDate);
+
+    expect(tracker.isAllLimited(['claude-glm', 'claude-alt'])).toBe(true);
+  });
+
+  test('hydration normalises persisted keys', () => {
+    const wrapperPath = makeExecutable('claude-glm');
+    const testDbPath = `/tmp/rate-limit-tracker-norm-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const storage = createStorage({ path: testDbPath });
+    initializeSchema(storage);
+    const settingsService = createSettingsService(storage);
+
+    try {
+      // Persisted under the legacy raw spelling
+      settingsService.setSetting(RATE_LIMITS_SETTING_KEY, {
+        'claude-glm': {
+          resetsAt: new Date(Date.now() + 60_000).toISOString(),
+          recordedAt: new Date().toISOString(),
+        },
+      });
+
+      const hydrated = createRateLimitTracker(settingsService);
+
+      expect(hydrated.isLimited('claude-glm')).toBe(true);
+      expect(hydrated.isLimited(wrapperPath)).toBe(true);
+    } finally {
+      if (fs.existsSync(testDbPath)) {
+        fs.unlinkSync(testDbPath);
+      }
+    }
   });
 });

@@ -42,6 +42,7 @@ import {
   RATE_LIMIT_SESSION_GAP_MS,
 } from './dispatch-daemon.js';
 import type { SettingsService, ServerAgentDefaults } from './settings-service.js';
+import { clearExecutableResolutionCache } from '../utils/account-key.js';
 import { createAgentRegistry, getAgentMetadata, type AgentRegistry, type AgentEntity } from './agent-registry.js';
 import { createTaskAssignmentService, type TaskAssignmentService } from './task-assignment-service.js';
 import { createDispatchService, type DispatchService } from './dispatch-service.js';
@@ -1961,6 +1962,36 @@ describe('DispatchDaemon Plan Auto-Complete', () => {
 // ============================================================================
 
 /**
+ * PATH pinning for rate-limit tests: the rate-limit tracker normalises
+ * executable keys by resolving bare command names on PATH, so the bare
+ * names used in these tests ('claude', 'claude2', ...) must not resolve
+ * against real binaries installed on the host machine. Pin PATH to an
+ * empty directory for the duration of a test.
+ */
+let pinnedPathDir: string | undefined;
+let savedPath: string | undefined;
+
+function pinPathForRateLimitTests(): void {
+  pinnedPathDir = fs.mkdtempSync('/tmp/dispatch-daemon-rl-path-');
+  savedPath = process.env.PATH;
+  process.env.PATH = pinnedPathDir;
+  clearExecutableResolutionCache();
+}
+
+function restorePathAfterRateLimitTests(): void {
+  if (savedPath === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = savedPath;
+  }
+  if (pinnedPathDir) {
+    fs.rmSync(pinnedPathDir, { recursive: true, force: true });
+    pinnedPathDir = undefined;
+  }
+  clearExecutableResolutionCache();
+}
+
+/**
  * Creates a mock SettingsService with a configurable fallback chain and
  * executable path defaults.
  */
@@ -1996,6 +2027,7 @@ describe('DispatchDaemon Rate Limit Integration', () => {
   let systemEntity: EntityId;
 
   beforeEach(async () => {
+    pinPathForRateLimitTests();
     testDbPath = `/tmp/dispatch-daemon-ratelimit-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
     const storage = createStorage({ path: testDbPath, create: true });
     initializeSchema(storage);
@@ -2051,6 +2083,7 @@ describe('DispatchDaemon Rate Limit Integration', () => {
     if (fs.existsSync(testDbPath)) {
       fs.unlinkSync(testDbPath);
     }
+    restorePathAfterRateLimitTests();
   });
 
   async function createTestWorker(name: string): Promise<AgentEntity> {
@@ -5111,6 +5144,7 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
   let systemEntity: EntityId;
 
   beforeEach(async () => {
+    pinPathForRateLimitTests();
     testDbPath = `/tmp/dispatch-daemon-rl-pattern-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
     const storage = createStorage({ path: testDbPath, create: true });
     initializeSchema(storage);
@@ -5162,6 +5196,7 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     if (fs.existsSync(testDbPath)) {
       fs.unlinkSync(testDbPath);
     }
+    restorePathAfterRateLimitTests();
   });
 
   async function createTestWorker(name: string): Promise<AgentEntity> {

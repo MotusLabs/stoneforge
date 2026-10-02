@@ -69,6 +69,7 @@ import { DB_PATH as DEFAULT_DB_PATH, PROJECT_ROOT as DEFAULT_PROJECT_ROOT, getCl
 import { getDaemonConfigOverrides } from './daemon-state.js';
 import { createLogger } from '../utils/logger.js';
 import { getFallbackResetTime } from '../utils/rate-limit-parser.js';
+import { normalizeExecutableKey } from '../utils/account-key.js';
 
 const logger = createLogger('orchestrator');
 
@@ -326,13 +327,16 @@ export async function initializeServices(options: ServicesOptions = {}): Promise
       // Listen for rate_limited events from sessions and forward to trackers
       const onRateLimited = (data: { executablePath?: string; resetsAt?: Date; message?: string }) => {
         if (data.executablePath) {
+          // Normalise to the account key so a session reporting an absolute
+          // path matches a worker configured with the bare command name.
+          const executableKey = normalizeExecutableKey(data.executablePath);
           const resetTime = data.resetsAt ?? getFallbackResetTime(data.message ?? '');
           // Forward to dispatch daemon's internal tracker
           if (dispatchDaemon) {
-            dispatchDaemon.handleRateLimitDetected(data.executablePath, resetTime);
+            dispatchDaemon.handleRateLimitDetected(executableKey, resetTime);
           }
           // Forward to steward executor's tracker
-          rateLimitTracker.markLimited(data.executablePath, resetTime);
+          rateLimitTracker.markLimited(executableKey, resetTime);
         }
       };
 
