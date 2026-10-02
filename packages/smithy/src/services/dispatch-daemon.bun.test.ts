@@ -10,7 +10,7 @@
  * @module
  */
 
-import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, mock, setSystemTime } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -32,6 +32,7 @@ import {
 import {
   createDispatchDaemon,
   DispatchDaemonImpl,
+  compareWorkersByDispatchPreference,
   type DispatchDaemon,
   type DispatchDaemonConfig,
   type PollResult,
@@ -6989,6 +6990,626 @@ describe('assignTaskToWorker - per-director targetBranch propagation', () => {
       const assignedIds = startSessionCalls.map((c: unknown[]) => c[0] as string);
       expect(assignedIds).toContain(enabledWorker.id as unknown as string);
       expect(assignedIds).not.toContain(disabledWorker.id as unknown as string);
+    });
+  });
+});
+
+// ============================================================================
+// Dispatch Tiers: tier-ordered LRU worker selection (design D2, D3)
+// ============================================================================
+//
+// Spec: "worker-dispatch-selection" (workspace document el-3tr7oc). The
+// daemon must offer ready tasks to eligible idle ephemeral workers in
+// ascending tier order, break ties by least-recently-dispatched, and fall
+// through to lower tiers when an account is rate-limited — all within a
+// single dispatch cycle.
+//
+// Note on test design: `agentRegistry.listAgents()` returns workers in a
+// non-deterministic order (agent IDs are not a pure function of the name, and
+// the returned order varies between runs), which is exactly the arbitrariness
+// this feature removes. The ordering scenarios therefore assert the *full*
+// task→worker mapping implied by the rank order rather than a single winner.
+// With the preference sort in place the mapping is fully deterministic; with
+// the sort removed it is effectively random, so the scenarios fail.
+
+/**
+ * Session manager mock whose session map the test controls directly.
+ *
+ * Unlike {@link createMockSessionManager}, sessions can be cleared between
+ * polls so a worker that received a task in one cycle can be idle again in
+ * the next. The built-in mock's `stopSession` is a no-op, which would leave
+ * every dispatched worker busy for the rest of the test.
+ */
+function createControlledSessionManager(): SessionManager & {
+  sessions: Map<EntityId, SessionRecord>;
+  clearSessions(): void;
+} {
+  const sessions = new Map<EntityId, SessionRecord>();
+  const manager = {
+    ...createMockSessionManager(),
+    startSession: mock(async (agentId: EntityId, options?: StartSessionOptions) => {
+      const session: SessionRecord = {
+        id: `session-${String(agentId)}-${sessions.size + 1}`,
+        agentId,
+        agentRole: 'worker',
+        workerMode: 'ephemeral',
+        status: 'running',
+        workingDirectory: options?.workingDirectory,
+        worktree: options?.worktree,
+        createdAt: createTimestamp(),
+        startedAt: createTimestamp(),
+        lastActivityAt: createTimestamp(),
+      };
+      sessions.set(agentId, session);
+      return { session, events: new EventEmitter() };
+    }),
+    getActiveSession: mock((agentId: EntityId) => sessions.get(agentId) ?? null),
+  } as unknown as SessionManager;
+
+  return Object.assign(manager, {
+    sessions,
+    clearSessions: () => sessions.clear(),
+  });
+}
+
+describe('Dispatch tiers: tier-ordered LRU worker selection', () => {
+  let api: QuarryAPI;
+  let inboxService: InboxService;
+  let agentRegistry: AgentRegistry;
+  let taskAssignment: TaskAssignmentService;
+  let dispatchService: DispatchService;
+  let sessionManager: ReturnType<typeof createControlledSessionManager>;
+  let worktreeManager: WorktreeManager;
+  let stewardScheduler: StewardScheduler;
+  let settingsService: SettingsService;
+  let daemon: DispatchDaemon;
+  let daemons: DispatchDaemon[];
+  let testDbPath: string;
+  let systemEntity: EntityId;
+
+  /** Options applied to a registered worker via agent metadata. */
+  interface TierWorkerOptions {
+    tier?: number;
+    lastDispatchedAt?: string;
+    executablePath?: string;
+    workerMode?: 'ephemeral' | 'persistent';
+  }
+
+  /**
+   * Builds the daemon under test. Kept as a factory so the "Ordering survives
+   * restart" scenario can construct a second daemon over the same storage.
+   */
+  function buildDaemon(): DispatchDaemon {
+    const created = new DispatchDaemonImpl(
+      api,
+      agentRegistry,
+      sessionManager,
+      dispatchService,
+      worktreeManager,
+      taskAssignment,
+      stewardScheduler,
+      inboxService,
+      {
+        ensureTargetBranchExists: mockEnsureTargetBranchExists,
+        pollIntervalMs: 100,
+        workerAvailabilityPollEnabled: true,
+        inboxPollEnabled: false,
+        stewardTriggerPollEnabled: false,
+        workflowTaskPollEnabled: false,
+      },
+      undefined, // poolService
+      settingsService
+    );
+    daemons.push(created);
+    return created;
+  }
+
+  /** Registers an ephemeral worker and applies tier/LRU metadata to it. */
+  async function createWorker(
+    name: string,
+    options: TierWorkerOptions = {}
+  ): Promise<AgentEntity> {
+    const worker = await agentRegistry.registerWorker({
+      name,
+      workerMode: options.workerMode ?? 'ephemeral',
+      createdBy: systemEntity,
+      maxConcurrentTasks: 1,
+      executablePath: options.executablePath,
+    });
+
+    const meta: { tier?: number; lastDispatchedAt?: string } = {};
+    if (options.tier !== undefined) meta.tier = options.tier;
+    if (options.lastDispatchedAt !== undefined) {
+      meta.lastDispatchedAt = options.lastDispatchedAt;
+    }
+    if (meta.tier !== undefined || meta.lastDispatchedAt !== undefined) {
+      await agentRegistry.updateAgentMetadata(worker.id as unknown as EntityId, meta);
+    }
+    return worker;
+  }
+
+  async function createTestTask(title: string, priority?: number): Promise<Task> {
+    const task = await createTask({
+      title,
+      createdBy: systemEntity,
+      status: TaskStatus.OPEN,
+      priority: priority as Task['priority'],
+    });
+    return api.create(task as unknown as Record<string, unknown> & { createdBy: EntityId }) as Promise<Task>;
+  }
+
+  /** Marks a worker busy by giving it an active session. */
+  async function makeBusy(worker: AgentEntity): Promise<void> {
+    await sessionManager.startSession(worker.id as unknown as EntityId, {});
+  }
+
+  /** Reads a worker's `lastDispatchedAt` straight out of agent metadata. */
+  async function lastDispatchedAtOf(worker: AgentEntity): Promise<string | undefined> {
+    const reloaded = await agentRegistry.getAgent(worker.id as unknown as EntityId);
+    return getAgentMetadata(reloaded as AgentEntity)?.lastDispatchedAt;
+  }
+
+  /** Returns the assignee of a task, or undefined when still unassigned. */
+  async function assigneeOf(task: Task): Promise<string | undefined> {
+    const updated = await api.get<Task>(task.id);
+    return updated?.assignee as unknown as string | undefined;
+  }
+
+  /**
+   * Registry order of the registered ephemeral workers — the order an
+   * unsorted assignment loop would walk.
+   *
+   * This order is NOT insertion order and is not stable between runs, so
+   * ordering scenarios read it at runtime and construct their expectations
+   * against it (see the note at the top of this describe block).
+   */
+  async function registryOrder(): Promise<AgentEntity[]> {
+    return agentRegistry.listAgents({ role: 'worker', workerMode: 'ephemeral' });
+  }
+
+  /** An ISO timestamp the given number of hours in the past. */
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
+
+  beforeEach(async () => {
+    // Pin PATH to an empty directory so bare executable names never resolve
+    // to a real binary — account keys stay raw strings and deterministic.
+    pinPathForRateLimitTests();
+
+    testDbPath = `/tmp/dispatch-daemon-tiers-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const storage = createStorage({ path: testDbPath, create: true });
+    initializeSchema(storage);
+
+    api = createQuarryAPI(storage);
+    inboxService = createInboxService(storage);
+    agentRegistry = createAgentRegistry(api);
+    taskAssignment = createTaskAssignmentService(api);
+    dispatchService = createDispatchService(api, taskAssignment, agentRegistry);
+    sessionManager = createControlledSessionManager();
+    worktreeManager = createMockWorktreeManager();
+    stewardScheduler = createMockStewardScheduler();
+    // No fallback chain: every worker's account key comes from its own
+    // executablePath (or the provider default), which is what the tier
+    // fall-through scenarios need.
+    settingsService = createMockSettingsService({ fallbackChain: undefined });
+    daemons = [];
+
+    const { createEntity, EntityTypeValue } = await import('@stoneforge/core');
+    const entity = await createEntity({
+      name: 'test-system-tiers',
+      entityType: EntityTypeValue.SYSTEM,
+      createdBy: 'system:test' as EntityId,
+    });
+    const saved = await api.create(entity as unknown as Record<string, unknown> & { createdBy: EntityId });
+    systemEntity = saved.id as unknown as EntityId;
+
+    daemon = buildDaemon();
+  });
+
+  afterEach(async () => {
+    // Restore the real clock first, so teardown of a test that advanced time
+    // cannot observe a fake "now".
+    setSystemTime();
+    for (const instance of daemons) {
+      await instance.stop();
+    }
+    if (fs.existsSync(testDbPath)) {
+      fs.unlinkSync(testDbPath);
+    }
+    restorePathAfterRateLimitTests();
+  });
+
+  describe('tier-ordered assignment', () => {
+    test('scenario "Preferred tier receives the only task"', async () => {
+      // Two idle workers. Tiers are assigned at runtime so the tier-1 worker
+      // is the one the registry lists SECOND — an unsorted loop would hand
+      // the task to the other one.
+      await createWorker('preferred-tier');
+      await createWorker('overflow-tier');
+      const [registryFirst, preferred] = await registryOrder();
+
+      await agentRegistry.updateAgentMetadata(preferred.id as unknown as EntityId, { tier: 1 });
+      await agentRegistry.updateAgentMetadata(registryFirst.id as unknown as EntityId, { tier: 3 });
+
+      const task = await createTestTask('Only task');
+
+      const result = await daemon.pollWorkerAvailability();
+
+      expect(result.processed).toBe(1);
+      expect(await assigneeOf(task)).toBe(preferred.id as unknown as string);
+      // The tier-3 worker stays idle even though the registry lists it first.
+      expect(sessionManager.sessions.has(registryFirst.id as unknown as EntityId)).toBe(false);
+    });
+
+    test('scenario "Overflow to lower tier when preferred tier is busy"', async () => {
+      const e1 = await createWorker('e1', { tier: 1 });
+      const e2 = await createWorker('e2', { tier: 1 });
+      const e3 = await createWorker('e3', { tier: 2 });
+      const e4 = await createWorker('e4', { tier: 3 });
+
+      // The whole preferred tier is busy.
+      await makeBusy(e1);
+      await makeBusy(e2);
+
+      const criticalTask = await createTestTask('Critical task', Priority.CRITICAL);
+      const highTask = await createTestTask('High task', Priority.HIGH);
+
+      const result = await daemon.pollWorkerAvailability();
+
+      expect(result.processed).toBe(2);
+      // The highest-priority task goes to the best-ranked idle worker (e3),
+      // the next one to e4 — never to the busy tier-1 workers.
+      expect(await assigneeOf(criticalTask)).toBe(e3.id as unknown as string);
+      expect(await assigneeOf(highTask)).toBe(e4.id as unknown as string);
+    });
+
+    test('scenario "More tasks than workers"', async () => {
+      const e1 = await createWorker('e1', { tier: 1 });
+      const e2 = await createWorker('e2', { tier: 2 });
+      const e3 = await createWorker('e3', { tier: 3 });
+
+      const critical = await createTestTask('Critical', Priority.CRITICAL);
+      const high = await createTestTask('High', Priority.HIGH);
+      const medium = await createTestTask('Medium', Priority.MEDIUM);
+      const low = await createTestTask('Low', Priority.LOW);
+      const minimal = await createTestTask('Minimal', Priority.MINIMAL);
+
+      const result = await daemon.pollWorkerAvailability();
+
+      // Every eligible idle worker receives a task...
+      expect(result.processed).toBe(3);
+      // ...handed out in worker rank order: the highest-priority task to the
+      // best-ranked worker, and so on down.
+      expect(await assigneeOf(critical)).toBe(e1.id as unknown as string);
+      expect(await assigneeOf(high)).toBe(e2.id as unknown as string);
+      expect(await assigneeOf(medium)).toBe(e3.id as unknown as string);
+      // The remaining tasks stay unassigned for a later cycle.
+      expect(await assigneeOf(low)).toBeUndefined();
+      expect(await assigneeOf(minimal)).toBeUndefined();
+    });
+
+    test('untiered workers rank after every tiered worker', async () => {
+      // Three idle workers; the tier is given to one the registry does NOT
+      // list first. Even the weakest tier (5) must beat having no tier.
+      await createWorker('untiered-one');
+      await createWorker('untiered-two');
+      await createWorker('untiered-three');
+      const order = await registryOrder();
+      const tiered = order[1];
+
+      await agentRegistry.updateAgentMetadata(tiered.id as unknown as EntityId, { tier: 5 });
+
+      const task = await createTestTask('Only task');
+
+      await daemon.pollWorkerAvailability();
+
+      expect(await assigneeOf(task)).toBe(tiered.id as unknown as string);
+      expect(sessionManager.sessions.size).toBe(1);
+      expect(sessionManager.sessions.has(tiered.id as unknown as EntityId)).toBe(true);
+    });
+  });
+
+  describe('least-recently-dispatched tie-break', () => {
+    test('scenario "Load spread within a tier"', async () => {
+      // Three workers in one tier. Their dispatch times are chosen at runtime
+      // so the LRU rank is the exact REVERSE of registry order — so an
+      // unsorted loop (which walks registry order) provably disagrees with
+      // the expected assignment. This is what spreads load across several
+      // accounts in the same tier.
+      const a = await createWorker('tier-one-a', { tier: 1 });
+      const b = await createWorker('tier-one-b', { tier: 1 });
+      const c = await createWorker('tier-one-c', { tier: 1 });
+      const [first, second, third] = await registryOrder();
+      expect([first.id, second.id, third.id].sort()).toEqual(
+        [a.id, b.id, c.id].sort()
+      );
+
+      // Rank them newest-first in registry order, so LRU order is reversed.
+      await agentRegistry.updateAgentMetadata(first.id as unknown as EntityId, {
+        lastDispatchedAt: hoursAgo(1),
+      });
+      await agentRegistry.updateAgentMetadata(second.id as unknown as EntityId, {
+        lastDispatchedAt: hoursAgo(8),
+      });
+      await agentRegistry.updateAgentMetadata(third.id as unknown as EntityId, {
+        lastDispatchedAt: hoursAgo(24),
+      });
+
+      const critical = await createTestTask('Critical', Priority.CRITICAL);
+      const high = await createTestTask('High', Priority.HIGH);
+      const medium = await createTestTask('Medium', Priority.MEDIUM);
+
+      const result = await daemon.pollWorkerAvailability();
+
+      expect(result.processed).toBe(3);
+      // The highest-priority task goes to the least recently dispatched
+      // worker, and so on down the rank order.
+      expect(await assigneeOf(critical)).toBe(third.id as unknown as string);
+      expect(await assigneeOf(high)).toBe(second.id as unknown as string);
+      expect(await assigneeOf(medium)).toBe(first.id as unknown as string);
+    });
+
+    test('scenario "Never-dispatched worker preferred"', async () => {
+      // The never-dispatched workers are chosen at runtime to be exactly the
+      // ones the registry lists LAST, so an unsorted loop would hand the
+      // tasks to the previously dispatched workers instead.
+      for (const name of ['w-one', 'w-two', 'w-three', 'w-four']) {
+        await createWorker(name, { tier: 1 });
+      }
+      const order = await registryOrder();
+      expect(order).toHaveLength(4);
+      const seen = [order[0], order[1]];
+      const fresh = order.slice(2);
+
+      await agentRegistry.updateAgentMetadata(seen[0].id as unknown as EntityId, {
+        lastDispatchedAt: hoursAgo(1),
+      });
+      await agentRegistry.updateAgentMetadata(seen[1].id as unknown as EntityId, {
+        lastDispatchedAt: hoursAgo(5),
+      });
+
+      const critical = await createTestTask('Critical', Priority.CRITICAL);
+      const high = await createTestTask('High', Priority.HIGH);
+
+      const result = await daemon.pollWorkerAvailability();
+
+      expect(result.processed).toBe(2);
+      // Both tasks land on never-dispatched workers...
+      const assigned = [await assigneeOf(critical), await assigneeOf(high)];
+      expect(assigned).toContain(fresh[0].id as unknown as string);
+      expect(assigned).toContain(fresh[1].id as unknown as string);
+      // ...and the previously dispatched ones stay idle.
+      expect(sessionManager.sessions.has(seen[0].id as unknown as EntityId)).toBe(false);
+      expect(sessionManager.sessions.has(seen[1].id as unknown as EntityId)).toBe(false);
+    });
+
+    test('dispatch records lastDispatchedAt on the worker metadata', async () => {
+      const seeded = hoursAgo(60);
+      const worker = await createWorker('e1', { tier: 1, lastDispatchedAt: seeded });
+
+      expect(await lastDispatchedAtOf(worker)).toBe(seeded);
+
+      await createTestTask('Only task');
+      await daemon.pollWorkerAvailability();
+
+      const recorded = await lastDispatchedAtOf(worker);
+      expect(recorded).toBeDefined();
+      expect(recorded).not.toBe(seeded);
+      // The recorded time is more recent than the seeded one.
+      expect(Date.parse(recorded as string)).toBeGreaterThan(Date.parse(seeded));
+    });
+
+    test('scenario "Ordering survives restart"', async () => {
+      const e1 = await createWorker('e1', { tier: 1 });
+      const e2 = await createWorker('e2', { tier: 1 });
+
+      // Cycle 1: both idle, both tier 1, neither dispatched — the tie falls
+      // through to agent ID, so one of them wins and gets lastDispatchedAt
+      // recorded through the agent registry.
+      const firstTask = await createTestTask('First task');
+      await daemon.pollWorkerAvailability();
+
+      const winner = (await assigneeOf(firstTask)) === (e1.id as unknown as string) ? e1 : e2;
+      const loser = winner === e1 ? e2 : e1;
+      expect(await lastDispatchedAtOf(winner)).toBeDefined();
+      expect(await lastDispatchedAtOf(loser)).toBeUndefined();
+
+      // Retire the task and end the session so both workers are idle again.
+      await api.update(firstTask.id, { status: TaskStatus.CLOSED });
+      sessionManager.clearSessions();
+
+      // Restart: a fresh registry, dispatch service, session manager and
+      // daemon over the SAME storage. Nothing is carried over in memory.
+      agentRegistry = createAgentRegistry(api);
+      taskAssignment = createTaskAssignmentService(api);
+      dispatchService = createDispatchService(api, taskAssignment, agentRegistry);
+      sessionManager = createControlledSessionManager();
+      daemon = buildDaemon();
+
+      const secondTask = await createTestTask('Second task');
+      const result = await daemon.pollWorkerAvailability();
+
+      // The worker that was never dispatched outranks the one that was, even
+      // after the restart — the ordering signal came from persisted agent
+      // metadata, not from daemon memory.
+      expect(result.processed).toBe(1);
+      expect(await assigneeOf(secondTask)).toBe(loser.id as unknown as string);
+    });
+
+    test('agent ID breaks remaining ties deterministically', async () => {
+      // Same tier, same (absent) dispatch time: whichever ID sorts first must
+      // win, whatever order the registry returns them in.
+      const b = await createWorker('tie-b', { tier: 2 });
+      const a = await createWorker('tie-a', { tier: 2 });
+      const expected = [a, b].sort((x, y) => (x.id < y.id ? -1 : 1))[0];
+
+      const task = await createTestTask('Only task');
+
+      await daemon.pollWorkerAvailability();
+
+      expect(await assigneeOf(task)).toBe(expected.id as unknown as string);
+    });
+  });
+
+  describe('rate-limited workers are skipped', () => {
+    test('scenario "Fall through on exhausted cheap tier"', async () => {
+      // e1 and e2 share the cheap account; e3 is on another account.
+      const e1 = await createWorker('e1', { tier: 1, executablePath: 'claude-glm' });
+      const e2 = await createWorker('e2', { tier: 1, executablePath: 'claude-glm' });
+      const e3 = await createWorker('e3', { tier: 2, executablePath: 'claude-pro' });
+
+      const task = await createTestTask('Only task');
+
+      // Mark the shared tier-1 account limited well past the minimum floor.
+      daemon.handleRateLimitDetected('claude-glm', new Date(Date.now() + 60 * 60 * 1000));
+
+      const result = await daemon.pollWorkerAvailability();
+
+      // Both tier-1 workers are skipped and the task still goes out in this
+      // same cycle, to the next eligible worker in rank order.
+      expect(result.processed).toBe(1);
+      expect(result.errors).toBe(0);
+      expect(await assigneeOf(task)).toBe(e3.id as unknown as string);
+      expect(sessionManager.sessions.has(e1.id as unknown as EntityId)).toBe(false);
+      expect(sessionManager.sessions.has(e2.id as unknown as EntityId)).toBe(false);
+    });
+
+    test('scenario "Return to preferred tier after reset"', async () => {
+      const e1 = await createWorker('e1', { tier: 1, executablePath: 'claude-glm' });
+      const e3 = await createWorker('e3', { tier: 2, executablePath: 'claude-pro' });
+
+      // Limit the tier-1 account for one hour.
+      daemon.handleRateLimitDetected('claude-glm', new Date(Date.now() + 60 * 60 * 1000));
+
+      const firstTask = await createTestTask('First task');
+      await daemon.pollWorkerAvailability();
+      expect(await assigneeOf(firstTask)).toBe(e3.id as unknown as string);
+
+      // The limit expires; both workers idle again.
+      setSystemTime(Date.now() + 61 * 60 * 1000);
+      sessionManager.clearSessions();
+
+      const secondTask = await createTestTask('Second task');
+      const result = await daemon.pollWorkerAvailability();
+
+      expect(result.processed).toBe(1);
+      expect(await assigneeOf(secondTask)).toBe(e1.id as unknown as string);
+    });
+  });
+
+  describe('selection scope', () => {
+    test('scenario "Persistent worker unaffected"', async () => {
+      // A persistent worker with the best tier must not be auto-dispatched
+      // to because of it — tier only ranks ephemeral workers.
+      const persistent = await createWorker('persistent', {
+        tier: 1,
+        workerMode: 'persistent',
+      });
+      const ephemeral = await createWorker('ephemeral', { tier: 3 });
+
+      const task = await createTestTask('Only task');
+
+      const result = await daemon.pollWorkerAvailability();
+
+      expect(result.processed).toBe(1);
+      expect(await assigneeOf(task)).toBe(ephemeral.id as unknown as string);
+      expect(sessionManager.sessions.has(persistent.id as unknown as EntityId)).toBe(false);
+    });
+
+    test('a steward with a tier is never part of the worker selection loop', async () => {
+      const steward = await agentRegistry.registerSteward({
+        name: 'tiered-steward',
+        stewardFocus: 'merge',
+        createdBy: systemEntity,
+      });
+      await agentRegistry.updateAgentMetadata(steward.id as unknown as EntityId, { tier: 1 });
+
+      const worker = await createWorker('e4', { tier: 3 });
+      const task = await createTestTask('Only task');
+
+      await daemon.pollWorkerAvailability();
+
+      // The tier-1 steward is not offered the task; the tier-3 worker is.
+      expect(await assigneeOf(task)).toBe(worker.id as unknown as string);
+      expect(sessionManager.sessions.has(steward.id as unknown as EntityId)).toBe(false);
+    });
+  });
+
+  describe('compareWorkersByDispatchPreference (unit)', () => {
+    /** Builds a minimal agent entity with the given selection metadata. */
+    function agentWith(
+      id: string,
+      meta: { tier?: unknown; lastDispatchedAt?: unknown } = {}
+    ): AgentEntity {
+      return {
+        id,
+        name: id,
+        type: 'entity',
+        metadata: { agent: { agentRole: 'worker', workerMode: 'ephemeral', ...meta } },
+      } as unknown as AgentEntity;
+    }
+
+    test('sorts by ascending tier with untiered last', () => {
+      const unsorted = [
+        agentWith('c'),
+        agentWith('a', { tier: 3 }),
+        agentWith('b', { tier: 1 }),
+        agentWith('d'),
+      ];
+      expect(unsorted.sort(compareWorkersByDispatchPreference).map((a) => a.id)).toEqual([
+        'b',
+        'a',
+        'c',
+        'd',
+      ]);
+    });
+
+    test('within a tier, least recently dispatched first', () => {
+      const older = new Date('2026-01-01T00:00:00Z').toISOString();
+      const newer = new Date('2026-06-01T00:00:00Z').toISOString();
+      const unsorted = [
+        agentWith('recent', { tier: 1, lastDispatchedAt: newer }),
+        agentWith('never', { tier: 1 }),
+        agentWith('old', { tier: 1, lastDispatchedAt: older }),
+      ];
+      expect(unsorted.sort(compareWorkersByDispatchPreference).map((a) => a.id)).toEqual([
+        'never',
+        'old',
+        'recent',
+      ]);
+    });
+
+    test('invalid tier values are treated as untiered', () => {
+      const zero = agentWith('zero', { tier: 0 });
+      const negative = agentWith('negative', { tier: -2 });
+      const fractional = agentWith('fractional', { tier: 1.5 });
+      const text = agentWith('text', { tier: '1' });
+      const valid = agentWith('valid', { tier: 9 });
+
+      const ordered = [zero, negative, fractional, text, valid].sort(
+        compareWorkersByDispatchPreference
+      );
+      // The only genuinely tiered worker wins; the invalid values all rank
+      // alongside the untiered workers (ordered by ID among themselves).
+      expect(ordered[0].id).toBe('valid');
+    });
+
+    test('unparseable lastDispatchedAt counts as never dispatched', () => {
+      const garbage = agentWith('garbage', { tier: 1, lastDispatchedAt: 'not-a-date' });
+      const dispatched = agentWith('dispatched', {
+        tier: 1,
+        lastDispatchedAt: new Date('2026-01-01T00:00:00Z').toISOString(),
+      });
+      expect(compareWorkersByDispatchPreference(garbage, dispatched)).toBeLessThan(0);
+    });
+
+    test('tier dominates a more recent dispatch time', () => {
+      const tier1Recent = agentWith('a', {
+        tier: 1,
+        lastDispatchedAt: new Date().toISOString(),
+      });
+      const tier2Never = agentWith('b', { tier: 2 });
+      // Tier 1 wins even though it was dispatched and tier 2 never was.
+      expect(compareWorkersByDispatchPreference(tier1Recent, tier2Never)).toBeLessThan(0);
     });
   });
 });

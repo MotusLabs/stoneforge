@@ -138,6 +138,80 @@ export const RATE_LIMIT_SESSION_PATTERN_COUNT = 3;
 export const RATE_LIMIT_SESSION_GAP_MS = 5 * 60 * 1000; // 5 minutes
 
 // ============================================================================
+// Worker Selection Ordering
+// ============================================================================
+
+/**
+ * Sort rank sentinels for {@link compareWorkersByDispatchPreference}.
+ * A worker without a tier is the least preferred (`Infinity`), and a worker
+ * that has never been dispatched is the most preferred within its tier
+ * (`-Infinity`).
+ */
+const NO_TIER_RANK = Number.POSITIVE_INFINITY;
+const NEVER_DISPATCHED_RANK = Number.NEGATIVE_INFINITY;
+
+/**
+ * Reads a worker's dispatch tier from its metadata, defensively.
+ *
+ * The tier is a positive integer where 1 is the most preferred (design D1).
+ * Anything missing or invalid (0, negative, non-integer, non-number) means
+ * the worker has no tier and ranks after every tiered worker. Invalid values
+ * are rejected at the registry boundary, so this is defense in depth.
+ */
+function readDispatchTier(agent: AgentEntity): number {
+  const tier = (getAgentMetadata(agent) as { tier?: unknown } | undefined)?.tier;
+  return typeof tier === 'number' && Number.isInteger(tier) && tier > 0 ? tier : NO_TIER_RANK;
+}
+
+/**
+ * Reads a worker's `lastDispatchedAt` as a millisecond epoch value,
+ * defensively. Missing or unparseable values mean the worker has never been
+ * dispatched, which ranks it first within its tier.
+ */
+function readLastDispatchedMs(agent: AgentEntity): number {
+  const raw = (getAgentMetadata(agent) as { lastDispatchedAt?: unknown } | undefined)
+    ?.lastDispatchedAt;
+  if (typeof raw !== 'string' || raw === '') return NEVER_DISPATCHED_RANK;
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? NEVER_DISPATCHED_RANK : ms;
+}
+
+/**
+ * Orders idle ephemeral workers by dispatch preference (design D2, spec
+ * `worker-dispatch-selection`).
+ *
+ * Rank = `(tier ?? ∞, lastDispatchedAt ?? -∞, id)`:
+ *
+ * 1. **Ascending tier** — tier 1 is offered work first; a worker with no tier
+ *    ranks after every tiered worker.
+ * 2. **Least-recently-dispatched first** within a tier, so several accounts in
+ *    the same tier share the load. A worker that has never been dispatched
+ *    ranks before any worker that has.
+ * 3. **Agent ID** breaks remaining ties, keeping a cycle reproducible however
+ *    the registry happens to order agents.
+ *
+ * The daemon's assignment loop offers the highest-priority ready task to the
+ * best-ranked worker first, so this comparator alone decides who gets work.
+ *
+ * @param a - First worker
+ * @param b - Second worker
+ * @returns Negative when `a` is preferred over `b`, positive when `b` is
+ *          preferred, zero only for identical agent IDs
+ */
+export function compareWorkersByDispatchPreference(a: AgentEntity, b: AgentEntity): number {
+  const tierA = readDispatchTier(a);
+  const tierB = readDispatchTier(b);
+  if (tierA !== tierB) return tierA - tierB;
+
+  const lastA = readLastDispatchedMs(a);
+  const lastB = readLastDispatchedMs(b);
+  if (lastA !== lastB) return lastA - lastB;
+
+  if (a.id === b.id) return 0;
+  return a.id < b.id ? -1 : 1;
+}
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -898,7 +972,14 @@ export class DispatchDaemonImpl implements DispatchDaemon {
         availableWorkers.push(worker);
       }
 
-      // 3. For each available worker, try to assign a task
+      // 3. Order idle workers by dispatch preference (design D2): ascending
+      // tier, then least-recently-dispatched, then agent ID. The loop below
+      // offers the highest-priority ready task to the best-ranked worker
+      // first. Only ephemeral workers reach this point, so tiers never affect
+      // persistent workers, stewards or directors.
+      availableWorkers.sort(compareWorkersByDispatchPreference);
+
+      // 4. For each available worker, try to assign a task
       for (const worker of availableWorkers) {
         try {
           const assigned = await this.assignTaskToWorker(worker);
@@ -2967,6 +3048,19 @@ export class DispatchDaemonImpl implements DispatchDaemon {
         finalMetadata = updateOrchestratorTaskMeta(finalMetadata, metaUpdate);
       }
       await this.api.update<Task>(task.id, { metadata: finalMetadata });
+    }
+
+    // Record the dispatch time on the worker for least-recently-dispatched
+    // (LRU) tie-breaking in later cycles. Written through the registry so it
+    // lands in agent metadata and survives daemon and server restarts
+    // (design D3). Failure is non-fatal: the task is already dispatched, and
+    // without the timestamp selection merely degrades to registry order.
+    try {
+      await this.agentRegistry.updateAgentMetadata(workerId, {
+        lastDispatchedAt: createTimestamp(),
+      });
+    } catch (error) {
+      logger.warn(`Failed to record lastDispatchedAt for worker ${worker.name}:`, error);
     }
 
     // Notify pool service that agent was spawned
