@@ -189,6 +189,19 @@ export interface BaseAgentMetadata {
   readonly executablePath?: string;
   /** When true, this agent is parked and excluded from dispatch and scheduler triggers. Defaults to false (omitted). */
   readonly disabled?: boolean;
+  /**
+   * Dispatch tier for worker selection: a positive integer where 1 is the most
+   * preferred. A worker with no tier is treated as less preferred than any
+   * worker that has a tier. Only honoured for ephemeral workers; other roles
+   * ignore it. See the Worker Dispatch Tiers spec (design D1).
+   */
+  readonly tier?: number;
+  /**
+   * Timestamp of the last task dispatched to this agent. Used for
+   * least-recently-dispatched (LRU) tie-breaking among workers in the same
+   * tier, so it survives restarts (design D3).
+   */
+  readonly lastDispatchedAt?: Timestamp;
 }
 
 /**
@@ -385,6 +398,17 @@ export interface AgentFilter {
 // ============================================================================
 // Validation Utilities
 // ============================================================================
+
+/**
+ * Type guard to check if a value is a valid agent dispatch tier.
+ *
+ * A tier is a positive integer (1 = most preferred). `undefined` is not a
+ * valid tier value — it means the agent has no tier and is treated as the
+ * least preferred.
+ */
+export function isValidAgentTier(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
+}
 
 /**
  * Validates agent metadata structure

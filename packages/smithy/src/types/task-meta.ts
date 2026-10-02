@@ -208,6 +208,13 @@ export interface TaskSessionHistoryEntry {
   readonly startedAt: Timestamp;
   /** Timestamp when the session ended (undefined if still running) */
   readonly endedAt?: Timestamp;
+  /**
+   * Normalised executable (account key) this session ran with, recorded at
+   * spawn so rate-limit detection can attribute limits to the account that
+   * produced them. Absent on entries recorded before this field existed;
+   * readers fall back to the assignee's current account key.
+   */
+  readonly executable?: string;
 }
 
 // ============================================================================

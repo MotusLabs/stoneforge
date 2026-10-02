@@ -3,11 +3,12 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import type { ElementId } from '@stoneforge/core';
+import type { ElementId, EntityId } from '@stoneforge/core';
 import {
   type OrchestratorTaskMeta,
   type MergeStatus,
   type TestResult,
+  type TaskSessionHistoryEntry,
   MergeStatusValues,
   isMergeStatus,
   isTestResult,
@@ -15,6 +16,8 @@ import {
   setOrchestratorTaskMeta,
   updateOrchestratorTaskMeta,
   isOrchestratorTaskMeta,
+  appendTaskSessionHistory,
+  closeTaskSessionHistory,
   generateBranchName,
   generateWorktreePath,
   generateSessionBranchName,
@@ -225,6 +228,70 @@ describe('isOrchestratorTaskMeta', () => {
     expect(isOrchestratorTaskMeta({ worktree: 123 })).toBe(false);
     expect(isOrchestratorTaskMeta({ sessionId: 123 })).toBe(false);
     expect(isOrchestratorTaskMeta({ mergeStatus: 'invalid' })).toBe(false);
+  });
+});
+
+describe('Session History utilities', () => {
+  const baseEntry: TaskSessionHistoryEntry = {
+    sessionId: 'session-1',
+    agentId: 'el-worker1' as EntityId,
+    agentName: 'e-worker-1',
+    agentRole: 'worker',
+    startedAt: '2026-10-03T10:00:00.000Z',
+  };
+
+  test('appendTaskSessionHistory preserves the executable field', () => {
+    const result = appendTaskSessionHistory(undefined, {
+      ...baseEntry,
+      executable: '/usr/local/bin/claude-glm',
+    });
+
+    const history = getOrchestratorTaskMeta(result)?.sessionHistory;
+    expect(history).toHaveLength(1);
+    expect(history?.[0].executable).toBe('/usr/local/bin/claude-glm');
+  });
+
+  test('appendTaskSessionHistory works without an executable (field is optional)', () => {
+    const result = appendTaskSessionHistory(undefined, baseEntry);
+
+    const history = getOrchestratorTaskMeta(result)?.sessionHistory;
+    expect(history).toHaveLength(1);
+    expect(history?.[0].executable).toBeUndefined();
+  });
+
+  test('closeTaskSessionHistory preserves the executable field', () => {
+    const withEntry = appendTaskSessionHistory(undefined, {
+      ...baseEntry,
+      executable: 'claude-glm',
+    });
+
+    const closed = closeTaskSessionHistory(withEntry, 'session-1', '2026-10-03T11:00:00.000Z');
+
+    const history = getOrchestratorTaskMeta(closed)?.sessionHistory;
+    expect(history?.[0].endedAt).toBe('2026-10-03T11:00:00.000Z');
+    expect(history?.[0].executable).toBe('claude-glm');
+  });
+
+  test('older entries without executable still parse through append and close', () => {
+    // A legacy task whose history was recorded before the field existed.
+    const legacy = appendTaskSessionHistory(undefined, baseEntry);
+
+    const appended = appendTaskSessionHistory(legacy, {
+      ...baseEntry,
+      sessionId: 'session-2',
+      executable: 'claude-glm',
+    });
+
+    const closed = closeTaskSessionHistory(appended, 'session-1', '2026-10-03T11:00:00.000Z');
+
+    const history = getOrchestratorTaskMeta(closed)?.sessionHistory;
+    expect(history).toHaveLength(2);
+    // Legacy entry survives intact with executable still absent.
+    expect(history?.[0]).toEqual({ ...baseEntry, endedAt: '2026-10-03T11:00:00.000Z' });
+    expect(history?.[0].executable).toBeUndefined();
+    // New entry keeps its executable.
+    expect(history?.[1].sessionId).toBe('session-2');
+    expect(history?.[1].executable).toBe('claude-glm');
   });
 });
 

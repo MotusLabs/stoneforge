@@ -23,6 +23,7 @@ import {
   isDirectorMetadata,
   isWorkerMetadata,
   isStewardMetadata,
+  isValidAgentTier,
   validateAgentMetadata,
 } from './agent.js';
 
@@ -170,6 +171,44 @@ describe('disabled flag', () => {
   it('treats omitted disabled as enabled', () => {
     const director: DirectorMetadata = { agentRole: 'director', sessionStatus: 'idle' };
     expect(director.disabled).toBeUndefined();
+  });
+});
+
+describe('dispatch tier', () => {
+  it('accepts positive integers', () => {
+    expect(isValidAgentTier(1)).toBe(true);
+    expect(isValidAgentTier(3)).toBe(true);
+  });
+
+  it('rejects zero, negative, fractional and string values', () => {
+    expect(isValidAgentTier(0)).toBe(false);
+    expect(isValidAgentTier(-1)).toBe(false);
+    expect(isValidAgentTier(1.5)).toBe(false);
+    expect(isValidAgentTier('2')).toBe(false);
+  });
+
+  it('rejects undefined, null and non-finite numbers', () => {
+    expect(isValidAgentTier(undefined)).toBe(false);
+    expect(isValidAgentTier(null)).toBe(false);
+    expect(isValidAgentTier(NaN)).toBe(false);
+    expect(isValidAgentTier(Infinity)).toBe(false);
+  });
+
+  it('accepts tier and lastDispatchedAt on worker metadata', () => {
+    const worker: WorkerMetadata = {
+      agentRole: 'worker',
+      workerMode: 'ephemeral',
+      tier: 2,
+      lastDispatchedAt: '2026-10-03T10:00:00.000Z',
+    };
+    expect(worker.tier).toBe(2);
+    expect(worker.lastDispatchedAt).toBe('2026-10-03T10:00:00.000Z');
+  });
+
+  it('treats omitted tier and lastDispatchedAt as absent', () => {
+    const worker: WorkerMetadata = { agentRole: 'worker', workerMode: 'ephemeral' };
+    expect(worker.tier).toBeUndefined();
+    expect(worker.lastDispatchedAt).toBeUndefined();
   });
 });
 

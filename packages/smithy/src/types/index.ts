@@ -41,6 +41,7 @@ export {
   // Query types
   type AgentFilter,
   // Validation
+  isValidAgentTier,
   validateAgentMetadata,
 } from './agent.js';
 
