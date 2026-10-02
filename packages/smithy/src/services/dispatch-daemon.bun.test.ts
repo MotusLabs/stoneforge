@@ -42,7 +42,7 @@ import {
   RATE_LIMIT_SESSION_GAP_MS,
 } from './dispatch-daemon.js';
 import type { SettingsService, ServerAgentDefaults } from './settings-service.js';
-import { clearExecutableResolutionCache } from '../utils/account-key.js';
+import { clearExecutableResolutionCache, normalizeExecutableKey } from '../utils/account-key.js';
 import { createAgentRegistry, getAgentMetadata, type AgentRegistry, type AgentEntity } from './agent-registry.js';
 import { createTaskAssignmentService, type TaskAssignmentService } from './task-assignment-service.js';
 import { createDispatchService, type DispatchService } from './dispatch-service.js';
@@ -2172,19 +2172,18 @@ describe('DispatchDaemon Rate Limit Integration', () => {
     expect(status.isPaused).toBe(true);
   });
 
-  test('handleRateLimitDetected marks ALL chain entries even for executable not in chain', () => {
-    // When a fallback chain is configured, any rate limit event should mark all
-    // chain entries (plan-level rate limits share the same API plan). The reported
-    // executable may be a resolved path that doesn't match chain entry names.
+  test('handleRateLimitDetected marks ONLY the reported key when it is not a chain entry', () => {
+    // A limit reported for an executable outside the fallback chain (for example
+    // a worker's own wrapper) belongs to that account only. Widening it to the
+    // chain would block healthy workers on other accounts.
     const resetsAt = new Date(Date.now() + 20 * 60 * 1000);
     daemon.handleRateLimitDetected('some-other-executable', resetsAt);
 
     const status = daemon.getRateLimitStatus();
-    // All chain entries + the raw executable should be marked
-    expect(status.limits).toHaveLength(3); // 'claude2', 'claude', 'some-other-executable'
-    const executables = status.limits.map(l => l.executable).sort();
-    expect(executables).toEqual(['claude', 'claude2', 'some-other-executable']);
-    expect(status.isPaused).toBe(true);
+    // Only the reported executable is marked — the chain entries stay available
+    expect(status.limits).toHaveLength(1);
+    expect(status.limits[0].executable).toBe('some-other-executable');
+    expect(status.isPaused).toBe(false);
   });
 
   // --------------------------------------------------------------------------
@@ -2387,6 +2386,156 @@ describe('DispatchDaemon Rate Limit Integration', () => {
 
     await noSettingsDaemon.stop();
     daemon = noSettingsDaemon;
+  });
+});
+
+// ============================================================================
+// Rate limit attribution to the producing account (dispatch tiers spec)
+// ============================================================================
+
+describe('Rate limit attribution to the producing account', () => {
+  let api: QuarryAPI;
+  let inboxService: InboxService;
+  let agentRegistry: AgentRegistry;
+  let taskAssignment: TaskAssignmentService;
+  let dispatchService: DispatchService;
+  let sessionManager: SessionManager;
+  let worktreeManager: WorktreeManager;
+  let stewardScheduler: StewardScheduler;
+  let settingsService: SettingsService;
+  let daemon: DispatchDaemon;
+  let testDbPath: string;
+  let systemEntity: EntityId;
+
+  beforeEach(async () => {
+    pinPathForRateLimitTests();
+    testDbPath = `/tmp/dispatch-daemon-rl-attribution-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const storage = createStorage({ path: testDbPath, create: true });
+    initializeSchema(storage);
+
+    api = createQuarryAPI(storage);
+    inboxService = createInboxService(storage);
+    agentRegistry = createAgentRegistry(api);
+    taskAssignment = createTaskAssignmentService(api);
+    dispatchService = createDispatchService(api, taskAssignment, agentRegistry);
+    sessionManager = createMockSessionManager();
+    worktreeManager = createMockWorktreeManager();
+    stewardScheduler = createMockStewardScheduler();
+    // Chain of [claude, claude-alt]: one plan, several binaries. Workers with
+    // their own wrapper executable (claude-glm) are separate accounts.
+    settingsService = createMockSettingsService({
+      fallbackChain: ['claude', 'claude-alt'],
+    });
+
+    const { createEntity, EntityTypeValue } = await import('@stoneforge/core');
+    const entity = await createEntity({
+      name: 'test-system-rl-attribution',
+      entityType: EntityTypeValue.SYSTEM,
+      createdBy: 'system:test' as EntityId,
+    });
+    const saved = await api.create(entity as unknown as Record<string, unknown> & { createdBy: EntityId });
+    systemEntity = saved.id as unknown as EntityId;
+
+    const config: DispatchDaemonConfig = {
+      ensureTargetBranchExists: mockEnsureTargetBranchExists,
+      pollIntervalMs: 100,
+      workerAvailabilityPollEnabled: true,
+      inboxPollEnabled: false,
+      stewardTriggerPollEnabled: false,
+      workflowTaskPollEnabled: false,
+    };
+
+    daemon = new DispatchDaemonImpl(
+      api,
+      agentRegistry,
+      sessionManager,
+      dispatchService,
+      worktreeManager,
+      taskAssignment,
+      stewardScheduler,
+      inboxService,
+      config,
+      undefined, // poolService
+      settingsService
+    );
+  });
+
+  afterEach(async () => {
+    await daemon.stop();
+    if (fs.existsSync(testDbPath)) {
+      fs.unlinkSync(testDbPath);
+    }
+    restorePathAfterRateLimitTests();
+  });
+
+  async function createTestWorker(
+    name: string,
+    options?: { executablePath?: string }
+  ): Promise<AgentEntity> {
+    return agentRegistry.registerWorker({
+      name,
+      workerMode: 'ephemeral',
+      createdBy: systemEntity,
+      maxConcurrentTasks: 1,
+      executablePath: options?.executablePath,
+    });
+  }
+
+  async function createTestTask(title: string): Promise<Task> {
+    const task = await createTask({
+      title,
+      createdBy: systemEntity,
+      status: TaskStatus.OPEN,
+    });
+    return api.create(task as unknown as Record<string, unknown> & { createdBy: EntityId }) as Promise<Task>;
+  }
+
+  test('explicit limit on a wrapper marks only the wrapper account, not the chain', () => {
+    // Scenario "Explicit limit on a wrapper": a session started by a worker on
+    // `claude-glm` emits a recognised limit message. server/services.ts
+    // normalises the session's executablePath and forwards it here. Only the
+    // claude-glm account may be marked — the chain entries belong to other
+    // accounts and must stay dispatchable.
+    const resetsAt = new Date(Date.now() + 20 * 60 * 1000);
+    daemon.handleRateLimitDetected('claude-glm', resetsAt);
+
+    const status = daemon.getRateLimitStatus();
+    expect(status.limits).toHaveLength(1);
+    expect(status.limits[0].executable).toBe('claude-glm');
+    expect(status.limits[0].resetsAt).toBe(resetsAt.toISOString());
+    // The fallback chain ([claude, claude-alt]) is untouched → not paused
+    expect(status.isPaused).toBe(false);
+  });
+
+  test('explicit limit on a chain entry marks both chain entries', () => {
+    // The other half of the pair: a limit on `claude` (itself a chain entry)
+    // is plan-level and marks the whole chain.
+    const resetsAt = new Date(Date.now() + 20 * 60 * 1000);
+    daemon.handleRateLimitDetected('claude', resetsAt);
+
+    const status = daemon.getRateLimitStatus();
+    const executables = status.limits.map(l => l.executable).sort();
+    expect(executables).toEqual(['claude', 'claude-alt']);
+    expect(status.isPaused).toBe(true);
+  });
+
+  test('workers on other accounts remain dispatchable after a wrapper limit', async () => {
+    // Scenario "Explicit limit on a wrapper" (dispatchability half): a default
+    // worker (chain account) and a wrapper worker both exist; after claude-glm
+    // is limited, the ready task still goes to the default worker.
+    await createTestWorker('wrapper-e3', { executablePath: 'claude-glm' });
+    const defaultWorker = await createTestWorker('default-e1');
+    expect(defaultWorker.id).toBeTruthy();
+    await createTestTask('Task while wrapper account is limited');
+
+    daemon.handleRateLimitDetected('claude-glm', new Date(Date.now() + 60 * 60 * 1000));
+
+    const result = await daemon.pollWorkerAvailability();
+
+    // The task is dispatched — the limited wrapper account did not pause dispatch
+    expect(result.processed).toBe(1);
+    expect(sessionManager.startSession).toHaveBeenCalled();
+    expect(daemon.getRateLimitStatus().isPaused).toBe(false);
   });
 });
 
@@ -4204,10 +4353,11 @@ describe('runPollCycle - allLimited with empty fallback chain', () => {
     customDaemon.stop();
   });
 
-  test('reports isPaused when rate limit key differs from fallback chain entry names', () => {
-    // When a rate_limited event reports a resolved path (e.g., '/usr/local/bin/claude')
-    // that doesn't match fallback chain entry names, handleRateLimitDetected should
-    // still mark all chain entries as limited.
+  test('widens to the chain only when the reported key matches a chain entry after normalisation', () => {
+    // A session spawned from the chain reports the executable it ran with.
+    // Normalisation reconciles spellings: a bare chain entry and its resolved
+    // PATH location are the same account, so a limit reported for either
+    // spelling still marks the whole chain ("one plan, several binaries").
     const chainDaemon = new DispatchDaemonImpl(
       api,
       agentRegistry,
@@ -4230,16 +4380,49 @@ describe('runPollCycle - allLimited with empty fallback chain', () => {
       })
     );
 
-    // Rate limit reported with a resolved path that doesn't match chain entry names
-    chainDaemon.handleRateLimitDetected('/usr/local/bin/claude', new Date(Date.now() + 60_000));
+    // Report the limit under the chain entry's normalised (resolved-path)
+    // spelling — it is still recognised as the chain entry's account.
+    const resolvedClaude = normalizeExecutableKey('claude');
+    chainDaemon.handleRateLimitDetected(resolvedClaude, new Date(Date.now() + 60_000));
 
-    const status = chainDaemon.getRateLimitStatus();
+    let status = chainDaemon.getRateLimitStatus();
     // All chain entries should be marked as limited (plan-level rate limit)
     expect(status.isPaused).toBe(true);
     expect(status.limits.length).toBeGreaterThanOrEqual(2);
 
+    // A path that is NOT a spelling of any chain entry is a different
+    // account: it is marked on its own and does not pause chain dispatch.
+    const wrapperDaemon = new DispatchDaemonImpl(
+      api,
+      agentRegistry,
+      sessionManager,
+      dispatchService,
+      worktreeManager,
+      taskAssignment,
+      stewardScheduler,
+      inboxService,
+      {
+        pollIntervalMs: 100,
+        workerAvailabilityPollEnabled: true,
+        inboxPollEnabled: false,
+        stewardTriggerPollEnabled: false,
+        workflowTaskPollEnabled: false,
+      },
+      undefined,
+      createMockSettingsService({
+        fallbackChain: ['claude2', 'claude'],
+      })
+    );
+    wrapperDaemon.handleRateLimitDetected('/opt/wrappers/claude-glm', new Date(Date.now() + 60_000));
+
+    status = wrapperDaemon.getRateLimitStatus();
+    expect(status.limits).toHaveLength(1);
+    expect(status.limits[0].executable).toBe('/opt/wrappers/claude-glm');
+    expect(status.isPaused).toBe(false);
+
     // Cleanup
     chainDaemon.stop();
+    wrapperDaemon.stop();
   });
 });
 
@@ -4947,6 +5130,76 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
       expect(new Date(limit.resetsAt).getTime()).toBeGreaterThan(Date.now());
     }
   });
+
+  test('heuristic limit on a wrapper marks the wrapper account, not claude', async () => {
+    // Scenario "Heuristic limit on a wrapper": a worker whose executablePath is
+    // a wrapper (claude-glm) has its recovered session exit rapidly with no
+    // assistant output. The suspected rate limit must be charged to the
+    // claude-glm account only — never to the hard-coded 'claude' default or
+    // an unrelated fallback chain. Uses a daemon with no fallback chain so the
+    // session runs the worker's own executable.
+    const worker = await agentRegistry.registerWorker({
+      name: 'rapid-exit-wrapper-worker',
+      workerMode: 'ephemeral',
+      createdBy: systemEntity,
+      maxConcurrentTasks: 1,
+      executablePath: 'claude-glm',
+    });
+    const workerId = worker.id as unknown as EntityId;
+    const task = await createAssignedTask('Task with wrapper rapid exit', workerId, {
+      worktree: '/worktrees/rapid-exit-wrapper-worker/task',
+      resumeCount: 0,
+      // No sessionId — forces the fresh-spawn path
+    });
+
+    const wrapperDaemon = new DispatchDaemonImpl(
+      api,
+      agentRegistry,
+      sessionManager,
+      dispatchService,
+      worktreeManager,
+      taskAssignment,
+      stewardScheduler,
+      inboxService,
+      {
+        pollIntervalMs: 100,
+        orphanRecoveryEnabled: true,
+        maxResumeAttemptsBeforeRecovery: 5,
+      },
+      undefined // no settingsService → no fallback chain
+    );
+
+    try {
+      // No rate limits before recovery
+      expect(wrapperDaemon.getRateLimitStatus().limits).toHaveLength(0);
+
+      // Trigger orphan recovery (fresh spawn on the worker's own executable)
+      const result = await wrapperDaemon.recoverOrphanedAssignments();
+      expect(result.processed).toBe(1);
+
+      // The session-history entry records the account the session runs on
+      const updatedTask = await api.get<Task>(task.id);
+      const meta = getOrchestratorTaskMeta(updatedTask!.metadata as Record<string, unknown>);
+      const wrapperKey = normalizeExecutableKey('claude-glm');
+      expect(meta?.sessionHistory?.length).toBeGreaterThan(0);
+      expect(meta!.sessionHistory![meta!.sessionHistory!.length - 1].executable).toBe(wrapperKey);
+
+      // Simulate silent rapid exit (no assistant events)
+      const events = (sessionManager as ReturnType<typeof createMockSessionManagerWithEvents>)._lastEvents!;
+      events.emit('exit', 1, null);
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Only the wrapper account is limited — 'claude' is NOT marked
+      const status = wrapperDaemon.getRateLimitStatus();
+      const limitedKeys = status.limits.map(l => l.executable);
+      expect(limitedKeys).toEqual([wrapperKey]);
+      expect(limitedKeys).not.toContain(normalizeExecutableKey('claude'));
+      // No fallback chain → any active limit pauses dispatch
+      expect(status.isPaused).toBe(true);
+    } finally {
+      await wrapperDaemon.stop();
+    }
+  });
 });
 
 // ============================================================================
@@ -5225,6 +5478,7 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     title: string,
     workerId: EntityId,
     sessionCount: number = RATE_LIMIT_SESSION_PATTERN_COUNT,
+    executable?: string,
   ): Promise<Task> {
     const task = await createTask({
       title,
@@ -5253,6 +5507,7 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
         agentRole: 'worker',
         startedAt: new Date(now - (sessionCount - i) * 30_000).toISOString() as import('@stoneforge/core').Timestamp, // 30s apart
         // No endedAt — session exited without proper completion
+        ...(executable ? { executable } : {}),
       };
       metadata = appendTaskSessionHistory(metadata, entry);
     }
@@ -5478,6 +5733,55 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     const expectedResetTime = Date.now() + RAPID_EXIT_FALLBACK_RESET_MS;
     // Allow 10 seconds of tolerance
     expect(Math.abs(resetTime.getTime() - expectedResetTime)).toBeLessThan(10_000);
+  });
+
+  test('orphan-recovery pattern attributes the limit to the account the sessions ran on', async () => {
+    // Scenario "Orphan-recovery pattern": the task's last sessions show the
+    // repeated rapid-exit pattern and they ran on the claude-glm account.
+    // Only that account is marked — not 'claude' and not a fallback chain.
+    const worker = await createTestWorker('rl-pattern-wrapper-worker');
+    const workerId = worker.id as unknown as EntityId;
+    await createTestRecoverySteward('recovery-steward-rl-wrapper');
+
+    // Rapid-exit sessions recorded with the wrapper account key
+    await createTaskWithRateLimitPattern('Rate limited wrapper task', workerId, RATE_LIMIT_SESSION_PATTERN_COUNT, 'claude-glm');
+
+    const result = await daemon.recoverOrphanedAssignments();
+
+    // Recovery steward should NOT have been spawned
+    expect(result.processed).toBe(0);
+    expect(sessionManager.startSession).not.toHaveBeenCalled();
+
+    // Only the account the rapid-exit sessions ran on is limited
+    const status = daemon.getRateLimitStatus();
+    const limitedKeys = status.limits.map(l => l.executable);
+    expect(limitedKeys).toEqual(['claude-glm']);
+    expect(limitedKeys).not.toContain('claude');
+  });
+
+  test('orphan-recovery pattern falls back to the assignee account for legacy entries', async () => {
+    // Session-history entries recorded before the per-session executable
+    // existed have no `executable` field. Attribution falls back to the
+    // assignee's current account key.
+    const worker = await agentRegistry.registerWorker({
+      name: 'rl-pattern-legacy-wrapper',
+      workerMode: 'ephemeral',
+      createdBy: systemEntity,
+      maxConcurrentTasks: 1,
+      executablePath: 'claude-glm',
+    });
+    const workerId = worker.id as unknown as EntityId;
+    await createTestRecoverySteward('recovery-steward-rl-legacy');
+
+    // Legacy entries: rapid exits WITHOUT an executable field
+    await createTaskWithRateLimitPattern('Rate limited legacy task', workerId);
+
+    const result = await daemon.recoverOrphanedAssignments();
+    expect(result.processed).toBe(0);
+
+    // The assignee's account (claude-glm) is limited via the fallback
+    const status = daemon.getRateLimitStatus();
+    expect(status.limits.map(l => l.executable)).toEqual(['claude-glm']);
   });
 
   test('rate limit pattern detection prevents repeated log spam on subsequent cycles', async () => {

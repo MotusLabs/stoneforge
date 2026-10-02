@@ -39,6 +39,7 @@ import { AUTO_ALLOWED_TOOLS, AUTO_ALLOWED_SF_COMMANDS } from '../permissions/typ
 import { detectTargetBranch, ensureTargetBranchExists } from '../git/merge.js';
 import { createLogger } from '../utils/logger.js';
 import { isRateLimitMessage, parseRateLimitResetTime, getFallbackResetTime } from '../utils/rate-limit-parser.js';
+import { normalizeExecutableKey, resolveAccountKey } from '../utils/account-key.js';
 
 import type { AgentRegistry, AgentEntity } from './agent-registry.js';
 import { getAgentMetadata, isAgentDisabled } from './agent-registry.js';
@@ -742,31 +743,29 @@ export class DispatchDaemonImpl implements DispatchDaemon {
       effectiveResetsAt = resetsAt;
     }
 
-    // When a fallback chain is configured, rate limits are plan-level: hitting
-    // a limit on any executable in the chain means ALL executables share the
-    // same plan and are equally limited. Mark every entry in the chain to
-    // prevent resolveExecutableWithFallback() from thinking other executables
-    // in the chain are still available.
+    // A fallback chain expresses "one plan, several binaries": when the
+    // reported key is itself one of the chain's (normalised) entries, the
+    // whole plan is limited, so every entry is marked to keep
+    // resolveExecutableWithFallback() from treating sibling entries as
+    // available. A limit reported for an executable OUTSIDE the chain (for
+    // example a worker's own wrapper such as 'claude-glm') is attributed to
+    // that account only — widening it would block healthy workers on other
+    // accounts (spec: limit attribution to the producing account).
     const fallbackChain = this.settingsService?.getAgentDefaults().fallbackChain ?? [];
-    if (fallbackChain.length > 0) {
-      // Plan-level rate limits: hitting a limit on any executable means the
-      // entire API plan is limited. Mark every chain entry regardless of whether
-      // the reported executable exactly matches a chain entry name (the session
-      // may report a resolved path like '/usr/local/bin/claude' rather than the
-      // chain entry name 'claude').
+    const reportedKey = normalizeExecutableKey(executable);
+    const isChainEntry = fallbackChain.some(
+      (chainExecutable) => normalizeExecutableKey(chainExecutable) === reportedKey
+    );
+
+    if (isChainEntry) {
       for (const chainExecutable of fallbackChain) {
         this.rateLimitTracker.markLimited(chainExecutable, effectiveResetsAt);
       }
-      // Also mark the raw executable path if it differs from chain entry names,
-      // so that direct isLimited() checks against the raw path also return true.
-      if (!fallbackChain.includes(executable)) {
-        this.rateLimitTracker.markLimited(executable, effectiveResetsAt);
-      }
       logger.info(
-        `Rate limit detected for executable '${executable}', marked all ${fallbackChain.length} fallback chain entries as limited until ${effectiveResetsAt.toISOString()}`
+        `Rate limit detected for chain executable '${executable}', marked all ${fallbackChain.length} fallback chain entries as limited until ${effectiveResetsAt.toISOString()}`
       );
     } else {
-      this.rateLimitTracker.markLimited(executable, effectiveResetsAt);
+      this.rateLimitTracker.markLimited(reportedKey, effectiveResetsAt);
       logger.info(
         `Rate limit detected for executable '${executable}', resets at ${effectiveResetsAt.toISOString()}`
       );
@@ -844,7 +843,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
       this.rateLimitSleepTimer = undefined;
     }
 
-    // Record wake timestamp so hasRecentRateLimitPattern() can ignore pre-wake history
+    // Record wake timestamp so getRateLimitPatternAccounts() can ignore pre-wake history
     this.lastWakeAt = Date.now();
 
     logger.info('Manual wake: cleared all rate limits, dispatch will resume on next poll cycle');
@@ -2139,6 +2138,33 @@ export class DispatchDaemonImpl implements DispatchDaemon {
   }
 
   /**
+   * Computes the normalised account key for a session about to be spawned,
+   * for recording on the task's session-history entry.
+   *
+   * When the daemon resolved a fallback-chain override, that executable is
+   * what the session actually runs, so it is the account the session bills
+   * to. Without an override the session runs the agent's effective
+   * executable (agent `executablePath` → workspace default → provider
+   * default), which `resolveAccountKey` derives and normalises.
+   *
+   * Rate-limit heuristics read this value back from the session-history
+   * entries so a detected limit is charged to the account that produced it.
+   *
+   * @param agent - The agent the session is spawned for
+   * @param executableOverride - The override from `resolveExecutableWithFallback`,
+   *                             or undefined when the agent's own executable is used
+   * @returns The normalised account key the session runs on
+   */
+  private resolveSessionAccountKey(
+    agent: AgentEntity,
+    executableOverride: string | undefined
+  ): string {
+    return executableOverride
+      ? normalizeExecutableKey(executableOverride)
+      : resolveAccountKey(agent, this.settingsService);
+  }
+
+  /**
    * Resolves the executable path for a session, checking rate limits and applying
    * fallback selection when the primary executable is rate-limited.
    *
@@ -2330,6 +2356,10 @@ export class DispatchDaemonImpl implements DispatchDaemon {
           this.config.onSessionStarted(session, events, workerId, `[resumed session for task ${task.id}]`);
         }
 
+        // Account key the resumed session runs on (resumes use the agent's
+        // own executable — no fallback-chain override)
+        const sessionAccountKey = this.resolveSessionAccountKey(worker, undefined);
+
         // Record session history entry for recovered worker session
         const resumeHistoryEntry: TaskSessionHistoryEntry = {
           sessionId: session.id,
@@ -2338,6 +2368,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
           agentName: worker.name,
           agentRole: 'worker',
           startedAt: createTimestamp(),
+          executable: sessionAccountKey,
         };
         const updatedTask = await this.api.get<Task>(task.id);
         if (updatedTask) {
@@ -2350,7 +2381,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
 
         // Attach rapid-exit detector to catch silent rate limits
         if (events) {
-          this.attachRapidExitDetector(events, task, worker);
+          this.attachRapidExitDetector(events, task, worker, sessionAccountKey);
         }
 
         this.emitter.emit('agent:spawned', workerId, worktreePath);
@@ -2396,6 +2427,10 @@ export class DispatchDaemonImpl implements DispatchDaemon {
       this.config.onSessionStarted(session, events, workerId, initialPrompt);
     }
 
+    // Account key the fresh session actually runs on (includes any
+    // fallback-chain override resolved above)
+    const sessionAccountKey = this.resolveSessionAccountKey(worker, orphanExecutableOverride);
+
     // Record session history entry and new sessionId for fresh spawned worker session
     const freshSpawnHistoryEntry: TaskSessionHistoryEntry = {
       sessionId: session.id,
@@ -2404,6 +2439,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
       agentName: worker.name,
       agentRole: 'worker',
       startedAt: createTimestamp(),
+      executable: sessionAccountKey,
     };
     const taskAfterFreshSpawn = await this.api.get<Task>(task.id);
     if (taskAfterFreshSpawn) {
@@ -2421,7 +2457,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
 
     // Attach rapid-exit detector to catch silent rate limits
     if (events) {
-      this.attachRapidExitDetector(events, task, worker);
+      this.attachRapidExitDetector(events, task, worker, sessionAccountKey);
     }
 
     this.emitter.emit('agent:spawned', workerId, worktreePath);
@@ -2447,15 +2483,26 @@ export class DispatchDaemonImpl implements DispatchDaemon {
    * In both cases:
    * - The resumeCount is rolled back (decremented)
    * - A warning is logged
-   * - A rate limit reset time is applied to the rate limit tracker
+   * - A rate limit reset time is applied to the rate limit tracker, attributed
+   *   to `sessionExecutable` — the account key the session actually ran on
+   *   (the same value recorded on its session-history entry). The limit is
+   *   never charged to a fixed default executable or to unrelated accounts;
+   *   `handleRateLimitDetected` widens it to the fallback chain only when the
+   *   key is itself a chain entry.
    *
    * This prevents the resume budget from being burned by sessions that never
    * actually ran or that were immediately rate-limited.
+   *
+   * @param events - The session's event emitter
+   * @param task - The task the session was recovered for
+   * @param worker - The worker the session belongs to
+   * @param sessionExecutable - Normalised account key the session runs on
    */
   private attachRapidExitDetector(
     events: import('events').EventEmitter,
     task: Task,
-    worker: AgentEntity
+    worker: AgentEntity,
+    sessionExecutable: string
   ): void {
     const startTime = Date.now();
     let hasAssistantEvent = false;
@@ -2531,17 +2578,12 @@ export class DispatchDaemonImpl implements DispatchDaemon {
         resetTime = new Date(Date.now() + RAPID_EXIT_FALLBACK_RESET_MS);
       }
 
-      // Apply the rate limit to all executables in the fallback chain
-      const fallbackChain = this.settingsService?.getAgentDefaults().fallbackChain ?? [];
-
-      if (fallbackChain.length > 0) {
-        for (const executable of fallbackChain) {
-          this.handleRateLimitDetected(executable, resetTime);
-        }
-      } else {
-        // No fallback chain — apply to the default provider
-        this.handleRateLimitDetected('claude', resetTime);
-      }
+      // Attribute the limit to the account this session actually ran on
+      // (recorded on its session-history entry at spawn). The hard-coded
+      // default and unconditional chain marking are gone: a wrapper account
+      // is limited on its own, and chain widening happens only inside
+      // handleRateLimitDetected when the key is itself a chain entry.
+      this.handleRateLimitDetected(sessionExecutable, resetTime);
 
       logger.info(
         `Applied rate limit (${reason}) for task ${task.id}, resets at ${resetTime.toISOString()}`
@@ -2553,24 +2595,34 @@ export class DispatchDaemonImpl implements DispatchDaemon {
   }
 
   /**
-   * Checks a task's session history for a rate limit pattern.
+   * Checks a task's session history for a rate limit pattern and returns the
+   * accounts that produced it.
    *
-   * Returns true if the last N sessions (RATE_LIMIT_SESSION_PATTERN_COUNT)
-   * all appear to be rapid exits — sessions that started in quick succession
-   * (within RATE_LIMIT_SESSION_GAP_MS of each other) and none completed
-   * properly (no endedAt set). This pattern indicates the task is stuck due
-   * to rate limiting rather than a genuine bug requiring recovery steward
+   * The last N sessions (RATE_LIMIT_SESSION_PATTERN_COUNT) all appear to be
+   * rapid exits — sessions that started in quick succession (within
+   * RATE_LIMIT_SESSION_GAP_MS of each other) and none completed properly (no
+   * endedAt set). This pattern indicates the task is stuck due to rate
+   * limiting rather than a genuine bug requiring recovery steward
    * intervention.
    *
+   * The returned keys are the `executable` recorded on the pattern's
+   * session-history entries — the accounts those sessions actually ran on —
+   * so the recorded limit is charged to the producing account only. Entries
+   * from before the per-session executable existed fall back to the
+   * assignee's current account key (`resolveAccountKey`).
+   *
    * @param taskMeta - The task's orchestrator metadata
-   * @returns true if the session history shows a rate limit pattern
+   * @param assignee - The worker the task is assigned to (fallback attribution)
+   * @returns The distinct account keys behind the pattern, or undefined when
+   *          the history does not show a rate limit pattern
    */
-  private hasRecentRateLimitPattern(
-    taskMeta: import('../types/task-meta.js').OrchestratorTaskMeta | undefined
-  ): boolean {
+  private getRateLimitPatternAccounts(
+    taskMeta: import('../types/task-meta.js').OrchestratorTaskMeta | undefined,
+    assignee: AgentEntity
+  ): string[] | undefined {
     const sessionHistory = taskMeta?.sessionHistory;
     if (!sessionHistory || sessionHistory.length < RATE_LIMIT_SESSION_PATTERN_COUNT) {
-      return false;
+      return undefined;
     }
 
     // Get the last N entries
@@ -2579,7 +2631,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
     // All recent sessions must lack a proper endedAt (i.e., the session exited
     // without the agent calling task complete or handoff)
     const allLackEndedAt = recentSessions.every(entry => !entry.endedAt);
-    if (!allLackEndedAt) return false;
+    if (!allLackEndedAt) return undefined;
 
     // Check that consecutive sessions started close together (rapid retries)
     for (let i = 1; i < recentSessions.length; i++) {
@@ -2587,7 +2639,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
       const currStart = new Date(recentSessions[i].startedAt).getTime();
       const gap = currStart - prevStart;
       if (gap < 0 || gap > RATE_LIMIT_SESSION_GAP_MS) {
-        return false;
+        return undefined;
       }
     }
 
@@ -2597,12 +2649,18 @@ export class DispatchDaemonImpl implements DispatchDaemon {
     if (this.lastWakeAt) {
       const mostRecentStart = new Date(recentSessions[recentSessions.length - 1].startedAt).getTime();
       if (mostRecentStart < this.lastWakeAt) {
-        return false; // Pattern predates last wake — ignore
+        return undefined; // Pattern predates last wake — ignore
       }
     }
 
-    // All recent sessions were rapid retries without proper completion
-    return true;
+    // All recent sessions were rapid retries without proper completion.
+    // Attribute the pattern to the accounts those sessions ran on.
+    const assigneeKey = resolveAccountKey(assignee, this.settingsService);
+    const accounts = new Set<string>();
+    for (const entry of recentSessions) {
+      accounts.add(entry.executable ?? assigneeKey);
+    }
+    return [...accounts];
   }
 
   /**
@@ -2671,6 +2729,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
           agentName: steward.name,
           agentRole: 'steward',
           startedAt: createTimestamp(),
+          executable: this.resolveSessionAccountKey(steward, undefined),
         };
         const updatedTask = await this.api.get<Task>(task.id);
         if (updatedTask) {
@@ -2865,6 +2924,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
         agentName: worker.name,
         agentRole: 'worker',
         startedAt: createTimestamp(),
+        executable: this.resolveSessionAccountKey(worker, executableOverride),
       };
       const metadataWithHistory = appendTaskSessionHistory(
         updatedTask.metadata as Record<string, unknown> | undefined,
@@ -3347,6 +3407,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
       agentName: steward.name,
       agentRole: 'steward',
       startedAt: createTimestamp(),
+      executable: this.resolveSessionAccountKey(steward, stewardExecutableOverride),
     };
     // First append session history, then apply steward assignment metadata
     const metadataWithHistory = appendTaskSessionHistory(
@@ -3402,24 +3463,24 @@ export class DispatchDaemonImpl implements DispatchDaemon {
     // If the last N sessions were all very short-lived (started in rapid succession
     // without proper completion), the task is likely stuck due to rate limiting.
     // Don't spawn a recovery steward — leave the task for retry when limits expire.
-    if (this.hasRecentRateLimitPattern(taskMeta)) {
+    const patternAccounts = this.getRateLimitPatternAccounts(taskMeta, worker);
+    if (patternAccounts) {
       logger.info(
         `Task ${task.id} shows rate limit pattern in session history ` +
-        `(last ${RATE_LIMIT_SESSION_PATTERN_COUNT} sessions were rapid exits). ` +
+        `(last ${RATE_LIMIT_SESSION_PATTERN_COUNT} sessions were rapid exits on ` +
+        `${patternAccounts.join(', ')}). ` +
         `Skipping recovery steward spawn and recording rate limit.`
       );
 
       // Record the rate limit so the daemon pauses dispatch and the dashboard banner shows.
       // Without this, the orphan recovery loop would repeatedly detect the pattern every
       // poll cycle without ever pausing — causing infinite log spam.
-      const fallbackChain = this.settingsService?.getAgentDefaults().fallbackChain ?? [];
+      // Attribution: only the accounts the rapid-exit sessions actually ran on
+      // (their session-history `executable`), never a fixed default executable
+      // or the whole fallback chain.
       const resetTime = new Date(Date.now() + RAPID_EXIT_FALLBACK_RESET_MS);
-      if (fallbackChain.length > 0) {
-        for (const executable of fallbackChain) {
-          this.handleRateLimitDetected(executable, resetTime);
-        }
-      } else {
-        this.handleRateLimitDetected('claude', resetTime);
+      for (const account of patternAccounts) {
+        this.handleRateLimitDetected(account, resetTime);
       }
 
       return false;
@@ -3567,6 +3628,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
         agentName: recoverySteward.name,
         agentRole: 'steward',
         startedAt: createTimestamp(),
+        executable: this.resolveSessionAccountKey(recoverySteward, recoveryExecutableOverride),
       };
 
       const metadataWithHistory = appendTaskSessionHistory(
