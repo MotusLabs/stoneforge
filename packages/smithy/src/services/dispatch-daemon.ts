@@ -2168,19 +2168,30 @@ export class DispatchDaemonImpl implements DispatchDaemon {
    * Resolves the executable path for a session, checking rate limits and applying
    * fallback selection when the primary executable is rate-limited.
    *
+   * Design D6 (worker dispatch tiers): a worker with an explicit
+   * `executablePath` is never rewritten by the workspace fallback chain — its
+   * binary is usually a wrapper (`claude-glm`) billing to a different account
+   * than any chain entry. Such a worker is checked against, and spawned with,
+   * its own executable. The chain keeps its existing "one plan, several
+   * binaries" behaviour, but only for workers that do not name one.
+   *
    * @param agent - The agent to resolve the executable for
    * @returns The executable path override if fallback was needed, undefined if primary is OK,
-   *          or 'all_limited' if all executables in the fallback chain are rate-limited.
+   *          or 'all_limited' if the agent's account key is limited — or, for agents served by
+   *          the chain, if every chain entry is rate-limited.
    */
   private resolveExecutableWithFallback(agent: AgentEntity): string | undefined | 'all_limited' {
     const meta = getAgentMetadata(agent);
     if (!meta) return undefined;
 
+    // A worker's own executable always wins over the chain.
+    const hasExplicitExecutable = Boolean((meta as { executablePath?: string }).executablePath);
+
     // When a fallback chain is configured, it is the authoritative list of
-    // available executables. Check it first before resolving per-agent defaults.
+    // available executables — but only for workers without their own.
     const fallbackChain = this.settingsService?.getAgentDefaults().fallbackChain ?? [];
 
-    if (fallbackChain.length > 0) {
+    if (!hasExplicitExecutable && fallbackChain.length > 0) {
       // If all executables in the chain are limited, we can't dispatch
       if (this.rateLimitTracker.isAllLimited(fallbackChain)) {
         return 'all_limited';
@@ -2196,22 +2207,19 @@ export class DispatchDaemonImpl implements DispatchDaemon {
       return available;
     }
 
-    // No fallback chain — check the agent's effective executable directly
-    const agentExecutablePath = (meta as { executablePath?: string }).executablePath;
-    const providerName = (meta as { provider?: string }).provider ?? 'claude-code';
-
-    // Determine the effective executable path that would be used
-    // Priority: agent-specific → workspace-wide default → provider default
-    let effectiveExecutable = agentExecutablePath;
-    if (!effectiveExecutable && this.settingsService) {
-      const defaults = this.settingsService.getAgentDefaults();
-      effectiveExecutable = defaults.defaultExecutablePaths[providerName];
-    }
-    if (!effectiveExecutable) {
-      effectiveExecutable = providerName;
-    }
-
-    if (this.rateLimitTracker.isLimited(effectiveExecutable)) {
+    // No chain applies (none configured, or the worker names its own
+    // executable) — check the agent's own account key directly.
+    //
+    // The key is derived with `resolveAccountKey`, the same priority the
+    // spawner uses (agent `executablePath` → workspace default → provider
+    // default binary, e.g. `claude-code` → `claude`) and normalised, so a
+    // limit reported by a session under a different spelling of the same
+    // executable matches. Previously this fell back to the provider *name*
+    // ('claude-code'), which never matched limits reported for the binary
+    // the provider actually spawns ('claude'), so rate-limited default
+    // workers kept being dispatched.
+    const accountKey = resolveAccountKey(agent, this.settingsService);
+    if (this.rateLimitTracker.isLimited(accountKey)) {
       return 'all_limited';
     }
     return undefined;

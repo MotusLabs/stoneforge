@@ -12,6 +12,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test';
 import * as fs from 'fs';
+import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { createStorage, initializeSchema } from '@stoneforge/storage';
 import { createQuarryAPI, type QuarryAPI, type InboxService, createInboxService } from '@stoneforge/quarry';
@@ -1978,6 +1979,25 @@ function pinPathForRateLimitTests(): void {
   clearExecutableResolutionCache();
 }
 
+/**
+ * Creates an executable file inside the pinned PATH directory so a bare
+ * command name resolves to a known absolute path, and returns that path.
+ *
+ * Use when a test needs a worker's account key and a limit reported under
+ * an absolute path to agree (see `normalizeExecutableKey`).
+ */
+function putOnPinnedPath(command: string): string {
+  if (!pinnedPathDir) {
+    throw new Error('putOnPinnedPath() requires pinPathForRateLimitTests() first');
+  }
+  const filePath = path.join(pinnedPathDir, command);
+  fs.writeFileSync(filePath, '#!/bin/sh\nexit 0\n');
+  fs.chmodSync(filePath, 0o755);
+  // A prior lookup in this process may have cached a miss for the command
+  clearExecutableResolutionCache();
+  return filePath;
+}
+
 function restorePathAfterRateLimitTests(): void {
   if (savedPath === undefined) {
     delete process.env.PATH;
@@ -2536,6 +2556,203 @@ describe('Rate limit attribution to the producing account', () => {
     expect(result.processed).toBe(1);
     expect(sessionManager.startSession).toHaveBeenCalled();
     expect(daemon.getRateLimitStatus().isPaused).toBe(false);
+  });
+
+  test('scenario "Wrapper worker ignores chain": session runs the worker executable, not a chain entry', async () => {
+    // fallbackChain is [claude, claude-alt] and e3 has executablePath
+    // 'claude-glm'. The chain is NOT consulted for e3: its session runs
+    // claude-glm (no override), even though both chain entries are
+    // unlimited and the chain's first entry would otherwise win.
+    const worker = await createTestWorker('chain-wrapper-e3', { executablePath: 'claude-glm' });
+    await createTestTask('Task for the wrapper worker');
+
+    const result = await daemon.pollWorkerAvailability();
+    expect(result.processed).toBe(1);
+
+    const startCalls = (sessionManager.startSession as ReturnType<typeof mock>).mock.calls;
+    expect(startCalls).toHaveLength(1);
+    // No override → the session manager uses the agent's own executablePath
+    expect(startCalls[0][1]?.executablePathOverride).toBeUndefined();
+    expect(getAgentMetadata(worker)?.executablePath).toBe('claude-glm');
+  });
+
+  test('scenario "Wrapper worker ignores chain": skipped only when its own account is limited', async () => {
+    // The wrapper account (claude-glm) is limited while every chain entry is
+    // unlimited. e3 must still be skipped: the chain does not rescue it,
+    // because a chain entry would run on a different account than e3's own.
+    await createTestWorker('chain-wrapper-limited-e3', { executablePath: 'claude-glm' });
+    await createTestTask('Task while the wrapper account is limited');
+
+    daemon.handleRateLimitDetected('claude-glm', new Date(Date.now() + 60 * 60 * 1000));
+
+    const result = await daemon.pollWorkerAvailability();
+    expect(result.processed).toBe(0);
+    expect(sessionManager.startSession).not.toHaveBeenCalled();
+    // The chain itself is untouched — a default worker stays dispatchable
+    expect(daemon.getRateLimitStatus().isPaused).toBe(false);
+  });
+
+  test('scenario "Chain still serves default workers": chain selection is unchanged', async () => {
+    // e1 has no executablePath, so the chain [claude, claude-alt] remains
+    // authoritative for it: the first unlimited chain entry is the override,
+    // and a limit on a chain entry — which marks the whole chain — skips it.
+    // Both behaviours are unchanged from before the D6 scoping.
+    const impl = daemon as unknown as DispatchDaemonImpl;
+    const e1 = await createTestWorker('chain-default-e1');
+    await createTestTask('Task for the default worker');
+
+    expect(impl.resolveExecutableWithFallback(e1)).toBe('claude');
+
+    const result = await daemon.pollWorkerAvailability();
+    expect(result.processed).toBe(1);
+
+    const startCalls = (sessionManager.startSession as ReturnType<typeof mock>).mock.calls;
+    expect(startCalls).toHaveLength(1);
+    expect(startCalls[0][1]?.executablePathOverride).toBe('claude');
+
+    // 'claude' is itself a chain entry → the whole chain is limited
+    daemon.handleRateLimitDetected('claude', new Date(Date.now() + 60 * 60 * 1000));
+    expect(impl.resolveExecutableWithFallback(e1)).toBe('all_limited');
+  });
+});
+
+// ============================================================================
+// Fallback chain scope without a chain (design D6) — provider default binary
+// ============================================================================
+
+describe('resolveExecutableWithFallback without a fallback chain', () => {
+  let api: QuarryAPI;
+  let inboxService: InboxService;
+  let agentRegistry: AgentRegistry;
+  let taskAssignment: TaskAssignmentService;
+  let dispatchService: DispatchService;
+  let sessionManager: SessionManager;
+  let worktreeManager: WorktreeManager;
+  let stewardScheduler: StewardScheduler;
+  let settingsService: SettingsService;
+  let daemon: DispatchDaemonImpl;
+  let testDbPath: string;
+  let systemEntity: EntityId;
+
+  beforeEach(async () => {
+    pinPathForRateLimitTests();
+    testDbPath = `/tmp/dispatch-daemon-rl-nochain-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const storage = createStorage({ path: testDbPath, create: true });
+    initializeSchema(storage);
+
+    api = createQuarryAPI(storage);
+    inboxService = createInboxService(storage);
+    agentRegistry = createAgentRegistry(api);
+    taskAssignment = createTaskAssignmentService(api);
+    dispatchService = createDispatchService(api, taskAssignment, agentRegistry);
+    sessionManager = createMockSessionManager();
+    worktreeManager = createMockWorktreeManager();
+    stewardScheduler = createMockStewardScheduler();
+    // No fallback chain: each worker runs its own effective executable
+    settingsService = createMockSettingsService({ fallbackChain: [] });
+
+    const { createEntity, EntityTypeValue } = await import('@stoneforge/core');
+    const entity = await createEntity({
+      name: 'test-system-rl-nochain',
+      entityType: EntityTypeValue.SYSTEM,
+      createdBy: 'system:test' as EntityId,
+    });
+    const saved = await api.create(entity as unknown as Record<string, unknown> & { createdBy: EntityId });
+    systemEntity = saved.id as unknown as EntityId;
+
+    const config: DispatchDaemonConfig = {
+      ensureTargetBranchExists: mockEnsureTargetBranchExists,
+      pollIntervalMs: 100,
+      workerAvailabilityPollEnabled: true,
+      inboxPollEnabled: false,
+      stewardTriggerPollEnabled: false,
+      workflowTaskPollEnabled: false,
+    };
+
+    daemon = new DispatchDaemonImpl(
+      api,
+      agentRegistry,
+      sessionManager,
+      dispatchService,
+      worktreeManager,
+      taskAssignment,
+      stewardScheduler,
+      inboxService,
+      config,
+      undefined, // poolService
+      settingsService
+    );
+  });
+
+  afterEach(async () => {
+    await daemon.stop();
+    if (fs.existsSync(testDbPath)) {
+      fs.unlinkSync(testDbPath);
+    }
+    restorePathAfterRateLimitTests();
+  });
+
+  async function createTestWorker(
+    name: string,
+    options?: { executablePath?: string }
+  ): Promise<AgentEntity> {
+    return agentRegistry.registerWorker({
+      name,
+      workerMode: 'ephemeral',
+      createdBy: systemEntity,
+      maxConcurrentTasks: 1,
+      executablePath: options?.executablePath,
+    });
+  }
+
+  async function createTestTask(title: string): Promise<Task> {
+    const task = await createTask({
+      title,
+      createdBy: systemEntity,
+      status: TaskStatus.OPEN,
+    });
+    return api.create(task as unknown as Record<string, unknown> & { createdBy: EntityId }) as Promise<Task>;
+  }
+
+  test('a default worker is skipped when the provider binary account is limited', async () => {
+    // Regression (merge-steward review of el-8894af): a worker with provider
+    // 'claude-code' and no executablePath runs the `claude` binary. A limit
+    // reported by a session for that binary's absolute path must skip the
+    // worker. The old hand-rolled lookup keyed the provider NAME
+    // ('claude-code'), which never matched limits reported for 'claude', so
+    // rate-limited default workers kept being dispatched.
+    const claudePath = putOnPinnedPath('claude');
+    const worker = await createTestWorker('default-worker-claude');
+    await createTestTask('Task while the default account is limited');
+
+    const impl = daemon as unknown as DispatchDaemonImpl;
+
+    // Unlimited → dispatchable, on the agent's own effective executable
+    expect(impl.resolveExecutableWithFallback(worker)).toBeUndefined();
+
+    // A session reports the limit under the binary's absolute path
+    daemon.handleRateLimitDetected(claudePath, new Date(Date.now() + 60 * 60 * 1000));
+
+    expect(impl.resolveExecutableWithFallback(worker)).toBe('all_limited');
+
+    const result = await daemon.pollWorkerAvailability();
+    expect(result.processed).toBe(0);
+    expect(sessionManager.startSession).not.toHaveBeenCalled();
+  });
+
+  test('an explicit wrapper executable is keyed to its own account, not the provider default', async () => {
+    // Same no-chain path, but the worker names a wrapper. Its limit must not
+    // be confused with the provider default binary's account.
+    const claudePath = putOnPinnedPath('claude');
+    await createTestWorker('wrapper-worker-glm', { executablePath: 'claude-glm' });
+    await createTestTask('Task while the default account is limited');
+
+    // Only the default binary's account is limited
+    daemon.handleRateLimitDetected(claudePath, new Date(Date.now() + 60 * 60 * 1000));
+
+    const result = await daemon.pollWorkerAvailability();
+    expect(result.processed).toBe(1);
+    expect(sessionManager.startSession).toHaveBeenCalled();
   });
 });
 
