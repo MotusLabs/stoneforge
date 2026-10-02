@@ -116,7 +116,7 @@ Each of these steps used a different MCP server capability, but the agent didn't
 
 ## How Stoneforge Agents Use MCP
 
-In a [multi-agent orchestration](/comparisons/multi-agent-vs-single-agent/) setup, MCP becomes even more valuable. When Stoneforge dispatches a worker agent to a task, that agent inherits the MCP configuration from the workspace. This means every worker agent automatically has access to the same tools: the project's database, documentation, CI system, and whatever else you've configured.
+In a [multi-agent orchestration](/compare/multi-agent-vs-single-agent/) setup, MCP becomes even more valuable. When Stoneforge dispatches a worker agent to a task, that agent inherits the MCP configuration from the workspace. This means every worker agent automatically has access to the same tools: the project's database, documentation, CI system, and whatever else you've configured.
 
 This matters because orchestrated agents are ephemeral. A [Stoneforge worker](https://docs.stoneforge.ai/concepts/agents) is spawned for a specific task, works in an isolated git worktree, and shuts down when done. MCP servers give each ephemeral worker access to the full context it needs without manual setup per session.
 

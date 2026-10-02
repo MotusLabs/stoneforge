@@ -11,7 +11,7 @@ relatedContent:
     url: "/use-cases/free-open-source-ai-coding/"
     type: "use-case"
   - title: "Multi-Agent vs Single-Agent AI Development"
-    url: "/comparisons/multi-agent-vs-single-agent/"
+    url: "/compare/multi-agent-vs-single-agent/"
     type: "compare"
   - title: "Getting Started with Stoneforge"
     url: "https://docs.stoneforge.ai/getting-started"
@@ -127,7 +127,7 @@ Void is an open-source fork of VS Code that integrates AI at the editor level, s
 
 **GitHub:** [stoneforge-ai/stoneforge](https://github.com/stoneforge-ai/stoneforge) · MIT License
 
-Stoneforge is a different kind of tool. Instead of being a coding agent, it [orchestrates multiple agents](/comparisons/multi-agent-vs-single-agent/) working in parallel on the same codebase. It dispatches tasks to agents (currently supporting [Claude Code](/integrations/claude-code/), [Codex CLI](/integrations/codex/), and [OpenCode](/integrations/opencode/)), isolates their work in git worktrees, tracks dependencies between tasks, and manages the merge queue when agents finish.
+Stoneforge is a different kind of tool. Instead of being a coding agent, it [orchestrates multiple agents](/compare/multi-agent-vs-single-agent/) working in parallel on the same codebase. It dispatches tasks to agents (currently supporting [Claude Code](/integrations/claude-code/), [Codex CLI](/integrations/codex/), and [OpenCode](/integrations/opencode/)), isolates their work in git worktrees, tracks dependencies between tasks, and manages the merge queue when agents finish.
 
 The role-based system splits responsibilities: a Director creates and assigns tasks, Workers execute code changes, a Steward reviews and merges, and a Daemon handles automatic dispatch. This separation addresses the coordination overhead that emerges when you scale beyond a single agent.
 
