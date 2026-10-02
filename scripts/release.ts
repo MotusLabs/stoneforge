@@ -7,16 +7,14 @@ import { resolve } from 'node:path'
 interface PackageInfo {
   name: string
   dir: string
-  level: number
 }
 
 type BumpType = 'patch' | 'minor' | 'major'
 
 interface CliArgs {
   bump: BumpType | undefined
-  githubRelease: boolean
   dryRun: boolean
-  tag: string
+  motuslab: number
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -24,26 +22,16 @@ interface CliArgs {
 const ROOT = resolve(import.meta.dirname, '..')
 
 const PACKAGES: PackageInfo[] = [
-  // Level 0 — no internal deps
-  { name: '@stoneforge/core', dir: 'packages/core', level: 0 },
-  { name: '@stoneforge/ui', dir: 'packages/ui', level: 0 },
-  // Level 1
-  { name: '@stoneforge/storage', dir: 'packages/storage', level: 1 },
-  // Level 2
-  { name: '@stoneforge/quarry', dir: 'packages/quarry', level: 2 },
-  // Level 3
-  { name: '@stoneforge/shared-routes', dir: 'packages/shared-routes', level: 3 },
-  { name: '@stoneforge/smithy', dir: 'packages/smithy', level: 3 },
+  { name: '@stoneforge/core', dir: 'packages/core' },
+  { name: '@stoneforge/ui', dir: 'packages/ui' },
+  { name: '@stoneforge/storage', dir: 'packages/storage' },
+  { name: '@stoneforge/quarry', dir: 'packages/quarry' },
+  { name: '@stoneforge/shared-routes', dir: 'packages/shared-routes' },
+  { name: '@stoneforge/smithy', dir: 'packages/smithy' },
 ]
 
-const STONEFORGE_SCOPE = '@stoneforge/'
-
-const DEP_FIELDS = [
-  'dependencies',
-  'devDependencies',
-  'peerDependencies',
-  'optionalDependencies',
-] as const
+/** Package that owns the MotusLab release version (see release-pipeline spec). */
+const VERSION_SOURCE = 'packages/smithy'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -95,72 +83,82 @@ function bumpVersion(current: string, type: BumpType): string {
   }
 }
 
-// ─── workspace:* replacement ─────────────────────────────────────────────────
-
-function replaceWorkspaceProtocol(pkgJson: Record<string, any>, version: string) {
-  for (const field of DEP_FIELDS) {
-    const deps = pkgJson[field]
-    if (!deps) continue
-    for (const key of Object.keys(deps)) {
-      if (key.startsWith(STONEFORGE_SCOPE) && deps[key] === 'workspace:*') {
-        deps[key] = `^${version}`
-      }
-    }
-  }
-}
-
-function restoreWorkspaceProtocol(pkgJson: Record<string, any>) {
-  for (const field of DEP_FIELDS) {
-    const deps = pkgJson[field]
-    if (!deps) continue
-    for (const key of Object.keys(deps)) {
-      if (key.startsWith(STONEFORGE_SCOPE) && deps[key] !== 'workspace:*') {
-        deps[key] = 'workspace:*'
-      }
-    }
-  }
+function motuslabTag(version: string, motuslab: number): string {
+  return `v${version}-motuslab.${motuslab}`
 }
 
 // ─── CLI parsing ─────────────────────────────────────────────────────────────
 
+function usage(): string {
+  return [
+    'Usage: bun run scripts/release.ts [patch|minor|major] [options]',
+    '',
+    'Bumps workspace package versions, commits, and creates/pushes the MotusLab tag',
+    '  v<version>-motuslab.<n>',
+    '',
+    'Options:',
+    '  --motuslab <n>   MotusLab release counter for the tag (default: 1)',
+    '  --dry-run        Print the commands without running them',
+    '',
+    'This script never publishes to npm or any other third-party service.',
+  ].join('\n')
+}
+
 function parseArgs(): CliArgs {
   const args = process.argv.slice(2)
   let bump: BumpType | undefined
-  let githubRelease = false
   let dryRun = false
-  let tag = 'latest'
+  let motuslab = 1
 
   for (let i = 0; i < args.length; i++) {
-    switch (args[i]) {
-      case '--bump':
-        bump = args[++i] as BumpType
-        if (!['patch', 'minor', 'major'].includes(bump)) {
-          fail(`Invalid bump type: ${bump}. Must be patch, minor, or major.`)
+    const arg = args[i]
+    switch (arg) {
+      case 'patch':
+      case 'minor':
+      case 'major':
+        if (bump) fail(`Multiple bump types given: ${bump}, ${arg}`)
+        bump = arg
+        break
+      case '--bump': {
+        const value = args[++i] as BumpType
+        if (!['patch', 'minor', 'major'].includes(value)) {
+          fail(`Invalid bump type: ${value}. Must be patch, minor, or major.`)
+        }
+        if (bump) fail(`Multiple bump types given: ${bump}, ${value}`)
+        bump = value
+        break
+      }
+      case '--motuslab': {
+        const value = args[++i]
+        if (!value) fail('--motuslab requires a positive integer')
+        motuslab = Number(value)
+        if (!Number.isInteger(motuslab) || motuslab < 1) {
+          fail(`Invalid --motuslab value: ${value}. Must be a positive integer.`)
         }
         break
-      case '--github-release':
-        githubRelease = true
-        break
+      }
       case '--dry-run':
         dryRun = true
         break
-      case '--tag':
-        tag = args[++i]
-        if (!tag) fail('--tag requires a value')
+      case '--help':
+      case '-h':
+        console.log(usage())
+        process.exit(0)
         break
       default:
-        fail(`Unknown argument: ${args[i]}`)
+        console.error(usage())
+        fail(`Unknown argument: ${arg}`)
     }
   }
 
-  return { bump, githubRelease, dryRun, tag }
+  return { bump, dryRun, motuslab }
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
   const opts = parseArgs()
-  const totalSteps = opts.githubRelease ? 8 : 7
+  const totalSteps = 5
 
   if (opts.dryRun) {
     console.log(bold('\n🏜️  DRY RUN — no changes will be made\n'))
@@ -176,56 +174,35 @@ async function main() {
   }
   ok('Git working tree clean')
 
-  try {
-    const user = run('npm whoami')
-    ok(`NPM authenticated as ${bold(user)}`)
-  } catch {
-    fail('Not authenticated with NPM. Run `npm login` first.')
-  }
-
-  if (opts.githubRelease) {
-    try {
-      run('gh --version')
-      ok('GitHub CLI available')
-    } catch {
-      fail('GitHub CLI (gh) not found. Install it or remove --github-release.')
-    }
-  }
-
   // ── 2. Compute version ────────────────────────────────────────────────────
 
-  const rootPkgPath = resolve(ROOT, 'package.json')
-  const rootPkg = readJson(rootPkgPath)
-  const currentVersion = rootPkg.version as string
+  const sourcePkgPath = resolve(ROOT, VERSION_SOURCE, 'package.json')
+  const currentVersion = readJson(sourcePkgPath).version as string
   const newVersion = opts.bump ? bumpVersion(currentVersion, opts.bump) : currentVersion
+  const tag = motuslabTag(newVersion, opts.motuslab)
 
   if (opts.bump) {
     step(2, totalSteps, `Bumping ${bold(currentVersion)} → ${bold(newVersion)} (${opts.bump})`)
   } else {
     step(2, totalSteps, `Releasing ${bold(currentVersion)} (no version bump)`)
   }
+  ok(`MotusLab tag ${bold(tag)}`)
 
   // ── 3. Update versions ────────────────────────────────────────────────────
 
   step(3, totalSteps, 'Updating package versions...')
 
-  if (opts.bump) {
-    // Update root
-    rootPkg.version = newVersion
-    if (!opts.dryRun) writeJson(rootPkgPath, rootPkg)
-    ok(`root ${currentVersion} → ${newVersion}`)
-  }
-
-  // Update each package
   for (const pkg of PACKAGES) {
     const pkgPath = resolve(ROOT, pkg.dir, 'package.json')
     const pkgJson = readJson(pkgPath)
     if (opts.bump) {
+      const from = pkgJson.version as string
       pkgJson.version = newVersion
+      if (!opts.dryRun) writeJson(pkgPath, pkgJson)
+      ok(`${pkg.name} ${from} → ${newVersion}`)
+    } else {
+      ok(`${pkg.name} stays at ${pkgJson.version}`)
     }
-    replaceWorkspaceProtocol(pkgJson, newVersion)
-    if (!opts.dryRun) writeJson(pkgPath, pkgJson)
-    ok(`${pkg.name} ${currentVersion} → ${newVersion}`)
   }
 
   // ── 4. Build ──────────────────────────────────────────────────────────────
@@ -243,10 +220,8 @@ async function main() {
       fail('Build failed. Fix errors before releasing.')
     }
 
-    // Build the web UI and copy assets into packages/smithy/web/ so they
-    // are included in the published @stoneforge/smithy package (used by `sf serve`).
-    // This is separate from the standard `build` task because smithy-web's
-    // `build` script only outputs to apps/smithy-web/dist/.
+    // Build the web UI and copy assets into packages/smithy/web/ so they are
+    // present for the MotusLab .deb packaging step (used by `sf serve`).
     try {
       execSync('pnpm --filter @stoneforge/smithy-web run build:web', { cwd: ROOT, stdio: 'inherit' })
       ok('Web UI built and copied to packages/smithy/web/')
@@ -255,92 +230,42 @@ async function main() {
     }
   }
 
-  // ── 5. Publish ────────────────────────────────────────────────────────────
+  // ── 5. Git commit & tag ───────────────────────────────────────────────────
 
-  step(5, totalSteps, 'Publishing to NPM...')
-
-  const maxLevel = Math.max(...PACKAGES.map((p) => p.level))
-  for (let level = 0; level <= maxLevel; level++) {
-    const pkgsAtLevel = PACKAGES.filter((p) => p.level === level)
-    for (const pkg of pkgsAtLevel) {
-      const cwd = resolve(ROOT, pkg.dir)
-      if (opts.dryRun) {
-        run(`npm publish --dry-run --access public --tag ${opts.tag}`, { cwd })
-        ok(`${pkg.name}@${newVersion} ${dim('(dry-run)')}`)
-      } else {
-        try {
-          run(`npm publish --access public --tag ${opts.tag}`, { cwd })
-          ok(`${pkg.name}@${newVersion} published`)
-        } catch (e) {
-          fail(`Failed to publish ${pkg.name}: ${e}`)
-        }
-      }
-    }
-  }
-
-  // ── 6. Restore workspace:* ────────────────────────────────────────────────
-
-  step(6, totalSteps, 'Restoring workspace protocol...')
-
-  for (const pkg of PACKAGES) {
-    const pkgPath = resolve(ROOT, pkg.dir, 'package.json')
-    const pkgJson = readJson(pkgPath)
-    restoreWorkspaceProtocol(pkgJson)
-    if (!opts.dryRun) writeJson(pkgPath, pkgJson)
-  }
-  ok('All workspace:* references restored')
-
-  // ── 7. Git commit & tag ───────────────────────────────────────────────────
-
-  step(7, totalSteps, 'Git commit & tag...')
+  step(5, totalSteps, 'Git commit & tag...')
 
   if (opts.bump) {
-    const filesToAdd = [
-      'package.json',
-      ...PACKAGES.map((p) => `${p.dir}/package.json`),
-    ]
+    const filesToAdd = PACKAGES.map((p) => `${p.dir}/package.json`)
 
     if (opts.dryRun) {
       console.log(`  ${dim(`[dry-run] git add ${filesToAdd.join(' ')}`)}`)
-      console.log(`  ${dim(`[dry-run] git commit -m "release: v${newVersion}"`)}`)
-      console.log(`  ${dim(`[dry-run] git tag v${newVersion}`)}`)
-      console.log(`  ${dim('[dry-run] git push && git push --tags')}`)
+      console.log(`  ${dim(`[dry-run] git commit -m "release: ${tag}"`)}`)
+      console.log(`  ${dim(`[dry-run] git tag ${tag}`)}`)
+      console.log(`  ${dim(`[dry-run] git push origin HEAD && git push origin ${tag}`)}`)
     } else {
       run(`git add ${filesToAdd.join(' ')}`)
-      run(`git commit -m "release: v${newVersion}"`)
-      run(`git tag v${newVersion}`)
-      run('git push && git push --tags')
-      ok(`Committed and tagged ${bold(`v${newVersion}`)}`)
+      run(`git commit -m "release: ${tag}"`)
+      run(`git tag ${tag}`)
+      run('git push origin HEAD')
+      run(`git push origin ${tag}`)
+      ok(`Committed and tagged ${bold(tag)}`)
     }
   } else {
     if (opts.dryRun) {
-      console.log(`  ${dim(`[dry-run] git tag v${newVersion}`)}`)
-      console.log(`  ${dim('[dry-run] git push --tags')}`)
+      console.log(`  ${dim(`[dry-run] git tag ${tag}`)}`)
+      console.log(`  ${dim(`[dry-run] git push origin ${tag}`)}`)
     } else {
-      run(`git tag v${newVersion}`)
-      run('git push --tags')
-      ok(`Tagged ${bold(`v${newVersion}`)}`)
+      run(`git tag ${tag}`)
+      run(`git push origin ${tag}`)
+      ok(`Tagged ${bold(tag)}`)
     }
   }
 
-  // ── 8. GitHub release ─────────────────────────────────────────────────────
-
-  if (opts.githubRelease) {
-    step(8, totalSteps, 'Creating GitHub release...')
-
-    if (opts.dryRun) {
-      console.log(`  ${dim(`[dry-run] gh release create v${newVersion} --generate-notes --title "v${newVersion}"`)}`)
-    } else {
-      try {
-        run(`gh release create v${newVersion} --generate-notes --title "v${newVersion}"`)
-        ok(`GitHub release v${newVersion} created`)
-      } catch (e) {
-        fail(`Failed to create GitHub release: ${e}`)
-      }
-    }
-  }
-
-  console.log(`\n${green(bold('Done!'))} Released ${bold(`v${newVersion}`)} 🎉\n`)
+  console.log(
+    `\n${green(bold('Done!'))} Prepared MotusLab release ${bold(tag)}. ` +
+      `Nothing was published to npm or any third-party service. ` +
+      `The release workflow publishes the .deb to GitHub Releases only.\n`,
+  )
 }
 
 main()

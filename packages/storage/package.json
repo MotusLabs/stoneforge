@@ -1,6 +1,7 @@
 {
   "name": "@stoneforge/storage",
   "version": "1.25.0",
+  "private": true,
   "type": "module",
   "description": "SQLite storage layer for Stoneforge with multi-runtime support",
   "main": "dist/index.js",
@@ -55,9 +56,6 @@
   },
   "author": "Stoneforge",
   "license": "Apache-2.0",
-  "publishConfig": {
-    "access": "public"
-  },
   "keywords": [
     "stoneforge",
     "storage",

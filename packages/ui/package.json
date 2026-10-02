@@ -1,6 +1,7 @@
 {
   "name": "@stoneforge/ui",
   "version": "1.25.0",
+  "private": true,
   "type": "module",
   "description": "Shared UI components, design tokens, and hooks for Stoneforge platform",
   "main": "dist/index.js",
@@ -110,9 +111,6 @@
   },
   "author": "Stoneforge",
   "license": "Apache-2.0",
-  "publishConfig": {
-    "access": "public"
-  },
   "keywords": [
     "stoneforge",
     "ui",

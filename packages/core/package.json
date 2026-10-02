@@ -1,6 +1,7 @@
 {
   "name": "@stoneforge/core",
   "version": "1.25.0",
+  "private": true,
   "type": "module",
   "description": "Core types, errors, ID generation, and utilities for Stoneforge",
   "main": "dist/index.js",
@@ -67,9 +68,6 @@
   },
   "author": "Stoneforge",
   "license": "Apache-2.0",
-  "publishConfig": {
-    "access": "public"
-  },
   "keywords": [
     "stoneforge",
     "types",

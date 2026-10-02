@@ -17,7 +17,10 @@
     ]
   ],
   "linked": [],
-  "access": "public",
+  "privatePackages": {
+    "version": true,
+    "tag": false
+  },
   "baseBranch": "master",
   "updateInternalDependencies": "patch",
   "___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH": {
