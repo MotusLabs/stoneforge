@@ -2,7 +2,7 @@
  * Admin Commands Tests - doctor and migrate
  */
 
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { doctorCommand, migrateCommand } from './admin.js';
@@ -33,6 +33,82 @@ function createTestOptions(overrides: Partial<GlobalOptions> = {}): GlobalOption
   };
 }
 
+/**
+ * Healthy empty runtime diagnostics payload matching smithy-server's
+ * GET /api/health/diagnostics response shape.
+ */
+function createHealthyRuntimeDiagnostics() {
+  return {
+    timestamp: new Date().toISOString(),
+    rateLimits: { isPaused: false, limits: [] },
+    stuckTasks: [],
+    mergeQueue: {
+      awaitingMergeCount: 0,
+      stuckInTestingCount: 0,
+      stuckInMergingCount: 0,
+      stuckTasks: [],
+    },
+    errorRate: { lastHourCount: 0, lastDayCount: 0 },
+    agentPool: {
+      totalAgents: 0,
+      idleAgents: 0,
+      busyAgents: 0,
+      utilizationPercent: 0,
+      sessions: [],
+    },
+  };
+}
+
+// ============================================================================
+// Runtime diagnostics fetch mock
+//
+// doctor queries smithy-server GET /api/health/diagnostics on every run.
+// Tests must not hit a live orchestrator — a real server with stuck tasks
+// would push an ERROR diagnostic and fail otherwise-healthy DB assertions.
+// ============================================================================
+
+let originalFetch: typeof globalThis.fetch;
+let mockFetch: ReturnType<typeof mock>;
+let runtimeDiagnosticsImpl: () => Promise<Response>;
+
+function setupFetchMock() {
+  originalFetch = globalThis.fetch;
+  mockFetch = mock((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/health/diagnostics')) {
+      return runtimeDiagnosticsImpl();
+    }
+    return Promise.reject(new Error(`Unexpected fetch in test: ${url}`));
+  });
+  globalThis.fetch = mockFetch as unknown as typeof fetch;
+  // Default: healthy orchestrator with nothing to report
+  setRuntimeDiagnostics(createHealthyRuntimeDiagnostics());
+}
+
+function restoreFetchMock() {
+  globalThis.fetch = originalFetch;
+}
+
+function setRuntimeDiagnostics(body: unknown, status = 200) {
+  runtimeDiagnosticsImpl = () =>
+    Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+}
+
+function setRuntimeDiagnosticsUnavailable() {
+  runtimeDiagnosticsImpl = () =>
+    Promise.reject(new Error('fetch failed: connection refused'));
+}
+
+function setRuntimeDiagnosticsHttpError(status: number) {
+  runtimeDiagnosticsImpl = () =>
+    Promise.resolve(new Response('not found', { status }));
+}
+
 // ============================================================================
 // Setup / Teardown
 // ============================================================================
@@ -43,9 +119,11 @@ beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true });
   }
   mkdirSync(STONEFORGE_DIR, { recursive: true });
+  setupFetchMock();
 });
 
 afterEach(() => {
+  restoreFetchMock();
   // Cleanup test workspace
   if (existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true });
@@ -382,6 +460,151 @@ describe('doctor command', () => {
     expect(result.data.summary).toHaveProperty('warning');
     expect(result.data.summary).toHaveProperty('error');
     expect(result.data.summary.ok).toBeGreaterThan(0);
+  });
+});
+
+// ============================================================================
+// Runtime Diagnostics Tests (smithy-server /api/health/diagnostics)
+// ============================================================================
+
+describe('doctor runtime diagnostics', () => {
+  test('includes runtime checks when smithy-server is available', async () => {
+    const backend = createStorage({ path: DB_PATH, create: true });
+    initializeSchema(backend);
+
+    const result = await doctorCommand.handler([], createTestOptions());
+
+    const names = (result.data.diagnostics as Array<{ name: string }>).map((d) => d.name);
+    expect(names).toContain('rate_limits');
+    expect(names).toContain('stuck_tasks');
+    expect(names).toContain('merge_queue');
+    expect(names).toContain('error_rate');
+    expect(names).toContain('agent_pool');
+    // Healthy runtime must not fail the overall doctor run
+    expect(result.exitCode).toBe(ExitCode.SUCCESS);
+    expect(result.data.healthy).toBe(true);
+  });
+
+  test('reports error exit when runtime reports stuck tasks', async () => {
+    const backend = createStorage({ path: DB_PATH, create: true });
+    initializeSchema(backend);
+
+    setRuntimeDiagnostics({
+      ...createHealthyRuntimeDiagnostics(),
+      stuckTasks: [
+        {
+          taskId: 'el-stuck1',
+          title: 'Stuck task',
+          status: 'in_progress',
+          assignee: 'el-agent1',
+          resumeCount: 3,
+          mergeStatus: 'pending',
+        },
+      ],
+    });
+
+    const result = await doctorCommand.handler([], createTestOptions());
+
+    // Stuck tasks are a runtime ERROR (per diagnostics spec) and fail the run,
+    // even when the database itself is healthy.
+    expect(result.exitCode).toBe(ExitCode.GENERAL_ERROR);
+    expect(result.data.healthy).toBe(false);
+
+    const stuckDiag = (result.data.diagnostics as Array<{ name: string; status: string; message: string }>).find(
+      (d) => d.name === 'stuck_tasks'
+    );
+    expect(stuckDiag).toBeDefined();
+    expect(stuckDiag!.status).toBe('error');
+    expect(stuckDiag!.message).toContain('el-stuck1');
+  });
+
+  test('reports warning for rate limits without failing the run', async () => {
+    const backend = createStorage({ path: DB_PATH, create: true });
+    initializeSchema(backend);
+
+    setRuntimeDiagnostics({
+      ...createHealthyRuntimeDiagnostics(),
+      rateLimits: {
+        isPaused: true,
+        limits: [{ executable: 'claude', resetsAt: '2026-01-01T00:00:00.000Z' }],
+        soonestReset: '2026-01-01T00:00:00.000Z',
+      },
+    });
+
+    const result = await doctorCommand.handler([], createTestOptions());
+
+    expect(result.exitCode).toBe(ExitCode.SUCCESS);
+    const limitDiag = (result.data.diagnostics as Array<{ name: string; status: string }>).find(
+      (d) => d.name === 'rate_limits'
+    );
+    expect(limitDiag).toBeDefined();
+    expect(limitDiag!.status).toBe('warning');
+  });
+
+  test('skips runtime checks gracefully when smithy-server is unavailable', async () => {
+    const backend = createStorage({ path: DB_PATH, create: true });
+    initializeSchema(backend);
+
+    setRuntimeDiagnosticsUnavailable();
+
+    const result = await doctorCommand.handler([], createTestOptions());
+
+    // Unavailable orchestrator is a warning, not an error — DB health still passes
+    expect(result.exitCode).toBe(ExitCode.SUCCESS);
+    expect(result.data.healthy).toBe(true);
+
+    const runtimeDiag = (result.data.diagnostics as Array<{ name: string; status: string; message: string }>).find(
+      (d) => d.name === 'runtime'
+    );
+    expect(runtimeDiag).toBeDefined();
+    expect(runtimeDiag!.status).toBe('warning');
+    expect(runtimeDiag!.message).toContain('not available');
+  });
+
+  test('reports warning when diagnostics endpoint returns HTTP error', async () => {
+    const backend = createStorage({ path: DB_PATH, create: true });
+    initializeSchema(backend);
+
+    setRuntimeDiagnosticsHttpError(404);
+
+    const result = await doctorCommand.handler([], createTestOptions());
+
+    expect(result.exitCode).toBe(ExitCode.SUCCESS);
+    const runtimeDiag = (result.data.diagnostics as Array<{ name: string; status: string; message: string }>).find(
+      (d) => d.name === 'runtime'
+    );
+    expect(runtimeDiag).toBeDefined();
+    expect(runtimeDiag!.status).toBe('warning');
+    expect(runtimeDiag!.message).toContain('404');
+  });
+
+  test('elevated error rate is a warning and high error rate is an error', async () => {
+    const backend = createStorage({ path: DB_PATH, create: true });
+    initializeSchema(backend);
+
+    setRuntimeDiagnostics({
+      ...createHealthyRuntimeDiagnostics(),
+      errorRate: { lastHourCount: 10, lastDayCount: 20 },
+    });
+
+    const elevated = await doctorCommand.handler([], createTestOptions());
+    expect(elevated.exitCode).toBe(ExitCode.SUCCESS);
+    const elevatedDiag = (elevated.data.diagnostics as Array<{ name: string; status: string }>).find(
+      (d) => d.name === 'error_rate'
+    );
+    expect(elevatedDiag!.status).toBe('warning');
+
+    setRuntimeDiagnostics({
+      ...createHealthyRuntimeDiagnostics(),
+      errorRate: { lastHourCount: 25, lastDayCount: 40 },
+    });
+
+    const high = await doctorCommand.handler([], createTestOptions());
+    expect(high.exitCode).toBe(ExitCode.GENERAL_ERROR);
+    const highDiag = (high.data.diagnostics as Array<{ name: string; status: string }>).find(
+      (d) => d.name === 'error_rate'
+    );
+    expect(highDiag!.status).toBe('error');
   });
 });
 
