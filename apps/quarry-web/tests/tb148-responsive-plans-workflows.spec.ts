@@ -256,7 +256,7 @@ test.describe('TB148: Responsive Workflows Page', () => {
       await fab.click();
 
       // Create modal should be visible
-      const createModal = page.getByTestId('create-workflow-modal');
+      const createModal = page.getByRole('dialog', { name: 'Create Workflow', exact: true });
       await expect(createModal).toBeVisible();
 
       // Title input should be visible

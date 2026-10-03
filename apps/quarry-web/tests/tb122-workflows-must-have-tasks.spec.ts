@@ -283,7 +283,7 @@ test.describe('TB122: Workflows Must Have Task Children', () => {
       await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
       await page.getByTestId('create-workflow-button').click();
-      await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
     });
 
     test('Quick Create mode allows creating workflow with 3 default tasks', async ({ page }) => {
@@ -291,7 +291,7 @@ test.describe('TB122: Workflows Must Have Task Children', () => {
       await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
       await page.getByTestId('create-workflow-button').click();
-      await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
       const workflowTitle = `UI Quick Workflow ${Date.now()}`;
       await page.getByTestId('create-title-input').fill(workflowTitle);
@@ -304,7 +304,7 @@ test.describe('TB122: Workflows Must Have Task Children', () => {
       await page.getByTestId('create-submit-button').click();
 
       // Modal should close
-      await expect(page.getByTestId('create-workflow-modal')).not.toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible({ timeout: 5000 });
 
       // Workflow should appear in list
       await expect(page.getByText(workflowTitle)).toBeVisible({ timeout: 5000 });

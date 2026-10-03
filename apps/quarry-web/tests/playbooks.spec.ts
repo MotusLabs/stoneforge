@@ -60,7 +60,7 @@ test.describe('TB26: Playbook Browser', () => {
 
     // Open create modal
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
     // Check mode toggle exists
     await expect(page.getByTestId('mode-quick')).toBeVisible();
@@ -72,7 +72,7 @@ test.describe('TB26: Playbook Browser', () => {
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
     // Quick mode should be active
     await expect(page.getByTestId('mode-quick')).toHaveClass(/bg-white/);
@@ -87,7 +87,7 @@ test.describe('TB26: Playbook Browser', () => {
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
     // Switch to playbook mode
     await page.getByTestId('mode-playbook').click();
@@ -115,7 +115,7 @@ test.describe('TB26: Playbook Browser', () => {
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
     // Switch to playbook mode
     await page.getByTestId('mode-playbook').click();
@@ -144,7 +144,7 @@ test.describe('TB26: Playbook Browser', () => {
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
     // Switch to playbook mode
     await page.getByTestId('mode-playbook').click();
@@ -188,7 +188,7 @@ test.describe('TB26: Playbook Browser', () => {
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
     // Switch to playbook mode and select the playbook
     await page.getByTestId('mode-playbook').click();
@@ -210,7 +210,7 @@ test.describe('TB26: Playbook Browser', () => {
 
     // Open create modal
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
     // Fill in quick mode form
     const timestamp = Date.now();
@@ -221,7 +221,7 @@ test.describe('TB26: Playbook Browser', () => {
     await page.getByTestId('create-submit-button').click();
 
     // Modal should close
-    await expect(page.getByTestId('create-workflow-modal')).not.toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible({ timeout: 10000 });
 
     // Verify workflow was created
     const afterResponse = await page.request.get('/api/workflows');
@@ -234,7 +234,7 @@ test.describe('TB26: Playbook Browser', () => {
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
     // Switch to playbook mode without selecting a playbook
     await page.getByTestId('mode-playbook').click();
@@ -263,7 +263,7 @@ test.describe('TB26: Playbook Browser', () => {
 
     // Open create modal
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
     // Switch to playbook mode and select first playbook
     await page.getByTestId('mode-playbook').click();
@@ -281,7 +281,7 @@ test.describe('TB26: Playbook Browser', () => {
     await page.getByTestId('create-submit-button').click();
 
     // Modal should close
-    await expect(page.getByTestId('create-workflow-modal')).not.toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible({ timeout: 10000 });
 
     // Verify workflow was created
     const afterResponse = await page.request.get('/api/workflows');
@@ -303,7 +303,7 @@ test.describe('TB26: Playbook Browser', () => {
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
     // Switch to playbook mode
     await page.getByTestId('mode-playbook').click();

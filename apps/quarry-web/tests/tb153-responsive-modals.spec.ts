@@ -140,7 +140,7 @@ test.describe('TB153: Responsive Modals & Dialogs', () => {
         await createButton.click();
 
         // Modal should be visible
-        const modal = page.getByTestId('create-workflow-modal');
+        const modal = page.getByRole('dialog', { name: 'Create Workflow', exact: true });
         await expect(modal).toBeVisible();
       });
     });

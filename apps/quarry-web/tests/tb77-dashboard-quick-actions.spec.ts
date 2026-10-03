@@ -85,7 +85,7 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
       await expect(page).toHaveURL(/\/dashboard/);
 
       // Modal should be visible
-      await expect(page.getByTestId('create-workflow-modal')).toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible();
     });
 
     test('create workflow button shows keyboard shortcut hint (C W)', async ({ page }) => {
@@ -95,24 +95,24 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
 
     test('create workflow modal can be closed via close button', async ({ page }) => {
       await page.getByTestId('quick-action-create-workflow').click();
-      await expect(page.getByTestId('create-workflow-modal')).toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible();
 
-      await page.getByTestId('create-workflow-modal-close').click();
-      await expect(page.getByTestId('create-workflow-modal')).not.toBeVisible();
+      await page.getByRole('dialog', { name: 'Create Workflow', exact: true }).getByRole('button', { name: 'Close dialog', exact: true }).click();
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible();
     });
 
     test('create workflow modal can be closed via backdrop click', async ({ page }) => {
       await page.getByTestId('quick-action-create-workflow').click();
-      await expect(page.getByTestId('create-workflow-modal')).toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible();
 
       // Click outside the modal content (on the backdrop)
-      await page.locator('[data-testid="create-workflow-modal"]').click({ position: { x: 10, y: 10 } });
-      await expect(page.getByTestId('create-workflow-modal')).not.toBeVisible();
+      await page.getByTestId('create-workflow-backdrop').click({ position: { x: 10, y: 10 } });
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible();
     });
 
     test('workflow can be created from dashboard modal (quick mode)', async ({ page }) => {
       await page.getByTestId('quick-action-create-workflow').click();
-      await expect(page.getByTestId('create-workflow-modal')).toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible();
 
       // Fill in workflow details (quick mode is default)
       const workflowTitle = `TB77 Test Workflow ${Date.now()}`;
@@ -122,7 +122,7 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
       await page.getByTestId('create-submit-button').click();
 
       // Modal should close
-      await expect(page.getByTestId('create-workflow-modal')).not.toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible();
 
       // Toast should appear
       await expect(page.getByText('Workflow created successfully')).toBeVisible({ timeout: 5000 });
@@ -154,7 +154,7 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
       await page.keyboard.press('w');
 
       // Modal should open
-      await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 2000 });
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 2000 });
     });
 
     test('keyboard shortcuts are disabled when create task modal is open', async ({ page }) => {
@@ -167,7 +167,7 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
       await page.keyboard.press('w');
 
       // Create workflow modal should NOT be visible (shortcuts disabled)
-      await expect(page.getByTestId('create-workflow-modal')).not.toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible();
 
       // Create task modal should still be open
       await expect(page.getByTestId('create-task-modal')).toBeVisible();
@@ -176,7 +176,7 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
     test('keyboard shortcuts are disabled when create workflow modal is open', async ({ page }) => {
       // Open create workflow modal
       await page.getByTestId('quick-action-create-workflow').click();
-      await expect(page.getByTestId('create-workflow-modal')).toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible();
 
       // Try to open create task with shortcut - should not work
       await page.keyboard.press('c');
@@ -186,7 +186,7 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
       await expect(page.getByTestId('create-task-modal')).not.toBeVisible();
 
       // Create workflow modal should still be open
-      await expect(page.getByTestId('create-workflow-modal')).toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible();
     });
   });
 
@@ -277,7 +277,7 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
       await page.keyboard.press('w');
 
       // Modal should open
-      await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 2000 });
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 2000 });
     });
 
     test('C T keyboard shortcut works on Workflows page', async ({ page }) => {
@@ -303,7 +303,7 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
       await page.keyboard.press('w');
 
       // Modal should open
-      await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 2000 });
+      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 2000 });
     });
 
     test('Tasks page Create Task button shows keyboard hint', async ({ page }) => {

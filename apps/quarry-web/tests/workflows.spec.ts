@@ -296,7 +296,7 @@ test.describe('TB25: Workflow List + Create', () => {
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
   });
 
   test('create workflow modal has input fields', async ({ page }) => {
@@ -304,7 +304,7 @@ test.describe('TB25: Workflow List + Create', () => {
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
     await expect(page.getByTestId('create-title-input')).toBeVisible();
     await expect(page.getByTestId('create-playbook-input')).toBeVisible();
@@ -316,10 +316,10 @@ test.describe('TB25: Workflow List + Create', () => {
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
-    await page.getByTestId('create-modal-close').click();
-    await expect(page.getByTestId('create-workflow-modal')).not.toBeVisible({ timeout: 5000 });
+    await page.getByRole('dialog', { name: 'Create Workflow', exact: true }).getByRole('button', { name: 'Close dialog', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible({ timeout: 5000 });
   });
 
   test('clicking status filter changes filter', async ({ page }) => {
@@ -458,7 +458,7 @@ test.describe('TB25: Workflow List + Create', () => {
 
     // Open create modal
     await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
 
     // Fill in the form
     const timestamp = Date.now();
@@ -470,7 +470,7 @@ test.describe('TB25: Workflow List + Create', () => {
     await page.getByTestId('create-submit-button').click();
 
     // Modal should close
-    await expect(page.getByTestId('create-workflow-modal')).not.toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible({ timeout: 10000 });
 
     // Verify via API that workflow was created
     const afterResponse = await page.request.get('/api/workflows');
