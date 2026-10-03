@@ -100,3 +100,59 @@ Leave playbook-only workflow creation to **el-1dquh0** (workflows.spec.ts,
 playbooks.spec.ts, tb77, tb122, tb148); those files were not changed here.
 Leave responsive dependency graph coverage to **el-29w9r3**.
 Full pass/fail counts and complete root-cause grouping remain outstanding.
+
+
+## Resumable continuation (2026-10-03)
+
+`pnpm install --frozen-lockfile` passed again. Two further workspace restarts
+interrupted execution: shard 1 was restarted and completed; the first shard 2
+attempt was killed. Complete baseline shard 1 is preserved at
+`.stoneforge/triage-el-2y9h5w/shard-1.json`: **87 passed, 11 failed, 19 skipped**
+(117 tests). These are partial counts, not final suite counts.
+
+Run `python3 apps/quarry-web/scripts/triage-shards.py` from this worktree to
+resume all 20 shards sequentially. It skips only valid, complete JSON reports,
+keeps raw stdout/stderr separately, removes only the dedicated test scratch DB,
+and isolates PATH from global Playwright while exposing Node through a private
+bin directory. Do not run another browser suite concurrently. The initial
+browser install printed progress to stdout, so its prefix was separated from
+the saved JSON. Shard 1 ran before the following selector fixes.
+
+### Every shard 1 failure, grouped
+
+Stale selector/test-id:
+- `core-components.spec.ts:179` dropdown menus open and show options: broad
+  `/create/i` button selector matched three buttons. Use `create-task-button`.
+- `dark-light-mode.spec.ts:179` notification types list has horizontal padding:
+  padding belongs to the responsive row, not its parent container.
+
+Intentional UI changes and test fixtures:
+- `command-palette.spec.ts:105` filters results on search.
+- `command-palette.spec.ts:140` keyboard navigation works.
+  Both used the removed Task Flow command; now use Tasks and `/tasks`.
+- `create-channel.spec.ts:177` required fields for group channel.
+- `create-channel.spec.ts:303` submit disabled without required fields.
+- `create-library.spec.ts:152` required fields.
+- `create-library.spec.ts:252` submit disabled without required fields.
+  Creator controls were removed; current user is assigned automatically.
+- `create-channel.spec.ts:263` create group channel from modal.
+- `create-channel.spec.ts:357` channel appears after creation.
+  Seed another entity before opening the dialog and select it as member;
+  fresh setup otherwise contains only operator and the API needs two members.
+
+Real app bug (left unchanged):
+- `bulk-operations.spec.ts:150` bulk status change updates selected tasks.
+  **el-2sdvvp**: task table header intercepts clicks on visible
+  `bulk-status-option-in_progress`; investigate menu stacking/positioning.
+
+All ten stale/changed-UI cases above were fixed. Targeted verification across
+these five specs (grep filters/keyboard/required fields/from modal/after creation/
+dropdown menus/horizontal padding): **14 passed, 0 skipped, 0 failed**.
+No application source changed. No changesets required.
+
+Remaining work: finish baseline shards 2–20, investigate and group their
+failures, fix remaining stale tests, file distinct app bugs, then run final
+verification and report complete counts. Existing workflow task el-1dquh0 and
+responsive dependency graph task el-29w9r3 remain outside this fix scope.
+The earlier dashboard repeat check passed 54 tests; page.goto timeout remains
+classified flaky/environment, not reproduced.

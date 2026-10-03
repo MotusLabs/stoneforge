@@ -159,7 +159,7 @@ test.describe('TB29: Create Library', () => {
 
     // Check for required fields
     await expect(page.getByTestId('create-library-name-input')).toBeVisible();
-    await expect(page.getByTestId('create-library-created-by-select')).toBeVisible();
+    await expect(page.getByTestId('create-library-created-by-select')).toHaveCount(0);
     await expect(page.getByTestId('create-library-parent-select')).toBeVisible();
     await expect(page.getByTestId('create-library-tags-input')).toBeVisible();
     await expect(page.getByTestId('create-library-submit-button')).toBeVisible();
@@ -228,13 +228,7 @@ test.describe('TB29: Create Library', () => {
     const uniqueName = `UI Created Library ${Date.now()}`;
     await page.getByTestId('create-library-name-input').fill(uniqueName);
 
-    // Wait for entities to load and select one if available
-    await page.waitForTimeout(500);
-    const createdBySelect = page.getByTestId('create-library-created-by-select');
-    const options = await createdBySelect.locator('option').count();
-    if (options > 1) {
-      await createdBySelect.selectOption({ index: 1 });
-    }
+    // The dialog assigns the current user as creator.
 
     // Submit the form
     await page.getByTestId('create-library-submit-button').click();
@@ -263,21 +257,8 @@ test.describe('TB29: Create Library', () => {
     // Fill in name only
     await page.getByTestId('create-library-name-input').fill('Test Library');
 
-    // Wait for entities to load
-    await page.waitForTimeout(500);
+    await expect(page.getByTestId('create-library-submit-button')).toBeEnabled();
 
-    // If an entity is automatically selected, button might be enabled now
-    // Otherwise it should still be disabled
-    const createdBySelect = page.getByTestId('create-library-created-by-select');
-    const selectedValue = await createdBySelect.inputValue();
-
-    if (selectedValue) {
-      // An entity is selected, button should be enabled
-      await expect(page.getByTestId('create-library-submit-button')).toBeEnabled();
-    } else {
-      // No entity selected, button should be disabled
-      await expect(page.getByTestId('create-library-submit-button')).toBeDisabled();
-    }
   });
 
   test('parent library dropdown shows available libraries', async ({ page }) => {
@@ -342,13 +323,7 @@ test.describe('TB29: Create Library', () => {
     const uniqueName = `Visible Library ${Date.now()}`;
     await page.getByTestId('create-library-name-input').fill(uniqueName);
 
-    // Select an entity
-    await page.waitForTimeout(500);
-    const createdBySelect = page.getByTestId('create-library-created-by-select');
-    const options = await createdBySelect.locator('option').count();
-    if (options > 1) {
-      await createdBySelect.selectOption({ index: 1 });
-    }
+    // The dialog assigns the current user as creator.
 
     // Submit
     await page.getByTestId('create-library-submit-button').click();

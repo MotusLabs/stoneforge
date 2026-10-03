@@ -190,7 +190,7 @@ test.describe('TB31: Create Channel', () => {
     await expect(page.getByTestId('create-channel-visibility-select')).toBeVisible();
     await expect(page.getByTestId('create-channel-join-policy-select')).toBeVisible();
     await expect(page.getByTestId('create-channel-members-list')).toBeVisible();
-    await expect(page.getByTestId('create-channel-created-by-select')).toBeVisible();
+    await expect(page.getByTestId('create-channel-created-by-select')).toHaveCount(0);
     await expect(page.getByTestId('create-channel-submit-button')).toBeVisible();
     await expect(page.getByTestId('create-channel-cancel-button')).toBeVisible();
   });
@@ -261,6 +261,10 @@ test.describe('TB31: Create Channel', () => {
   });
 
   test('can create a group channel from modal', async ({ page }) => {
+    const memberResponse = await page.request.post('/api/entities', {
+      data: { name: `channel-member-${Date.now()}`, entityType: 'human', createdBy: 'el-0000' },
+    });
+    expect(memberResponse.ok()).toBe(true);
     await page.goto('/messages');
     await expect(page.getByTestId('channel-list')).toBeVisible({ timeout: 5000 });
 
@@ -272,13 +276,7 @@ test.describe('TB31: Create Channel', () => {
     const uniqueName = `ui-modal-channel-${Date.now()}`;
     await page.getByTestId('create-channel-name-input').fill(uniqueName);
 
-    // Wait for entities to load and select one if available
-    await page.waitForTimeout(500);
-    const createdBySelect = page.getByTestId('create-channel-created-by-select');
-    const options = await createdBySelect.locator('option').count();
-    if (options > 1) {
-      await createdBySelect.selectOption({ index: 1 });
-    }
+    // The dialog assigns the current user as creator.
 
     // Group channels need at least 2 members - select an additional member
     const membersList = page.getByTestId('create-channel-members-list');
@@ -314,20 +312,8 @@ test.describe('TB31: Create Channel', () => {
     // Fill in name only
     await page.getByTestId('create-channel-name-input').fill('Test Channel');
 
-    // Wait for entities to load
-    await page.waitForTimeout(500);
+    await expect(page.getByTestId('create-channel-submit-button')).toBeEnabled();
 
-    // If an entity is automatically selected, button might be enabled now
-    const createdBySelect = page.getByTestId('create-channel-created-by-select');
-    const selectedValue = await createdBySelect.inputValue();
-
-    if (selectedValue) {
-      // An entity is selected, button should be enabled
-      await expect(page.getByTestId('create-channel-submit-button')).toBeEnabled();
-    } else {
-      // No entity selected, button should be disabled
-      await expect(page.getByTestId('create-channel-submit-button')).toBeDisabled();
-    }
   });
 
   test('empty state in sidebar shows create channel link', async ({ page }) => {
@@ -355,6 +341,10 @@ test.describe('TB31: Create Channel', () => {
   });
 
   test('channel appears in list after creation', async ({ page }) => {
+    const memberResponse = await page.request.post('/api/entities', {
+      data: { name: `channel-member-${Date.now()}`, entityType: 'human', createdBy: 'el-0000' },
+    });
+    expect(memberResponse.ok()).toBe(true);
     await page.goto('/messages');
     await expect(page.getByTestId('channel-list')).toBeVisible({ timeout: 5000 });
 
@@ -366,13 +356,7 @@ test.describe('TB31: Create Channel', () => {
     const uniqueName = `visible-channel-${Date.now()}`;
     await page.getByTestId('create-channel-name-input').fill(uniqueName);
 
-    // Select an entity
-    await page.waitForTimeout(500);
-    const createdBySelect = page.getByTestId('create-channel-created-by-select');
-    const options = await createdBySelect.locator('option').count();
-    if (options > 1) {
-      await createdBySelect.selectOption({ index: 1 });
-    }
+    // The dialog assigns the current user as creator.
 
     // Group channels need at least 2 members - select an additional member
     const membersList = page.getByTestId('create-channel-members-list');

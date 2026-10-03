@@ -115,7 +115,6 @@ test.describe('TB10: Command Palette', () => {
 
     // Should show filtered results
     await expect(page.getByTestId('command-item-nav-tasks')).toBeVisible();
-    await expect(page.getByTestId('command-item-nav-task-flow')).toBeVisible();
 
     // Should not show unrelated items
     await expect(page.getByTestId('command-item-nav-messages')).not.toBeVisible();
@@ -145,18 +144,18 @@ test.describe('TB10: Command Palette', () => {
     await page.keyboard.press('Meta+k');
     await expect(page.getByTestId('command-palette')).toBeVisible();
 
-    // Type to filter to a single item (Task Flow)
-    await page.getByTestId('command-palette-input').fill('Task Flow');
+    // Type to filter to a single item (Tasks)
+    await page.getByTestId('command-palette-input').fill('Tasks');
 
     // Wait for filtering
-    await expect(page.getByTestId('command-item-nav-task-flow')).toBeVisible();
+    await expect(page.getByTestId('command-item-nav-tasks')).toBeVisible();
 
     // Press Enter to navigate (first matching item is auto-selected)
     await page.keyboard.press('Enter');
 
-    // Should navigate to task-flow page
-    await expect(page).toHaveURL(/\/dashboard\/task-flow/);
-    await expect(page.getByTestId('task-flow-page')).toBeVisible();
+    // Should navigate to tasks page
+    await expect(page).toHaveURL(/\/tasks/);
+    await expect(page.getByTestId('tasks-page')).toBeVisible();
   });
 
   test('command palette toggles open and closed with Cmd+K', async ({ page }) => {

@@ -181,7 +181,7 @@ test.describe('TB73: Core Component Styling', () => {
       await page.waitForLoadState('networkidle');
 
       // Open create task modal
-      const createBtn = page.getByRole('button', { name: /create/i });
+      const createBtn = page.getByTestId('create-task-button');
       if (await createBtn.isVisible()) {
         await createBtn.click();
         await page.waitForTimeout(300);

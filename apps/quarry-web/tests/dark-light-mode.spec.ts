@@ -183,8 +183,8 @@ test.describe('TB72: Dark/Light Mode Overhaul', () => {
       // The notification types container should be visible
       await expect(page.getByTestId('notification-task-assigned')).toBeVisible();
 
-      // Check that the parent container has px-4 class for padding
-      const container = page.locator('[data-testid="notification-task-assigned"]').locator('..');
+      // Padding now belongs to each responsive notification row.
+      const container = page.getByTestId('notification-task-assigned');
 
       // The container should have padding (either via px-4 class or computed style)
       const paddingLeft = await container.evaluate((el) => {
