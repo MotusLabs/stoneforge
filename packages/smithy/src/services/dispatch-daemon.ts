@@ -51,7 +51,7 @@ import type { TaskAssignmentService } from './task-assignment-service.js';
 import type { StewardScheduler } from './steward-scheduler.js';
 import type { AgentPoolService } from './agent-pool-service.js';
 import type { SettingsService } from './settings-service.js';
-import type { RateLimitTracker } from './rate-limit-tracker.js';
+import type { RateLimitEntry, RateLimitTracker } from './rate-limit-tracker.js';
 import { createRateLimitTracker } from './rate-limit-tracker.js';
 import type { WorkerMetadata, StewardMetadata, StewardFocus } from '../types/agent.js';
 import type { PoolSpawnRequest } from '../types/agent-pool.js';
@@ -420,6 +420,24 @@ interface NormalizedConfig {
 // ============================================================================
 
 /**
+ * The rate limit that refuses a session for one specific agent.
+ *
+ * Returned by {@link DispatchDaemon.isAgentRateLimited} when the account the
+ * agent's session would run against is currently limited.
+ */
+export interface AgentRateLimit {
+  /**
+   * Normalised account key of the limited account (see
+   * `utils/account-key.ts`). For a worker served by the fallback chain
+   * rather than its own executable, this is the chain entry that resets
+   * soonest.
+   */
+  readonly accountKey: string;
+  /** ISO timestamp when the named account's limit resets. */
+  readonly resetsAt: string;
+}
+
+/**
  * Dispatch Daemon interface for coordinating task assignment and message delivery.
  *
  * The daemon provides methods for:
@@ -535,6 +553,24 @@ export interface DispatchDaemon {
     limits: Array<{ executable: string; resetsAt: string }>;
     soonestReset?: string;
   }>;
+
+  /**
+   * Returns the rate limit that refuses a session for one specific agent,
+   * or undefined when the agent's account may be spawned.
+   *
+   * This is the per-agent counterpart of `getRateLimitStatus().isPaused`:
+   * the global flag is true only when *every* enabled ephemeral worker's
+   * account is limited, so it says nothing about one agent whose own
+   * account is exhausted while others are free. Session-start callers
+   * (HTTP routes, manual dispatch) should call this with the target agent
+   * to refuse the spawn with a 429 naming the account and its reset time.
+   *
+   * The fallback-chain rule of `resolveExecutableWithFallback` applies: an
+   * agent with an explicit `executablePath` is judged on its own account
+   * key alone, while an agent served by the chain is refused only when
+   * every chain entry is limited.
+   */
+  isAgentRateLimited(agent: AgentEntity): AgentRateLimit | undefined;
 
   /**
    * Manually put the daemon to sleep until the specified time.
@@ -906,6 +942,55 @@ export class DispatchDaemonImpl implements DispatchDaemon {
         resetsAt: entry.resetsAt.toISOString(),
       })),
       soonestReset: soonestReset?.toISOString(),
+    };
+  }
+
+  isAgentRateLimited(agent: AgentEntity): AgentRateLimit | undefined {
+    // `resolveExecutableWithFallback` is the single authority on whether a
+    // session may spawn for this agent: a worker with an explicit
+    // `executablePath` is judged on its own account key alone, a worker
+    // served by the fallback chain only when every chain entry is limited
+    // (design D6). Anything other than 'all_limited' means spawnable.
+    if (this.resolveExecutableWithFallback(agent) !== 'all_limited') {
+      return undefined;
+    }
+
+    // Name the account whose limit refused the session. Prefer the agent's
+    // own account key: it is what the session would bill to, and it covers
+    // both the explicit-executable case and the chain case where the agent's
+    // effective executable is itself one of the limited chain entries.
+    const ownKey = resolveAccountKey(agent, this.settingsService);
+    const ownLimit = this.rateLimitTracker.getLimit(ownKey);
+    if (ownLimit) {
+      return { accountKey: ownKey, resetsAt: ownLimit.resetsAt.toISOString() };
+    }
+
+    // The agent is served by a fully-limited chain while its own effective
+    // executable is not itself tracked (the chain names other binaries).
+    // Report the chain entry that resets soonest, so the caller's retry
+    // waits no longer than necessary.
+    const fallbackChain = this.settingsService?.getAgentDefaults().fallbackChain ?? [];
+    let soonestChainLimit: RateLimitEntry | undefined;
+    for (const chainExecutable of fallbackChain) {
+      const entry = this.rateLimitTracker.getLimit(chainExecutable);
+      if (entry && (!soonestChainLimit || entry.resetsAt.getTime() < soonestChainLimit.resetsAt.getTime())) {
+        soonestChainLimit = entry;
+      }
+    }
+    if (soonestChainLimit) {
+      return {
+        accountKey: soonestChainLimit.executable,
+        resetsAt: soonestChainLimit.resetsAt.toISOString(),
+      };
+    }
+
+    // No specific entry could be named (for example the limit expired
+    // between the checks above). Fall back to the tracker's soonest reset
+    // so the refusal still carries a usable reset time.
+    const soonestReset = this.rateLimitTracker.getSoonestResetTime();
+    return {
+      accountKey: ownKey,
+      resetsAt: soonestReset?.toISOString() ?? new Date(Date.now() + 60_000).toISOString(),
     };
   }
 

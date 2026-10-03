@@ -64,6 +64,14 @@ export interface RateLimitTracker {
   isLimited(executable: string): boolean;
 
   /**
+   * Return the currently-limited entry for an executable (after auto-expiring
+   * stale ones), or undefined when it is not limited. Like `isLimited`, but
+   * also exposes *when* the limit resets, so callers can report the reset
+   * time (HTTP 429 Retry-After) instead of only the fact of the limit.
+   */
+  getLimit(executable: string): RateLimitEntry | undefined;
+
+  /**
    * Walk the fallback chain and return the first executable that
    * is not currently rate-limited. Returns undefined if all are limited.
    */
@@ -174,6 +182,24 @@ class RateLimitTrackerImpl implements RateLimitTracker {
       return false;
     }
     return true;
+  }
+
+  getLimit(executable: string): RateLimitEntry | undefined {
+    const key = normalizeExecutableKey(executable);
+    const entry = this.limits.get(key);
+    if (!entry) {
+      return undefined;
+    }
+    if (entry.resetsAt.getTime() <= Date.now()) {
+      // Stale — auto-expire
+      this.limits.delete(key);
+      return undefined;
+    }
+    return {
+      executable: key,
+      resetsAt: entry.resetsAt,
+      recordedAt: entry.recordedAt,
+    };
   }
 
   getAvailableExecutable(fallbackChain: string[]): string | undefined {

@@ -167,11 +167,14 @@ export interface WorkerTaskService {
    * This method does NOT check rate limits internally. The dispatch daemon
    * checks `resolveExecutableWithFallback()` before calling this method,
    * but direct callers (e.g., manual API, HTTP routes) MUST verify that
-   * the target agent's account is not rate-limited before calling.
-   * `(await dispatchDaemon.getRateLimitStatus()).isPaused` is true only when
-   * every enabled ephemeral worker's account is limited; it does not tell
-   * you whether one specific agent's account is limited. Spawning a
-   * session against a rate-limited executable will fail or waste resources.
+   * the target agent's account is not rate-limited before calling:
+   * `dispatchDaemon.isAgentRateLimited(agent)` returns the limit (with its
+   * reset time) for that one agent, or undefined when it may spawn. The
+   * global `(await dispatchDaemon.getRateLimitStatus()).isPaused` flag is
+   * true only when every enabled ephemeral worker's account is limited;
+   * it does not tell you whether one specific agent's account is limited.
+   * Spawning a session against a rate-limited executable will fail or
+   * waste resources.
    *
    * @param taskId - The task to start
    * @param agentId - The worker agent
@@ -288,10 +291,11 @@ export class WorkerTaskServiceImpl implements WorkerTaskService {
 
   // NOTE: This method does NOT check rate limits internally.
   // Callers MUST verify the target agent's account is not rate-limited
-  // before calling. The dispatch daemon checks before calling this, but
-  // direct API callers should check the agent's account key (or, for a
-  // global stall, `(await dispatchDaemon.getRateLimitStatus()).isPaused`,
-  // which is true only when every enabled ephemeral worker is limited).
+  // before calling: `dispatchDaemon.isAgentRateLimited(agent)` covers one
+  // specific agent. The dispatch daemon checks before calling this, but
+  // direct API callers must check too (or, for a global stall,
+  // `(await dispatchDaemon.getRateLimitStatus()).isPaused`, which is true
+  // only when every enabled ephemeral worker is limited).
   async startWorkerOnTask(
     taskId: ElementId,
     agentId: EntityId,

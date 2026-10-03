@@ -209,6 +209,7 @@ export {
   type DispatchDaemonConfig,
   type PollResult,
   type DispatchDaemon,
+  type AgentRateLimit,
   type OnSessionStartedCallback,
   // Implementation
   DispatchDaemonImpl,

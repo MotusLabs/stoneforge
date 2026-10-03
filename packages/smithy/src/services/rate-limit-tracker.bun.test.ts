@@ -55,6 +55,33 @@ describe('RateLimitTracker', () => {
     test('isLimited returns false for unknown executable', () => {
       expect(tracker.isLimited('unknown-exec')).toBe(false);
     });
+  });
+
+  describe('getLimit', () => {
+    test('returns the entry with its reset time for a limited executable', () => {
+      const futureDate = new Date(Date.now() + 60_000);
+      tracker.markLimited('claude', futureDate);
+
+      const entry = tracker.getLimit('claude');
+      expect(entry).toBeDefined();
+      expect(entry!.executable).toBe('claude');
+      expect(entry!.resetsAt).toEqual(futureDate);
+    });
+
+    test('returns undefined for an unlimited executable', () => {
+      const futureDate = new Date(Date.now() + 60_000);
+      tracker.markLimited('claude', futureDate);
+
+      expect(tracker.getLimit('gpt-4')).toBeUndefined();
+    });
+
+    test('returns undefined for an expired entry', () => {
+      tracker.markLimited('claude', new Date(Date.now() - 1_000));
+
+      expect(tracker.getLimit('claude')).toBeUndefined();
+      // The stale entry is removed, matching isLimited's auto-expiry
+      expect(tracker.getAllLimits()).toHaveLength(0);
+    });
 
     test('multiple executables can be tracked independently', () => {
       const futureDate = new Date(Date.now() + 60_000);

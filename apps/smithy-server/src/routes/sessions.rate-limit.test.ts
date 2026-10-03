@@ -2,7 +2,9 @@
  * Session Routes - Rate Limit Guard Tests
  *
  * Tests that POST /api/agents/:id/start and POST /api/agents/:id/resume
- * return HTTP 429 with Retry-After header when all executables are rate-limited.
+ * return HTTP 429 with Retry-After header when all worker accounts are
+ * rate-limited (global stall) — and, since dispatch tiers, when the target
+ * agent's OWN account is limited while other accounts are free.
  */
 
 import { describe, test, expect, beforeEach, vi } from 'vitest';
@@ -18,17 +20,56 @@ import type { Services } from '../services.js';
 // Minimal mock factories
 // ============================================================================
 
-function createMockServices(overrides?: {
+/** A limited account key as tracked by the (mocked) rate limit tracker. */
+interface MockLimit {
+  executable: string;
+  resetsAt: string;
+}
+
+/** Knobs of the mocked dispatch daemon. */
+interface MockOptions {
+  /** `getRateLimitStatus().isPaused` — true only when EVERY account is limited. */
   rateLimitPaused?: boolean;
+  /** `getRateLimitStatus().soonestReset` (ISO). */
   soonestReset?: string;
-}): Services {
+  /** Currently limited account keys. Defaults to `claude` when paused. */
+  limits?: MockLimit[];
+  /** The agent returned by `agentRegistry.getAgent`. */
+  agent?: {
+    id?: string;
+    name?: string;
+    /** The agent's own executable — defines its account key. */
+    executablePath?: string;
+  };
+}
+
+/**
+ * Builds the minimal `Services` object the session routes need.
+ *
+ * The mocked `dispatchDaemon.isAgentRateLimited` mirrors the real daemon's
+ * per-agent rule at small scale: the agent is limited when its effective
+ * executable (`metadata.agent.executablePath` ?? the provider default
+ * `claude`) appears in `limits`. The fallback-chain variant of that rule is
+ * covered by the dispatch-daemon tests (`dispatch-daemon.bun.test.ts`).
+ */
+function createMockServices(overrides?: MockOptions): Services {
   const isPaused = overrides?.rateLimitPaused ?? false;
   const soonestReset = overrides?.soonestReset;
+  const limits: MockLimit[] = overrides?.limits
+    ?? (isPaused ? [{ executable: 'claude', resetsAt: soonestReset ?? new Date(Date.now() + 60_000).toISOString() }] : []);
 
   const mockAgent = {
-    id: 'agent-test-123',
-    name: 'test-worker',
-    metadata: { agent: { agentRole: 'worker', workerMode: 'ephemeral' } },
+    id: overrides?.agent?.id ?? 'agent-test-123',
+    name: overrides?.agent?.name ?? 'test-worker',
+    metadata: {
+      agent: {
+        agentRole: 'worker',
+        workerMode: 'ephemeral',
+        ...(overrides?.agent?.executablePath
+          ? { executablePath: overrides.agent.executablePath }
+          : {}),
+      },
+    },
   };
 
   return {
@@ -101,9 +142,16 @@ function createMockServices(overrides?: {
     dispatchDaemon: {
       getRateLimitStatus: vi.fn(() => ({
         isPaused,
-        limits: isPaused ? [{ executable: 'claude', resetsAt: soonestReset ?? new Date(Date.now() + 60_000).toISOString() }] : [],
+        limits,
         soonestReset,
       })),
+      // Per-agent guard: limited when the agent's effective executable is
+      // one of the limited account keys.
+      isAgentRateLimited: vi.fn((agent: { metadata?: { agent?: { executablePath?: string } } }) => {
+        const effective = agent.metadata?.agent?.executablePath ?? 'claude';
+        const limit = limits.find((entry) => entry.executable === effective);
+        return limit ? { accountKey: limit.executable, resetsAt: limit.resetsAt } : undefined;
+      }),
       // Satisfy the DispatchDaemon interface enough to avoid type errors
       start: vi.fn(async () => {}),
       stop: vi.fn(async () => {}),
@@ -122,6 +170,22 @@ function createMockServices(overrides?: {
 // ============================================================================
 // Tests
 // ============================================================================
+
+/** Builds a Hono app with the session routes mounted on the given services. */
+function createApp(services: Services): Hono {
+  const app = new Hono();
+  app.route('/', createSessionRoutes(services, vi.fn(() => {})));
+  return app;
+}
+
+/** POSTs an empty JSON body to the given session route. */
+function request(app: Hono, path: string): Promise<Response> {
+  return app.request(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+}
 
 describe('Session Routes - Rate Limit Guard', () => {
   describe('POST /api/agents/:id/start', () => {
@@ -240,6 +304,118 @@ describe('Session Routes - Rate Limit Guard', () => {
       });
 
       // Should succeed (201) since no rate limit
+      expect(response.status).toBe(201);
+      const body = await response.json() as { success: boolean };
+      expect(body.success).toBe(true);
+    });
+  });
+
+  describe('per-agent account guard (partial limit)', () => {
+    // Since dispatch tiers, `isPaused` is true only when EVERY account is
+    // limited. A partial limit must still refuse the agent whose own
+    // account is exhausted — otherwise the session spawns and immediately
+    // hits the limit — while agents on free accounts keep starting.
+
+    test('start returns 429 naming the account when only the target agent\'s account is limited', async () => {
+      const agentReset = new Date(Date.now() + 90_000).toISOString();
+      const services = createMockServices({
+        rateLimitPaused: false,
+        soonestReset: new Date(Date.now() + 30_000).toISOString(), // another account resets sooner
+        limits: [
+          { executable: 'claude', resetsAt: new Date(Date.now() + 30_000).toISOString() },
+          { executable: 'claude-glm', resetsAt: agentReset },
+        ],
+        agent: { id: 'agent-glm', name: 'glm-worker', executablePath: 'claude-glm' },
+      });
+
+      const response = await request(createApp(services), '/api/agents/agent-glm/start');
+
+      expect(response.status).toBe(429);
+
+      const body = await response.json() as {
+        error: { code: string; message: string; retryAfter: number; accountKey?: string; resetsAt?: string };
+      };
+      expect(body.error.code).toBe('RATE_LIMITED');
+      // The refusal names the limited account key …
+      expect(body.error.accountKey).toBe('claude-glm');
+      expect(body.error.message).toContain('claude-glm');
+      // … and ITS reset time, not the global soonest reset
+      expect(body.error.resetsAt).toBe(agentReset);
+      expect(body.error.message).toContain(agentReset);
+
+      const retryAfter = Number(response.headers.get('Retry-After'));
+      expect(retryAfter).toBeGreaterThan(60); // 90s, not the 30s soonest reset
+      expect(retryAfter).toBeLessThanOrEqual(90);
+      expect(body.error.retryAfter).toBe(retryAfter);
+    });
+
+    test('start allows an agent whose account is free while another account is limited', async () => {
+      const services = createMockServices({
+        rateLimitPaused: false,
+        soonestReset: new Date(Date.now() + 30_000).toISOString(),
+        limits: [{ executable: 'claude', resetsAt: new Date(Date.now() + 30_000).toISOString() }],
+        agent: { id: 'agent-glm-free', name: 'glm-worker-free', executablePath: 'claude-glm' },
+      });
+
+      const response = await request(createApp(services), '/api/agents/agent-glm-free/start');
+
+      // The `claude` account being limited must not block a `claude-glm` agent
+      expect(response.status).toBe(201);
+      const body = await response.json() as { success: boolean };
+      expect(body.success).toBe(true);
+    });
+
+    test('start allows a default-account agent when the limit is on an unrelated wrapper', async () => {
+      // The mirror of the case above: the agent has no `executablePath`
+      // (provider default `claude` account) and only `claude-glm` is limited.
+      const services = createMockServices({
+        rateLimitPaused: false,
+        limits: [{ executable: 'claude-glm', resetsAt: new Date(Date.now() + 30_000).toISOString() }],
+        agent: { id: 'agent-default', name: 'default-worker' },
+      });
+
+      const response = await request(createApp(services), '/api/agents/agent-default/start');
+
+      expect(response.status).toBe(201);
+    });
+
+    test('resume returns 429 naming the account when only the target agent\'s account is limited', async () => {
+      const agentReset = new Date(Date.now() + 70_000).toISOString();
+      const services = createMockServices({
+        rateLimitPaused: false,
+        limits: [
+          { executable: 'claude', resetsAt: new Date(Date.now() + 20_000).toISOString() },
+          { executable: 'claude-glm', resetsAt: agentReset },
+        ],
+        agent: { id: 'agent-glm-resume', name: 'glm-worker-resume', executablePath: 'claude-glm' },
+      });
+
+      const response = await request(createApp(services), '/api/agents/agent-glm-resume/resume');
+
+      expect(response.status).toBe(429);
+      const body = await response.json() as {
+        error: { code: string; message: string; retryAfter: number; accountKey?: string; resetsAt?: string };
+      };
+      expect(body.error.code).toBe('RATE_LIMITED');
+      expect(body.error.accountKey).toBe('claude-glm');
+      expect(body.error.resetsAt).toBe(agentReset);
+      expect(body.error.message).toContain('claude-glm');
+
+      const retryAfter = Number(response.headers.get('Retry-After'));
+      expect(retryAfter).toBeGreaterThan(60);
+      expect(retryAfter).toBeLessThanOrEqual(70);
+    });
+
+    test('resume allows an agent whose account is free while another account is limited', async () => {
+      const services = createMockServices({
+        rateLimitPaused: false,
+        soonestReset: new Date(Date.now() + 30_000).toISOString(),
+        limits: [{ executable: 'claude', resetsAt: new Date(Date.now() + 30_000).toISOString() }],
+        agent: { id: 'agent-glm-resume-free', name: 'glm-worker-resume-free', executablePath: 'claude-glm' },
+      });
+
+      const response = await request(createApp(services), '/api/agents/agent-glm-resume-free/resume');
+
       expect(response.status).toBe(201);
       const body = await response.json() as { success: boolean };
       expect(body.success).toBe(true);

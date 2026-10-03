@@ -51,6 +51,7 @@ import { createDispatchService, type DispatchService } from './dispatch-service.
 import type { SessionManager, SessionRecord, StartSessionOptions } from '../runtime/session-manager.js';
 import type { WorktreeManager, CreateWorktreeResult, CreateWorktreeOptions } from '../git/worktree-manager.js';
 import type { StewardScheduler } from './steward-scheduler.js';
+import type { RateLimitTracker } from './rate-limit-tracker.js';
 import { getOrchestratorTaskMeta, updateOrchestratorTaskMeta, appendTaskSessionHistory, type TaskSessionHistoryEntry } from '../types/task-meta.js';
 
 // Mock ensureTargetBranchExists to prevent real git remote operations in tests.
@@ -2904,6 +2905,191 @@ describe('Dispatch paused state (design D7)', () => {
     expect(timer()).toBeDefined();
 
     await timerDaemon.stop();
+  });
+});
+
+// ============================================================================
+// Per-agent rate limit guard — isAgentRateLimited()
+// ============================================================================
+
+describe('Per-agent rate limit guard (isAgentRateLimited)', () => {
+  let api: QuarryAPI;
+  let inboxService: InboxService;
+  let agentRegistry: AgentRegistry;
+  let taskAssignment: TaskAssignmentService;
+  let dispatchService: DispatchService;
+  let sessionManager: SessionManager;
+  let worktreeManager: WorktreeManager;
+  let stewardScheduler: StewardScheduler;
+  let settingsService: SettingsService;
+  let daemon: DispatchDaemon;
+  let testDbPath: string;
+  let systemEntity: EntityId;
+
+  beforeEach(async () => {
+    pinPathForRateLimitTests();
+    testDbPath = `/tmp/dispatch-daemon-rl-peragent-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const storage = createStorage({ path: testDbPath, create: true });
+    initializeSchema(storage);
+
+    api = createQuarryAPI(storage);
+    inboxService = createInboxService(storage);
+    agentRegistry = createAgentRegistry(api);
+    taskAssignment = createTaskAssignmentService(api);
+    dispatchService = createDispatchService(api, taskAssignment, agentRegistry);
+    sessionManager = createMockSessionManager();
+    worktreeManager = createMockWorktreeManager();
+    stewardScheduler = createMockStewardScheduler();
+    // Chain of [claude, claude-alt]: one plan, several binaries. Workers with
+    // their own wrapper executable (claude-glm) are separate accounts.
+    settingsService = createMockSettingsService({
+      fallbackChain: ['claude', 'claude-alt'],
+    });
+
+    const { createEntity, EntityTypeValue } = await import('@stoneforge/core');
+    const entity = await createEntity({
+      name: 'test-system-rl-peragent',
+      entityType: EntityTypeValue.SYSTEM,
+      createdBy: 'system:test' as EntityId,
+    });
+    const saved = await api.create(entity as unknown as Record<string, unknown> & { createdBy: EntityId });
+    systemEntity = saved.id as unknown as EntityId;
+
+    const config: DispatchDaemonConfig = {
+      ensureTargetBranchExists: mockEnsureTargetBranchExists,
+      pollIntervalMs: 100,
+      workerAvailabilityPollEnabled: false,
+      inboxPollEnabled: false,
+      stewardTriggerPollEnabled: false,
+      workflowTaskPollEnabled: false,
+    };
+
+    daemon = new DispatchDaemonImpl(
+      api,
+      agentRegistry,
+      sessionManager,
+      dispatchService,
+      worktreeManager,
+      taskAssignment,
+      stewardScheduler,
+      inboxService,
+      config,
+      undefined, // poolService
+      settingsService
+    );
+  });
+
+  afterEach(async () => {
+    await daemon.stop();
+    if (fs.existsSync(testDbPath)) {
+      fs.unlinkSync(testDbPath);
+    }
+    restorePathAfterRateLimitTests();
+  });
+
+  async function createTestWorker(
+    name: string,
+    options?: { executablePath?: string }
+  ): Promise<AgentEntity> {
+    return agentRegistry.registerWorker({
+      name,
+      workerMode: 'ephemeral',
+      createdBy: systemEntity,
+      maxConcurrentTasks: 1,
+      executablePath: options?.executablePath,
+    });
+  }
+
+  test('an agent whose own account is limited is refused while another account is free', async () => {
+    // The scenario behind the HTTP session-start guard: dispatch as a whole
+    // is NOT paused (a chain account is free), but this worker's own
+    // claude-glm account is exhausted. The guard must name the account and
+    // its reset time so the caller can answer with a specific 429.
+    const wrapper = await createTestWorker('e1-glm', { executablePath: 'claude-glm' });
+    await createTestWorker('e2-default');
+    const resetsAt = new Date(Date.now() + 20 * 60 * 1000);
+
+    daemon.handleRateLimitDetected('claude-glm', resetsAt);
+
+    // Partial limit: dispatch is active …
+    expect((await daemon.getRateLimitStatus()).isPaused).toBe(false);
+    // … but e1's own account refuses it
+    const limit = daemon.isAgentRateLimited(wrapper);
+    expect(limit).toBeDefined();
+    expect(limit?.accountKey).toBe('claude-glm');
+    expect(limit?.resetsAt).toBe(resetsAt.toISOString());
+  });
+
+  test('an agent on a free account is not refused while another account is limited', async () => {
+    // The mirror case: the chain account is limited, so `isPaused` would have
+    // been true under the old "any limit pauses" rule, but the wrapper
+    // worker's own account is free and it must be allowed to start.
+    const wrapper = await createTestWorker('e3-glm-free', { executablePath: 'claude-glm' });
+    await createTestWorker('e4-default');
+
+    daemon.handleRateLimitDetected('claude', new Date(Date.now() + 20 * 60 * 1000));
+
+    expect((await daemon.getRateLimitStatus()).isPaused).toBe(false);
+    expect(daemon.isAgentRateLimited(wrapper)).toBeUndefined();
+  });
+
+  test('a limited account that has expired no longer refuses the agent', async () => {
+    // Scenario "Account recovers": once the reset time has passed, the worker
+    // on that account is eligible again. The tracker is marked directly
+    // because handleRateLimitDetected clamps reset times up to a minimum
+    // floor, which would keep the limit alive.
+    const wrapper = await createTestWorker('e5-glm-expired', { executablePath: 'claude-glm' });
+    const tracker = (daemon as unknown as { rateLimitTracker: RateLimitTracker }).rateLimitTracker;
+
+    tracker.markLimited('claude-glm', new Date(Date.now() - 1_000));
+    expect(daemon.isAgentRateLimited(wrapper)).toBeUndefined();
+  });
+
+  test('an agent without an explicit executable is refused only when the whole chain is limited', async () => {
+    // The fallback-chain rule: a worker served by the chain may fall back to
+    // claude-alt while claude alone is limited, so a partial chain must not
+    // refuse it. Only when every chain entry is limited is it refused — and
+    // then the named account is the chain entry that resets soonest.
+    const worker = await createTestWorker('e6-chain');
+
+    // No public path produces a partially-limited chain (a limit reported
+    // for a chain entry widens to the whole plan), so mark one entry through
+    // the daemon's tracker directly.
+    const tracker = (daemon as unknown as { rateLimitTracker: RateLimitTracker }).rateLimitTracker;
+    const claudeReset = new Date(Date.now() + 30 * 60 * 1000);
+    tracker.markLimited('claude', claudeReset);
+
+    // Partial chain → fall back to claude-alt, not refused
+    expect(daemon.isAgentRateLimited(worker)).toBeUndefined();
+
+    // Every chain entry limited → refused, naming the soonest reset
+    tracker.markLimited('claude-alt', new Date(Date.now() + 15 * 60 * 1000));
+    const limit = daemon.isAgentRateLimited(worker);
+    expect(limit).toBeDefined();
+    expect(['claude', 'claude-alt']).toContain(limit?.accountKey);
+    // … the entry that resets soonest
+    expect(limit?.accountKey).toBe('claude');
+    expect(limit?.resetsAt).toBe(claudeReset.toISOString());
+  });
+
+  test('every account limited refuses every agent (global stall)', async () => {
+    const wrapper = await createTestWorker('e7-glm-all', { executablePath: 'claude-glm' });
+    const worker = await createTestWorker('e8-default-all');
+
+    daemon.handleRateLimitDetected('claude-glm', new Date(Date.now() + 30 * 60 * 1000));
+    daemon.handleRateLimitDetected('claude', new Date(Date.now() + 20 * 60 * 1000));
+
+    expect((await daemon.getRateLimitStatus()).isPaused).toBe(true);
+    expect(daemon.isAgentRateLimited(wrapper)?.accountKey).toBe('claude-glm');
+    expect(daemon.isAgentRateLimited(worker)?.accountKey).toBe('claude');
+  });
+
+  test('an agent with no metadata is never refused', async () => {
+    // resolveExecutableWithFallback returns undefined for an agent without
+    // agent metadata; the guard must treat that as spawnable rather than
+    // throwing or guessing an account.
+    const bare = { id: 'el-bare' as EntityId, name: 'bare' } as AgentEntity;
+    expect(daemon.isAgentRateLimited(bare)).toBeUndefined();
   });
 });
 

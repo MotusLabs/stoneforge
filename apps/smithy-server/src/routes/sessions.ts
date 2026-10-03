@@ -5,10 +5,11 @@
  */
 
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { EntityId, ElementId, Task } from '@stoneforge/core';
 import { createTimestamp, ElementType } from '@stoneforge/core';
-import type { SessionFilter, SpawnedSessionEvent, AgentRole, WorkerMetadata, StewardMetadata } from '@stoneforge/smithy';
+import type { SessionFilter, SpawnedSessionEvent, AgentRole, WorkerMetadata, StewardMetadata, AgentEntity, DispatchDaemon } from '@stoneforge/smithy';
 import { createLogger, loadRolePrompt, getAgentMetadata, generateSessionBranchName, generateSessionWorktreePath, trackListeners } from '@stoneforge/smithy';
 import type { Services } from '../services.js';
 import { formatSessionRecord } from '../formatters.js';
@@ -205,6 +206,101 @@ export function attachSessionEventSaver(
   trackListeners(events, { 'event': onEvent, 'error': onError });
 }
 
+// ============================================================================
+// Rate limit guard (shared by session start and resume)
+// ============================================================================
+
+/**
+ * A rate-limit refusal for a session start/resume: everything the 429
+ * response needs. Produced by {@link evaluateRateLimitRefusal}.
+ */
+interface RateLimitRefusal {
+  /** Human-readable reason, naming the limited account when it is known. */
+  message: string;
+  /** Seconds until the named limit resets (>= 1). */
+  retryAfterSeconds: number;
+  /** ISO timestamp of the soonest reset (global refusal). */
+  soonestReset?: string;
+  /** Normalised account key of the limited account (per-agent refusal). */
+  accountKey?: string;
+  /** ISO timestamp when `accountKey` resets (per-agent refusal). */
+  resetsAt?: string;
+}
+
+/**
+ * Seconds to advise the client to wait before retrying, derived from a reset
+ * timestamp. Falls back to 60s when no reset time is known.
+ */
+function retryAfterSecondsFromReset(resetsAt: string | undefined): number {
+  if (!resetsAt) {
+    return 60; // Default to 60 seconds if no reset time available
+  }
+  return Math.max(1, Math.ceil((new Date(resetsAt).getTime() - Date.now()) / 1000));
+}
+
+/**
+ * Rate limit guard shared by session start and resume.
+ *
+ * Two checks, in order:
+ *
+ * 1. **Global stall** — `getRateLimitStatus().isPaused` is true only when
+ *    every enabled ephemeral worker's account is limited, so nothing can be
+ *    dispatched at all.
+ * 2. **This agent's account** — a partial limit does not pause dispatch, but
+ *    the agent being started or resumed may itself run on one of the limited
+ *    accounts. Without this check such a spawn slips through and immediately
+ *    hits the limit. `isAgentRateLimited` applies the fallback-chain rule:
+ *    an agent with an explicit `executablePath` is judged on its own account
+ *    key alone, an agent served by the chain only when every chain entry is
+ *    limited.
+ *
+ * @returns The refusal to answer with, or undefined when the session may start
+ */
+async function evaluateRateLimitRefusal(
+  dispatchDaemon: DispatchDaemon,
+  agent: AgentEntity
+): Promise<RateLimitRefusal | undefined> {
+  const rateLimitStatus = await dispatchDaemon.getRateLimitStatus();
+  if (rateLimitStatus.isPaused) {
+    return {
+      message: 'All worker accounts are currently rate-limited',
+      retryAfterSeconds: retryAfterSecondsFromReset(rateLimitStatus.soonestReset),
+      soonestReset: rateLimitStatus.soonestReset,
+    };
+  }
+
+  const agentLimit = dispatchDaemon.isAgentRateLimited(agent);
+  if (agentLimit) {
+    return {
+      message: `Account '${agentLimit.accountKey}' is currently rate-limited until ${agentLimit.resetsAt}`,
+      retryAfterSeconds: retryAfterSecondsFromReset(agentLimit.resetsAt),
+      accountKey: agentLimit.accountKey,
+      resetsAt: agentLimit.resetsAt,
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * Renders a {@link RateLimitRefusal} as the 429 response (with Retry-After).
+ */
+function rateLimitResponse(c: Context, refusal: RateLimitRefusal): Response {
+  return c.json(
+    {
+      error: {
+        code: 'RATE_LIMITED',
+        message: refusal.message,
+        retryAfter: refusal.retryAfterSeconds,
+        soonestReset: refusal.soonestReset,
+        accountKey: refusal.accountKey,
+        resetsAt: refusal.resetsAt,
+      },
+    },
+    { status: 429, headers: { 'Retry-After': String(refusal.retryAfterSeconds) } }
+  );
+}
+
 export function createSessionRoutes(
   services: Services,
   notifyClientsOfNewSession: NotifyClientsCallback
@@ -243,25 +339,14 @@ export function createSessionRoutes(
         );
       }
 
-      // Rate limit guard: reject when all executables are rate-limited.
-      // Returns 429 with Retry-After header set to the soonest reset time.
+      // Rate limit guard: reject when all worker accounts are rate-limited
+      // (global stall), or when this agent's own account is limited while
+      // others are free. Returns 429 with Retry-After set to the reset time
+      // of the account that refused the session.
       if (dispatchDaemon) {
-        const rateLimitStatus = await dispatchDaemon.getRateLimitStatus();
-        if (rateLimitStatus.isPaused) {
-          const retryAfterSeconds = rateLimitStatus.soonestReset
-            ? Math.max(1, Math.ceil((new Date(rateLimitStatus.soonestReset).getTime() - Date.now()) / 1000))
-            : 60; // Default to 60 seconds if no reset time available
-          return c.json(
-            {
-              error: {
-                code: 'RATE_LIMITED',
-                message: 'All executables are currently rate-limited',
-                retryAfter: retryAfterSeconds,
-                soonestReset: rateLimitStatus.soonestReset,
-              },
-            },
-            { status: 429, headers: { 'Retry-After': String(retryAfterSeconds) } }
-          );
+        const refusal = await evaluateRateLimitRefusal(dispatchDaemon, agent);
+        if (refusal) {
+          return rateLimitResponse(c, refusal);
         }
       }
 
@@ -563,25 +648,14 @@ Please begin working on this task. Use \`sf task get ${taskResult.id}\` to see f
         );
       }
 
-      // Rate limit guard: reject when all executables are rate-limited.
-      // Returns 429 with Retry-After header set to the soonest reset time.
+      // Rate limit guard: reject when all worker accounts are rate-limited
+      // (global stall), or when this agent's own account is limited while
+      // others are free. Returns 429 with Retry-After set to the reset time
+      // of the account that refused the session. Behaves exactly like start.
       if (dispatchDaemon) {
-        const rateLimitStatus = await dispatchDaemon.getRateLimitStatus();
-        if (rateLimitStatus.isPaused) {
-          const retryAfterSeconds = rateLimitStatus.soonestReset
-            ? Math.max(1, Math.ceil((new Date(rateLimitStatus.soonestReset).getTime() - Date.now()) / 1000))
-            : 60; // Default to 60 seconds if no reset time available
-          return c.json(
-            {
-              error: {
-                code: 'RATE_LIMITED',
-                message: 'All executables are currently rate-limited',
-                retryAfter: retryAfterSeconds,
-                soonestReset: rateLimitStatus.soonestReset,
-              },
-            },
-            { status: 429, headers: { 'Retry-After': String(retryAfterSeconds) } }
-          );
+        const refusal = await evaluateRateLimitRefusal(dispatchDaemon, agent);
+        if (refusal) {
+          return rateLimitResponse(c, refusal);
         }
       }
 
