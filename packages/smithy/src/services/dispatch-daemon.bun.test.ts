@@ -3234,6 +3234,271 @@ describe('resolveExecutableWithFallback without a fallback chain', () => {
 });
 
 // ============================================================================
+// Manual daemon sleep (`sf daemon sleep`) — daemon-level pause flag
+// ============================================================================
+
+/**
+ * Follow-up to the worker dispatch tiers spec: `sleepUntil()` used to mark
+ * only the `fallbackChain` executables as limited. Once dispatch pausing
+ * became per-account (design D7), a workspace whose workers run their own
+ * `executablePath` (e.g. `claude-glm`) — or that configures no chain at all —
+ * was never paused by a manual sleep.
+ *
+ * The fix tracks a daemon-level `manualSleepUntil` deadline that
+ * `isDispatchPaused()` honours for every worker, reported separately from
+ * real provider limits. These tests pin that behaviour.
+ */
+describe('sleepUntil - manual daemon sleep pauses all workers', () => {
+  let api: QuarryAPI;
+  let inboxService: InboxService;
+  let agentRegistry: AgentRegistry;
+  let taskAssignment: TaskAssignmentService;
+  let dispatchService: DispatchService;
+  let sessionManager: SessionManager;
+  let worktreeManager: WorktreeManager;
+  let stewardScheduler: StewardScheduler;
+  let settingsService: SettingsService;
+  let daemon: DispatchDaemon;
+  let testDbPath: string;
+  let systemEntity: EntityId;
+
+  beforeEach(async () => {
+    pinPathForRateLimitTests();
+    testDbPath = `/tmp/dispatch-daemon-manual-sleep-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const storage = createStorage({ path: testDbPath, create: true });
+    initializeSchema(storage);
+
+    api = createQuarryAPI(storage);
+    inboxService = createInboxService(storage);
+    agentRegistry = createAgentRegistry(api);
+    taskAssignment = createTaskAssignmentService(api);
+    dispatchService = createDispatchService(api, taskAssignment, agentRegistry);
+    sessionManager = createMockSessionManager();
+    worktreeManager = createMockWorktreeManager();
+    stewardScheduler = createMockStewardScheduler();
+    // No fallback chain, per the regression scenario: workers bring their own
+    // executables (or the provider default), so the old chain-marking sleep
+    // had nothing to mark and never paused anything.
+    settingsService = createMockSettingsService({ fallbackChain: [] });
+
+    const { createEntity, EntityTypeValue } = await import('@stoneforge/core');
+    const entity = await createEntity({
+      name: 'test-system-manual-sleep',
+      entityType: EntityTypeValue.SYSTEM,
+      createdBy: 'system:test' as EntityId,
+    });
+    const saved = await api.create(entity as unknown as Record<string, unknown> & { createdBy: EntityId });
+    systemEntity = saved.id as unknown as EntityId;
+
+    const config: DispatchDaemonConfig = {
+      ensureTargetBranchExists: mockEnsureTargetBranchExists,
+      pollIntervalMs: 100,
+      workerAvailabilityPollEnabled: true,
+      inboxPollEnabled: false,
+      stewardTriggerPollEnabled: false,
+      workflowTaskPollEnabled: false,
+    };
+
+    daemon = new DispatchDaemonImpl(
+      api,
+      agentRegistry,
+      sessionManager,
+      dispatchService,
+      worktreeManager,
+      taskAssignment,
+      stewardScheduler,
+      inboxService,
+      config,
+      undefined, // poolService
+      settingsService
+    );
+  });
+
+  afterEach(async () => {
+    // Restore the real clock first (tests below advance it), so teardown
+    // cannot observe a fake "now".
+    setSystemTime();
+    await daemon.stop();
+    if (fs.existsSync(testDbPath)) {
+      fs.unlinkSync(testDbPath);
+    }
+    restorePathAfterRateLimitTests();
+  });
+
+  async function createTestWorker(
+    name: string,
+    options?: { executablePath?: string }
+  ): Promise<AgentEntity> {
+    return agentRegistry.registerWorker({
+      name,
+      workerMode: 'ephemeral',
+      createdBy: systemEntity,
+      maxConcurrentTasks: 1,
+      executablePath: options?.executablePath,
+    });
+  }
+
+  async function createTestTask(title: string): Promise<Task> {
+    const task = await createTask({
+      title,
+      createdBy: systemEntity,
+      status: TaskStatus.OPEN,
+    });
+    return api.create(task as unknown as Record<string, unknown> & { createdBy: EntityId }) as Promise<Task>;
+  }
+
+  /** Reads a task's assignee, or undefined while still unassigned. */
+  async function assigneeOf(task: Task): Promise<string | undefined> {
+    const updated = await api.get<Task>(task.id);
+    return updated?.assignee as unknown as string | undefined;
+  }
+
+  /** The sleep-timer handle, for asserting wake()/expiry clear it. */
+  const sleepTimer = () =>
+    (daemon as unknown as { rateLimitSleepTimer?: unknown }).rateLimitSleepTimer;
+
+  /** Drives a full poll cycle (private) the way the interval loop would. */
+  const runPollCycle = () =>
+    (daemon as unknown as { runPollCycle: () => Promise<void> }).runPollCycle();
+
+  /** Registers the regression-scenario roster: a wrapper worker and a default one. */
+  async function createRegressionRoster(): Promise<void> {
+    await createTestWorker('e1-wrapper', { executablePath: 'claude-glm' });
+    await createTestWorker('e2-default');
+  }
+
+  test('sleepUntil pauses dispatch for wrapper and default workers with no chain', async () => {
+    await createRegressionRoster();
+    const task = await createTestTask('Task during manual sleep');
+
+    const resetTime = new Date(Date.now() + 60 * 60 * 1000);
+    daemon.sleepUntil(resetTime);
+
+    // Status reports paused, with the manual deadline surfaced separately —
+    // and without faking provider limits (limits stays empty).
+    const status = await daemon.getRateLimitStatus();
+    expect(status.isPaused).toBe(true);
+    expect(status.manualSleepUntil).toBe(resetTime.toISOString());
+    expect(status.limits).toHaveLength(0);
+
+    // Nothing dispatches — not to the wrapper account, not to the default.
+    (sessionManager.startSession as ReturnType<typeof mock>).mockClear();
+    const result = await daemon.pollWorkerAvailability();
+    expect(result.processed).toBe(0);
+    expect(result.errors).toBe(0);
+    expect(sessionManager.startSession).not.toHaveBeenCalled();
+    expect(await assigneeOf(task)).toBeUndefined();
+
+    // The poll cycle skips dispatch too, and the sleep timer stays armed
+    // until the deadline or wake.
+    await runPollCycle();
+    expect(await assigneeOf(task)).toBeUndefined();
+    expect(sleepTimer()).toBeDefined();
+  });
+
+  test('dispatch resumes at the reset time without a wake', async () => {
+    await createRegressionRoster();
+    const task = await createTestTask('Task after sleep expiry');
+
+    daemon.sleepUntil(new Date(Date.now() + 60 * 60 * 1000));
+    expect((await daemon.getRateLimitStatus()).isPaused).toBe(true);
+
+    // The deadline passes; the next poll cycle dispatches again.
+    setSystemTime(Date.now() + 61 * 60 * 1000);
+    expect((await daemon.getRateLimitStatus()).isPaused).toBe(false);
+    expect((await daemon.getRateLimitStatus()).manualSleepUntil).toBeUndefined();
+
+    await runPollCycle();
+    expect(await assigneeOf(task)).toBeDefined();
+  });
+
+  test('wake resumes dispatch immediately and clears the sleep timer', async () => {
+    await createRegressionRoster();
+    const task = await createTestTask('Task after wake');
+
+    daemon.sleepUntil(new Date(Date.now() + 60 * 60 * 1000));
+    expect(sleepTimer()).toBeDefined();
+    expect((await daemon.getRateLimitStatus()).isPaused).toBe(true);
+
+    daemon.wake();
+
+    const status = await daemon.getRateLimitStatus();
+    expect(status.isPaused).toBe(false);
+    expect(status.manualSleepUntil).toBeUndefined();
+    expect(sleepTimer()).toBeUndefined();
+
+    const result = await daemon.pollWorkerAvailability();
+    expect(result.processed).toBe(1);
+    expect(sessionManager.startSession).toHaveBeenCalled();
+    expect(await assigneeOf(task)).toBeDefined();
+  });
+
+  test('a manual sleep covers workers registered after the sleep began', async () => {
+    // The design choice: marking account keys at sleep time would snapshot
+    // the registry and let a worker registered mid-sleep unpause dispatch.
+    // The daemon-level flag must hold for it too.
+    daemon.sleepUntil(new Date(Date.now() + 60 * 60 * 1000));
+
+    await createTestWorker('e3-late-wrapper', { executablePath: 'claude-glm' });
+    const task = await createTestTask('Task offered to a late worker');
+
+    expect((await daemon.getRateLimitStatus()).isPaused).toBe(true);
+    const result = await daemon.pollWorkerAvailability();
+    expect(result.processed).toBe(0);
+    expect(await assigneeOf(task)).toBeUndefined();
+
+    // And it dispatches once woken.
+    daemon.wake();
+    const after = await daemon.pollWorkerAvailability();
+    expect(after.processed).toBe(1);
+    expect(await assigneeOf(task)).toBeDefined();
+  });
+
+  test('a manual sleep reports paused even with no enabled workers', async () => {
+    // The derived (per-account) pause is false with nobody to dispatch to,
+    // but the operator explicitly asked for a pause — report it.
+    daemon.sleepUntil(new Date(Date.now() + 60 * 60 * 1000));
+
+    const status = await daemon.getRateLimitStatus();
+    expect(status.isPaused).toBe(true);
+    expect(status.manualSleepUntil).toBeDefined();
+
+    daemon.wake();
+    expect((await daemon.getRateLimitStatus()).isPaused).toBe(false);
+  });
+
+  test('real provider limits stay separate from the manual sleep in the status', async () => {
+    await createRegressionRoster();
+    daemon.sleepUntil(new Date(Date.now() + 120 * 60 * 1000));
+
+    // A genuine limit arrives while sleeping: it is listed with its own
+    // reset, and the sleep keeps its own (later) deadline.
+    const limitReset = new Date(Date.now() + 30 * 60 * 1000);
+    daemon.handleRateLimitDetected('claude-glm', limitReset);
+
+    const status = await daemon.getRateLimitStatus();
+    expect(status.isPaused).toBe(true);
+    expect(status.limits).toHaveLength(1);
+    expect(status.limits[0].executable).toBe('claude-glm');
+    expect(status.limits[0].resetsAt).toBe(limitReset.toISOString());
+    expect(status.soonestReset).toBe(limitReset.toISOString());
+
+    // Waking clears the manual pause and — as before this change — every
+    // real limit too, so dispatch is active again and tasks flow.
+    daemon.wake();
+    const afterWake = await daemon.getRateLimitStatus();
+    expect(afterWake.isPaused).toBe(false);
+    expect(afterWake.manualSleepUntil).toBeUndefined();
+    expect(afterWake.limits).toHaveLength(0);
+
+    const task = await createTestTask('Task after wake with a real limit');
+    const result = await daemon.pollWorkerAvailability();
+    expect(result.processed).toBe(1);
+    expect(await assigneeOf(task)).toBeDefined();
+  });
+});
+
+// ============================================================================
 // wake() grace period — suppress rate limit re-detection after manual wake
 // ============================================================================
 

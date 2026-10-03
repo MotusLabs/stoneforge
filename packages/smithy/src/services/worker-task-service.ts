@@ -171,10 +171,10 @@ export interface WorkerTaskService {
    * `dispatchDaemon.isAgentRateLimited(agent)` returns the limit (with its
    * reset time) for that one agent, or undefined when it may spawn. The
    * global `(await dispatchDaemon.getRateLimitStatus()).isPaused` flag is
-   * true only when every enabled ephemeral worker's account is limited;
-   * it does not tell you whether one specific agent's account is limited.
-   * Spawning a session against a rate-limited executable will fail or
-   * waste resources.
+   * true when a manual sleep (`sf daemon sleep`) is active or when every
+   * enabled ephemeral worker's account is limited; it does not tell you
+   * whether one specific agent's account is limited. Spawning a session
+   * against a rate-limited executable will fail or waste resources.
    *
    * @param taskId - The task to start
    * @param agentId - The worker agent
@@ -295,7 +295,8 @@ export class WorkerTaskServiceImpl implements WorkerTaskService {
   // specific agent. The dispatch daemon checks before calling this, but
   // direct API callers must check too (or, for a global stall,
   // `(await dispatchDaemon.getRateLimitStatus()).isPaused`, which is true
-  // only when every enabled ephemeral worker is limited).
+  // during a manual sleep or when every enabled ephemeral worker is
+  // limited).
   async startWorkerOnTask(
     taskId: ElementId,
     agentId: EntityId,

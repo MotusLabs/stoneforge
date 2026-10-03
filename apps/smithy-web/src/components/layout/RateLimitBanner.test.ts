@@ -42,6 +42,18 @@ function allAccountsLimitedStatus(): RateLimitBannerStatus {
   };
 }
 
+/** Status payload during a manual sleep (`sf daemon sleep`). */
+function manualSleepStatus(): RateLimitBannerStatus {
+  return {
+    rateLimit: {
+      isPaused: true,
+      // No provider limits — the pause is the manual sleep alone
+      limits: [],
+      manualSleepUntil: RESET_B,
+    },
+  };
+}
+
 describe('shouldShowRateLimitBanner', () => {
   test('scenario "Partial limit": banner is hidden while an eligible account is unlimited', () => {
     expect(shouldShowRateLimitBanner(partialLimitStatus(), null)).toBe(false);
@@ -73,5 +85,16 @@ describe('shouldShowRateLimitBanner', () => {
   test('a new rate-limit event re-shows the banner after a dismiss', () => {
     // soonestReset changed (new event) → previous dismiss no longer applies
     expect(shouldShowRateLimitBanner(allAccountsLimitedStatus(), RESET_B)).toBe(true);
+  });
+
+  test('manual sleep: banner is shown even with no provider limits', () => {
+    expect(shouldShowRateLimitBanner(manualSleepStatus(), null)).toBe(true);
+  });
+
+  test('manual sleep: dismissed for the manual deadline stays hidden', () => {
+    // The dismiss key is the manual sleep deadline, not soonestReset
+    expect(shouldShowRateLimitBanner(manualSleepStatus(), RESET_B)).toBe(false);
+    // A dismiss keyed on a different timestamp does not apply
+    expect(shouldShowRateLimitBanner(manualSleepStatus(), RESET_A)).toBe(true);
   });
 });

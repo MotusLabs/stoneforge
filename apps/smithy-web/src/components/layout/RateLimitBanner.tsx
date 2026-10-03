@@ -1,15 +1,17 @@
 /**
- * RateLimitBanner - Site-wide banner shown when the dispatch daemon is paused due to rate limits
+ * RateLimitBanner - Site-wide banner shown when the dispatch daemon is paused
  *
  * Displays a warning banner between the header and main content area when the daemon
- * is sleeping due to rate limits. Shows the wake-up time, a "Wake Now" button, and
- * a dismiss (X) button. Automatically reappears if a new rate limit event occurs.
+ * is sleeping due to rate limits or a manual sleep (`sf daemon sleep`). Shows the
+ * wake-up time, a "Wake Now" button, and a dismiss (X) button. Automatically
+ * reappears if a new rate limit event occurs.
  *
  * Visibility follows the daemon's paused definition (worker dispatch tiers,
  * design D7): the banner is shown only when the status reports `isPaused`,
- * which is true only when every enabled ephemeral worker's account is
- * limited. A partial limit (some accounts limited, at least one still
- * available) leaves the banner hidden.
+ * which is true when every enabled ephemeral worker's account is limited, or
+ * when a manual sleep is active (reported separately as `manualSleepUntil`,
+ * so the banner can say which). A partial limit (some accounts limited, at
+ * least one still available) leaves the banner hidden.
  */
 
 import { useState } from 'react';
@@ -26,6 +28,7 @@ export interface RateLimitBannerStatus {
     isPaused?: boolean;
     limits?: Array<{ executable: string; resetsAt: string }>;
     soonestReset?: string;
+    manualSleepUntil?: string;
   };
 }
 
@@ -35,8 +38,10 @@ export interface RateLimitBannerStatus {
  *
  * Hidden when the status is missing, when `isPaused` is false (partial
  * limit — at least one eligible worker's account is still unlimited), or
- * when the user dismissed the banner for the current `soonestReset` value.
- * A later rate-limit event changes `soonestReset`, which re-shows the banner.
+ * when the user dismissed the banner for the current wake time (the manual
+ * sleep deadline when one is active, else `soonestReset`). A later
+ * rate-limit event or a new manual sleep changes that key, re-showing the
+ * banner.
  */
 export function shouldShowRateLimitBanner(
   status: RateLimitBannerStatus | undefined | null,
@@ -45,8 +50,8 @@ export function shouldShowRateLimitBanner(
   if (status?.rateLimit?.isPaused !== true) {
     return false;
   }
-  const soonestReset = status.rateLimit.soonestReset;
-  if (dismissedUntil && soonestReset && dismissedUntil === soonestReset) {
+  const wakeKey = status.rateLimit.manualSleepUntil ?? status.rateLimit.soonestReset;
+  if (dismissedUntil && wakeKey && dismissedUntil === wakeKey) {
     return false;
   }
   return true;
@@ -83,12 +88,16 @@ export function RateLimitBanner() {
   const { data: status } = useDaemonStatus();
   const wakeDaemon = useWakeDaemon();
 
-  // Track which soonestReset timestamp the user has dismissed.
-  // When soonestReset changes (new rate limit event), the banner reappears.
+  // Track which wake timestamp the user has dismissed. When it changes (new
+  // rate limit event or manual sleep), the banner reappears.
   const [dismissedUntil, setDismissedUntil] = useState<string | null>(null);
 
   const soonestReset = status?.rateLimit?.soonestReset;
+  const manualSleepUntil = status?.rateLimit?.manualSleepUntil;
   const limits = status?.rateLimit?.limits ?? [];
+  // A manual sleep overrides the wake time: dispatch stays paused until its
+  // deadline, even if real limits reset sooner.
+  const wakeTime = manualSleepUntil ?? soonestReset;
 
   // Don't render anything if not paused (partial limit) or dismissed
   const isVisible = shouldShowRateLimitBanner(status, dismissedUntil);
@@ -97,8 +106,8 @@ export function RateLimitBanner() {
   }
 
   const handleDismiss = () => {
-    if (soonestReset) {
-      setDismissedUntil(soonestReset);
+    if (wakeTime) {
+      setDismissedUntil(wakeTime);
     }
   };
 
@@ -106,13 +115,16 @@ export function RateLimitBanner() {
     wakeDaemon.mutate();
   };
 
-  const wakeTimeText = soonestReset ? formatWakeTime(soonestReset) : 'soon';
+  const wakeTimeText = wakeTime ? formatWakeTime(wakeTime) : 'soon';
 
-  // Build executable names text from limits array
+  // Build executable names text from limits array. A manual sleep is not a
+  // provider limit — say so instead of blaming accounts that are healthy.
   const executableNames = limits.map((l) => l.executable);
-  const rateLimitDetail = executableNames.length > 0
-    ? ` — ${executableNames.join(', ')} hit ${executableNames.length === 1 ? 'its' : 'their'} rate limit${executableNames.length === 1 ? '' : 's'}.`
-    : ' — rate limit reached.';
+  const rateLimitDetail = manualSleepUntil
+    ? ' — manual sleep.'
+    : executableNames.length > 0
+      ? ` — ${executableNames.join(', ')} hit ${executableNames.length === 1 ? 'its' : 'their'} rate limit${executableNames.length === 1 ? '' : 's'}.`
+      : ' — rate limit reached.';
 
   return (
     <div

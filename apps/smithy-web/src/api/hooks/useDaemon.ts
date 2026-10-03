@@ -27,6 +27,8 @@ export interface DaemonStatusResponse {
     isPaused: boolean;
     limits: Array<{ executable: string; resetsAt: string }>;
     soonestReset?: string;
+    /** Active manual-sleep deadline (`sf daemon sleep`), if any. */
+    manualSleepUntil?: string;
   };
 }
 

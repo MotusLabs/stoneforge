@@ -277,6 +277,7 @@ async function daemonStatusHandler(
       isPaused: boolean;
       limits: Array<{ executable: string; resetsAt: string }>;
       soonestReset?: string;
+      manualSleepUntil?: string;
     };
   };
 
@@ -313,8 +314,16 @@ async function daemonStatusHandler(
   // Rate limit / sleep status
   if (data.rateLimit) {
     const rl = data.rateLimit;
+    let pauseReason = 'rate limited';
+    if (rl.isPaused && rl.manualSleepUntil) {
+      pauseReason = `manual sleep until ${new Date(rl.manualSleepUntil).toLocaleString()}`;
+    }
     lines.push('');
-    lines.push(`Dispatch:  ${rl.isPaused ? '⏸ paused (rate limited)' : '▶ active'}`);
+    lines.push(`Dispatch:  ${rl.isPaused ? `⏸ paused (${pauseReason})` : '▶ active'}`);
+
+    if (rl.manualSleepUntil) {
+      lines.push(`Manual sleep until: ${formatRelativeTime(new Date(rl.manualSleepUntil))} (${rl.manualSleepUntil})`);
+    }
 
     if (rl.limits.length > 0) {
       lines.push('Rate-limited executables:');

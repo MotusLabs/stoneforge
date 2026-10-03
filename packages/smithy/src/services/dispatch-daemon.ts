@@ -544,14 +544,18 @@ export interface DispatchDaemon {
   /**
    * Returns the current rate limit status for the daemon.
    *
-   * `isPaused` is true only when every enabled ephemeral worker's account
-   * key is currently limited (design D7). `limits` lists the limited
-   * account keys with their reset times, whether or not dispatch is paused.
+   * `isPaused` is true when a manual sleep (`sleepUntil`) is active, or when
+   * every enabled ephemeral worker's account key is currently limited
+   * (design D7). `limits` lists the limited account keys with their reset
+   * times, whether or not dispatch is paused — a manual sleep adds no fake
+   * entries; it is reported separately via `manualSleepUntil`.
    */
   getRateLimitStatus(): Promise<{
     isPaused: boolean;
     limits: Array<{ executable: string; resetsAt: string }>;
     soonestReset?: string;
+    /** Active manual-sleep deadline (`sf daemon sleep`), if any. */
+    manualSleepUntil?: string;
   }>;
 
   /**
@@ -574,8 +578,11 @@ export interface DispatchDaemon {
 
   /**
    * Manually put the daemon to sleep until the specified time.
-   * Marks all executables in the fallback chain as rate-limited until the given time.
-   * This reuses the existing rate limit tracker and pause logic.
+   *
+   * Sets a daemon-level `manualSleepUntil` deadline that `isDispatchPaused()`
+   * honours for every worker, and reports it separately from provider rate
+   * limits in `getRateLimitStatus()`. See the implementation for the design
+   * rationale. `wake()` or the deadline expiring resumes dispatch.
    */
   sleepUntil(resetTime: Date): void;
 
@@ -651,6 +658,19 @@ export class DispatchDaemonImpl implements DispatchDaemon {
   private currentPollCycle?: Promise<void>;
   private rateLimitSleepTimer?: NodeJS.Timeout;
   private lastWakeAt?: number;
+
+  /**
+   * Deadline of an operator-requested dispatch pause (`sf daemon sleep`),
+   * or undefined when none is active.
+   *
+   * This is daemon-level state, deliberately separate from the rate-limit
+   * tracker: it pauses dispatch for every worker whatever their account,
+   * and is reported as its own field (`manualSleepUntil`) by
+   * `getRateLimitStatus()` instead of masquerading as provider limits.
+   * `isDispatchPaused()` honours it; `wake()` and the deadline itself
+   * (compared against `Date.now()` on each evaluation) clear it.
+   */
+  private manualSleepUntil?: Date;
 
   /**
    * Tracks inbox item IDs that are currently being forwarded to persistent agents.
@@ -888,23 +908,43 @@ export class DispatchDaemonImpl implements DispatchDaemon {
   }
 
   /**
-   * Returns whether dispatch is paused due to rate limiting.
+   * Returns whether dispatch is paused.
    *
-   * Design D7 (worker dispatch tiers): dispatch is paused only when **every**
-   * enabled ephemeral worker's account key (`resolveAccountKey`) is currently
-   * limited. A partial limit — some accounts limited while at least one
-   * eligible worker's account is not — does not pause dispatch: the daemon
-   * falls through to the workers on unlimited accounts.
+   * Two independent causes:
    *
-   * Busy/idle state is ignored: a busy worker on an unlimited account still
-   * counts as an account that is not limited. Disabled workers are excluded.
-   * With no enabled ephemeral workers there is nothing to dispatch, so
-   * dispatch is not reported as paused.
+   * 1. **Manual sleep** (`sf daemon sleep` / `sleepUntil`): the operator
+   *    asked for a pause, so dispatch is paused outright — whatever the
+   *    per-account limit state is, and whatever workers are registered. See
+   *    `sleepUntil` for why this is a dedicated flag rather than tracker
+   *    entries.
    *
-   * This is the single source of truth used by both `getRateLimitStatus()`
-   * and `runPollCycle()`.
+   * 2. **Rate limits** (design D7, worker dispatch tiers): dispatch is
+   *    paused only when **every** enabled ephemeral worker's account key
+   *    (`resolveAccountKey`) is currently limited. A partial limit — some
+   *    accounts limited while at least one eligible worker's account is not
+   *    — does not pause dispatch: the daemon falls through to the workers on
+   *    unlimited accounts.
+   *
+   * Busy/idle state is ignored for cause 2: a busy worker on an unlimited
+   * account still counts as an account that is not limited. Disabled workers
+   * are excluded. With no enabled ephemeral workers there is nothing to
+   * dispatch, so cause 2 alone does not report dispatch as paused (a manual
+   * sleep still does — the operator explicitly asked for one).
+   *
+   * This is the single source of truth used by `getRateLimitStatus()`,
+   * `runPollCycle()` and the assignment guard in `pollWorkerAvailability()`.
    */
   private async isDispatchPaused(): Promise<boolean> {
+    // Cause 1: manual sleep. An expired deadline is cleared lazily here so
+    // every consumer (status output, poll cycles, direct polls) sees the
+    // sleep end at the reset time without a dedicated timer callback.
+    if (this.manualSleepUntil) {
+      if (this.manualSleepUntil.getTime() > Date.now()) {
+        return true;
+      }
+      this.manualSleepUntil = undefined;
+    }
+
     const workers = await this.agentRegistry.listAgents({
       role: 'worker',
       workerMode: 'ephemeral',
@@ -930,10 +970,16 @@ export class DispatchDaemonImpl implements DispatchDaemon {
     isPaused: boolean;
     limits: Array<{ executable: string; resetsAt: string }>;
     soonestReset?: string;
+    manualSleepUntil?: string;
   }> {
     const allLimits = this.rateLimitTracker.getAllLimits();
+    // Runs first: lazily clears an expired manual sleep deadline.
     const isPaused = await this.isDispatchPaused();
     const soonestReset = this.rateLimitTracker.getSoonestResetTime();
+    const manualSleepUntil =
+      this.manualSleepUntil && this.manualSleepUntil.getTime() > Date.now()
+        ? this.manualSleepUntil.toISOString()
+        : undefined;
 
     return {
       isPaused,
@@ -942,6 +988,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
         resetsAt: entry.resetsAt.toISOString(),
       })),
       soonestReset: soonestReset?.toISOString(),
+      manualSleepUntil,
     };
   }
 
@@ -994,19 +1041,45 @@ export class DispatchDaemonImpl implements DispatchDaemon {
     };
   }
 
+  /**
+   * Manually put the daemon to sleep until the specified time.
+   *
+   * **Design choice** (follow-up to the worker dispatch tiers spec): a manual
+   * sleep is tracked as an explicit `manualSleepUntil` deadline that
+   * `isDispatchPaused()` honours, rather than by marking account keys in the
+   * rate-limit tracker (every enabled worker's `resolveAccountKey` plus the
+   * fallback-chain entries). Reasons:
+   *
+   * - **Coverage.** Marking account keys snapshots the registry at sleep
+   *   time: a worker registered or re-enabled *during* the sleep would have
+   *   an unlimited account, so dispatch would resume mid-sleep — defeating
+   *   the operator's request. A daemon-level flag holds for every worker,
+   *   present and future, and even when none is registered. (Marking keys
+   *   also could not pause a workspace with no fallback chain, which is how
+   *   `sf daemon sleep` silently no-opped before this change.)
+   * - **Honest status output.** `getRateLimitStatus().limits` keeps listing
+   *   only *real* provider limits; the manual pause is reported separately
+   *   as `manualSleepUntil`, so "paused (manual sleep)" is distinguishable
+   *   from "paused (all accounts rate-limited)".
+   * - **No interface churn.** Marking per-worker keys needs an async registry
+   *   lookup; the flag keeps this method synchronous.
+   *
+   * Dispatch stops because every dispatch path consults
+   * `isDispatchPaused()` (the poll cycle skips dispatch polls, and
+   * `pollWorkerAvailability` guards its assignment loop — covering manual
+   * poll triggers too). Non-dispatch work (inbox triage, reconciliation)
+   * continues, exactly as during a provider-limit pause.
+   *
+   * `wake()` clears the deadline; otherwise it expires on its own once
+   * `resetTime` passes, and dispatch resumes on the next poll cycle.
+   */
   sleepUntil(resetTime: Date): void {
-    const fallbackChain = this.settingsService?.getAgentDefaults().fallbackChain ?? [];
-    if (fallbackChain.length === 0) {
-      logger.warn('sleepUntil: No fallback chain configured — nothing to mark as limited');
-      return;
-    }
+    this.manualSleepUntil = resetTime;
 
-    // Mark all executables in the fallback chain as rate-limited until the given time
-    for (const executable of fallbackChain) {
-      this.rateLimitTracker.markLimited(executable, resetTime);
-    }
-
-    // Clear any existing sleep timer and set a new one
+    // Clear any existing sleep timer and set a new one. The timer is
+    // bookkeeping only — it keeps runPollCycle's paused branch from
+    // re-logging every cycle — while the deadline comparison in
+    // isDispatchPaused() is what actually ends the sleep.
     if (this.rateLimitSleepTimer) {
       clearTimeout(this.rateLimitSleepTimer);
     }
@@ -1020,6 +1093,9 @@ export class DispatchDaemonImpl implements DispatchDaemon {
   }
 
   wake(): void {
+    // End any manual sleep (`sleepUntil`)
+    this.manualSleepUntil = undefined;
+
     // Clear all rate limit entries
     this.rateLimitTracker.clear();
 
@@ -1032,7 +1108,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
     // Record wake timestamp so getRateLimitPatternAccounts() can ignore pre-wake history
     this.lastWakeAt = Date.now();
 
-    logger.info('Manual wake: cleared all rate limits, dispatch will resume on next poll cycle');
+    logger.info('Manual wake: cleared manual sleep and all rate limits, dispatch will resume on next poll cycle');
   }
 
   // ----------------------------------------
@@ -1091,19 +1167,29 @@ export class DispatchDaemonImpl implements DispatchDaemon {
       // persistent workers, stewards or directors.
       availableWorkers.sort(compareWorkersByDispatchPreference);
 
-      // 4. For each available worker, try to assign a task
-      for (const worker of availableWorkers) {
-        try {
-          const assigned = await this.assignTaskToWorker(worker);
-          if (assigned) {
-            processed++;
+      // 4. For each available worker, try to assign a task — unless dispatch
+      // is paused (manual sleep, or every enabled worker's account limited).
+      // `runPollCycle` already skips this poll while paused; this guard also
+      // covers manual poll triggers (POST /api/daemon/poll/worker-availability),
+      // so a direct poll during a pause dispatches nothing.
+      if (await this.isDispatchPaused()) {
+        logger.debug(
+          'Dispatch paused (manual sleep or all accounts limited) — skipping worker availability assignment'
+        );
+      } else {
+        for (const worker of availableWorkers) {
+          try {
+            const assigned = await this.assignTaskToWorker(worker);
+            if (assigned) {
+              processed++;
+            }
+          } catch (error) {
+            errors++;
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            errorMessages.push(`Worker ${worker.name}: ${errorMessage}`);
+            logger.error(`Error assigning task to worker ${worker.name}:`, error);
+            this.operationLog?.write('error', 'dispatch', `Error assigning task to worker ${worker.name}: ${errorMessage}`, { agentId: worker.id });
           }
-        } catch (error) {
-          errors++;
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          errorMessages.push(`Worker ${worker.name}: ${errorMessage}`);
-          logger.error(`Error assigning task to worker ${worker.name}:`, error);
-          this.operationLog?.write('error', 'dispatch', `Error assigning task to worker ${worker.name}: ${errorMessage}`, { agentId: worker.id });
         }
       }
     } catch (error) {

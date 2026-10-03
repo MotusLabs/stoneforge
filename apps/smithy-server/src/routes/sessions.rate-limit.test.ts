@@ -32,6 +32,8 @@ interface MockOptions {
   rateLimitPaused?: boolean;
   /** `getRateLimitStatus().soonestReset` (ISO). */
   soonestReset?: string;
+  /** `getRateLimitStatus().manualSleepUntil` (ISO) — active manual sleep. */
+  manualSleepUntil?: string;
   /** Currently limited account keys. Defaults to `claude` when paused. */
   limits?: MockLimit[];
   /** The agent returned by `agentRegistry.getAgent`. */
@@ -55,6 +57,7 @@ interface MockOptions {
 function createMockServices(overrides?: MockOptions): Services {
   const isPaused = overrides?.rateLimitPaused ?? false;
   const soonestReset = overrides?.soonestReset;
+  const manualSleepUntil = overrides?.manualSleepUntil;
   const limits: MockLimit[] = overrides?.limits
     ?? (isPaused ? [{ executable: 'claude', resetsAt: soonestReset ?? new Date(Date.now() + 60_000).toISOString() }] : []);
 
@@ -144,6 +147,7 @@ function createMockServices(overrides?: MockOptions): Services {
         isPaused,
         limits,
         soonestReset,
+        manualSleepUntil,
       })),
       // Per-agent guard: limited when the agent's effective executable is
       // one of the limited account keys.
@@ -257,6 +261,63 @@ describe('Session Routes - Rate Limit Guard', () => {
       expect(response.status).toBe(429);
       const retryAfter = response.headers.get('Retry-After');
       expect(retryAfter).toBe('60'); // Default 60 seconds
+    });
+
+    test('returns 429 during a manual sleep, Retry-After following the sleep deadline', async () => {
+      // Manual sleep with no provider limits: Retry-After follows the sleep
+      // deadline, not soonestReset (which is undefined here).
+      const manualSleepUntil = new Date(Date.now() + 120_000).toISOString();
+      const services = createMockServices({
+        rateLimitPaused: true,
+        soonestReset: undefined,
+        manualSleepUntil,
+        limits: [],
+      });
+
+      const app = new Hono();
+      app.route('/', createSessionRoutes(services, vi.fn(() => {})));
+
+      const response = await app.request('/api/agents/agent-test-123/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      expect(response.status).toBe(429);
+      const retryAfter = response.headers.get('Retry-After');
+      expect(Number(retryAfter)).toBeGreaterThan(0);
+      expect(Number(retryAfter)).toBeLessThanOrEqual(120);
+
+      const body = await response.json() as { error: { code: string; message: string } };
+      expect(body.error.code).toBe('RATE_LIMITED');
+      expect(body.error.message).toContain('manual sleep');
+    });
+
+    test('manual sleep with sooner real limits: Retry-After still follows the sleep deadline', async () => {
+      // Real limits reset sooner than the sleep, but the operator's pause
+      // holds — Retry-After must not promise an early resume.
+      const soonestReset = new Date(Date.now() + 30_000).toISOString();
+      const manualSleepUntil = new Date(Date.now() + 300_000).toISOString();
+      const services = createMockServices({
+        rateLimitPaused: true,
+        soonestReset,
+        manualSleepUntil,
+        limits: [{ executable: 'claude', resetsAt: soonestReset }],
+      });
+
+      const app = new Hono();
+      app.route('/', createSessionRoutes(services, vi.fn(() => {})));
+
+      const response = await app.request('/api/agents/agent-test-123/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      expect(response.status).toBe(429);
+      const retryAfter = Number(response.headers.get('Retry-After'));
+      expect(retryAfter).toBeGreaterThan(30); // not the (sooner) limit reset
+      expect(retryAfter).toBeLessThanOrEqual(300); // the sleep deadline
     });
   });
 

@@ -243,9 +243,12 @@ function retryAfterSecondsFromReset(resetsAt: string | undefined): number {
  *
  * Two checks, in order:
  *
- * 1. **Global stall** — `getRateLimitStatus().isPaused` is true only when
- *    every enabled ephemeral worker's account is limited, so nothing can be
- *    dispatched at all.
+ * 1. **Global pause** — `getRateLimitStatus().isPaused` is true when a
+ *    manual sleep (`sf daemon sleep`) is active or when every enabled
+ *    ephemeral worker's account is limited, so nothing can be dispatched at
+ *    all. During a manual sleep the message says so, and `Retry-After`
+ *    follows the sleep deadline — real limits may reset sooner, but the
+ *    operator's pause still holds.
  * 2. **This agent's account** — a partial limit does not pause dispatch, but
  *    the agent being started or resumed may itself run on one of the limited
  *    accounts. Without this check such a spawn slips through and immediately
@@ -262,6 +265,13 @@ async function evaluateRateLimitRefusal(
 ): Promise<RateLimitRefusal | undefined> {
   const rateLimitStatus = await dispatchDaemon.getRateLimitStatus();
   if (rateLimitStatus.isPaused) {
+    if (rateLimitStatus.manualSleepUntil) {
+      return {
+        message: 'Dispatch is paused by manual sleep',
+        retryAfterSeconds: retryAfterSecondsFromReset(rateLimitStatus.manualSleepUntil),
+        soonestReset: rateLimitStatus.soonestReset,
+      };
+    }
     return {
       message: 'All worker accounts are currently rate-limited',
       retryAfterSeconds: retryAfterSecondsFromReset(rateLimitStatus.soonestReset),
@@ -339,10 +349,10 @@ export function createSessionRoutes(
         );
       }
 
-      // Rate limit guard: reject when all worker accounts are rate-limited
-      // (global stall), or when this agent's own account is limited while
-      // others are free. Returns 429 with Retry-After set to the reset time
-      // of the account that refused the session.
+      // Rate limit guard: reject when dispatch is paused (manual sleep, or
+      // all worker accounts rate-limited), or when this agent's own account
+      // is limited while others are free. Returns 429 with Retry-After set
+      // to the reset time of the account that refused the session.
       if (dispatchDaemon) {
         const refusal = await evaluateRateLimitRefusal(dispatchDaemon, agent);
         if (refusal) {
@@ -648,10 +658,11 @@ Please begin working on this task. Use \`sf task get ${taskResult.id}\` to see f
         );
       }
 
-      // Rate limit guard: reject when all worker accounts are rate-limited
-      // (global stall), or when this agent's own account is limited while
-      // others are free. Returns 429 with Retry-After set to the reset time
-      // of the account that refused the session. Behaves exactly like start.
+      // Rate limit guard: reject when dispatch is paused (manual sleep, or
+      // all worker accounts rate-limited), or when this agent's own account
+      // is limited while others are free. Returns 429 with Retry-After set
+      // to the reset time of the account that refused the session. Behaves
+      // exactly like start.
       if (dispatchDaemon) {
         const refusal = await evaluateRateLimitRefusal(dispatchDaemon, agent);
         if (refusal) {

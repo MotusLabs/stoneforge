@@ -1,0 +1,5 @@
+---
+"@stoneforge/smithy": patch
+---
+
+Fix `sf daemon sleep` so it pauses dispatch for every worker account. `sleepUntil()` previously marked only the `fallbackChain` executables as limited, so after dispatch pausing became per-account, a manual sleep never paused workspaces whose workers run their own `executablePath` (e.g. `claude-glm`) or that configure no fallback chain. The manual sleep is now a daemon-level `manualSleepUntil` deadline that `isDispatchPaused()` honours for every worker (including ones registered mid-sleep), reported by `getRateLimitStatus()` as a separate `manualSleepUntil` field while `limits` keeps listing only real provider limits. `pollWorkerAvailability()` also guards its assignment loop with the paused state, so manual poll triggers dispatch nothing during a pause. `wake()` clears the deadline; otherwise it expires at the reset time and dispatch resumes on the next poll cycle. `sf daemon status` shows `⏸ paused (manual sleep until …)` distinct from `⏸ paused (rate limited)`.
