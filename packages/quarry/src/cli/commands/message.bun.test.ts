@@ -5,8 +5,9 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, existsSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { messageCommand } from './message.js';
 import type { GlobalOptions } from '../types.js';
 import { ExitCode } from '../types.js';
@@ -21,9 +22,12 @@ import type { Message } from '@stoneforge/core';
 // Test Utilities
 // ============================================================================
 
-const TEST_DIR = join(import.meta.dir, '__test_message_workspace__');
-const STONEFORGE_DIR = join(TEST_DIR, '.stoneforge');
-const DB_PATH = join(STONEFORGE_DIR, 'stoneforge.db');
+// Scratch workspace lives in the OS temp dir (NOT next to the sources) so an
+// interrupted run — crash, CI timeout, Ctrl+C — can never leave a
+// __test_message_workspace__ artifact with a test database inside src/.
+let TEST_DIR: string;
+let STONEFORGE_DIR: string;
+let DB_PATH: string;
 
 // Use proper entity ID format for test users
 const TEST_USER = 'el-user1' as EntityId;
@@ -50,10 +54,10 @@ function createTestOptions(overrides: Partial<GlobalOptions> = {}): GlobalOption
 let testChannelId: string;
 
 beforeEach(async () => {
-  // Create test workspace
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, { recursive: true });
-  }
+  // Fresh isolated workspace per test, in the OS temp dir
+  TEST_DIR = mkdtempSync(join(tmpdir(), 'stoneforge-message-test-'));
+  STONEFORGE_DIR = join(TEST_DIR, '.stoneforge');
+  DB_PATH = join(STONEFORGE_DIR, 'stoneforge.db');
   mkdirSync(STONEFORGE_DIR, { recursive: true });
 
   // Initialize database
@@ -69,12 +73,15 @@ beforeEach(async () => {
   });
   const created = await api.create(channel as unknown as Element & Record<string, unknown>);
   testChannelId = created.id;
+
+  // Close the setup backend so it doesn't leak an open handle per test
+  backend.close();
 });
 
 afterEach(() => {
   // Cleanup test workspace
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, { recursive: true });
+  if (TEST_DIR && existsSync(TEST_DIR)) {
+    rmSync(TEST_DIR, { recursive: true, force: true });
   }
 });
 

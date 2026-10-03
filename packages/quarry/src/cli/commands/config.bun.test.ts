@@ -5,8 +5,9 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, existsSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { configCommand } from './config.js';
 import type { GlobalOptions } from '../types.js';
 import { ExitCode } from '../types.js';
@@ -16,9 +17,12 @@ import { clearConfigCache, loadConfig } from '../../config/index.js';
 // Test Utilities
 // ============================================================================
 
-const TEST_DIR = join(import.meta.dir, '__test_config_workspace__');
-const STONEFORGE_DIR = join(TEST_DIR, '.stoneforge');
-const CONFIG_PATH = join(STONEFORGE_DIR, 'config.yaml');
+// Scratch workspace lives in the OS temp dir (NOT next to the sources) so an
+// interrupted run — crash, CI timeout, Ctrl+C — can never leave a
+// __test_config_workspace__ artifact with a test config inside src/.
+let TEST_DIR: string;
+let STONEFORGE_DIR: string;
+let CONFIG_PATH: string;
 
 function createTestOptions(overrides: Partial<GlobalOptions> = {}): GlobalOptions {
   return {
@@ -43,10 +47,10 @@ function writeTestConfig(content: string): void {
 let originalStoneforgeRoot: string | undefined;
 
 beforeEach(() => {
-  // Create test workspace
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, { recursive: true });
-  }
+  // Fresh isolated workspace per test, in the OS temp dir
+  TEST_DIR = mkdtempSync(join(tmpdir(), 'stoneforge-config-test-'));
+  STONEFORGE_DIR = join(TEST_DIR, '.stoneforge');
+  CONFIG_PATH = join(STONEFORGE_DIR, 'config.yaml');
   mkdirSync(STONEFORGE_DIR, { recursive: true });
 
   // Create a minimal config file
@@ -76,8 +80,8 @@ afterEach(() => {
     process.env.STONEFORGE_ROOT = originalStoneforgeRoot;
   }
   // Cleanup test workspace
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, { recursive: true });
+  if (TEST_DIR && existsSync(TEST_DIR)) {
+    rmSync(TEST_DIR, { recursive: true, force: true });
   }
   clearConfigCache();
 });
