@@ -113,6 +113,11 @@ async function runDirectorCreatesTasksMock(ctx: TestContext): Promise<TestResult
     return fail(`Task title doesn't contain 'health': ${retrieved.title}`);
   }
 
+  // 4. Close the task again: all tests share one workspace and daemon, and
+  // this open priority-5 task would otherwise sit at the top of later
+  // tests' ready queues (see runDaemonDispatchesWorkerMock).
+  await ctx.api.update<Task>(task.id, { status: TaskStatus.CLOSED });
+
   return pass(`Director created task: "${retrieved.title}"`, {
     taskId: task.id,
     taskTitle: task.title,
@@ -208,6 +213,14 @@ async function runDirectorCreatesPlansMock(ctx: TestContext): Promise<TestResult
 
   if (tasks.length < 2) {
     return fail('Failed to create plan with multiple tasks');
+  }
+
+  // Close the tasks again: all tests share one workspace and daemon, and
+  // these open tasks (priorities 3-5) would outrank every task the later
+  // dispatch tests create, so their workers would receive these instead
+  // (see runDaemonDispatchesWorkerMock / runDaemonRespectsDependenciesMock).
+  for (const t of tasks) {
+    await ctx.api.update<Task>(t.id, { status: TaskStatus.CLOSED });
   }
 
   return pass(`Director created plan with ${tasks.length} tasks`, {
@@ -840,15 +853,27 @@ async function runWorkerMarksTaskCompleteMock(ctx: TestContext): Promise<TestRes
   });
   ctx.log('Completed task');
 
-  // 5. Verify task is closed
-  const taskClosed = await ctx.api.get<Task>(task.id);
-  if (taskClosed?.status !== TaskStatus.CLOSED) {
-    return fail(`Expected task closed, got: ${taskClosed?.status}`);
+  // 5. Verify the completion contract: completeTask moves the task to
+  // 'review' (awaiting merge steward) — not 'closed' — clears the
+  // assignee, and records the completion metadata. The steward tests
+  // below cover the final review → closed transition.
+  const taskReviewed = await ctx.api.get<Task>(task.id);
+  if (taskReviewed?.status !== TaskStatus.REVIEW) {
+    return fail(`Expected task review, got: ${taskReviewed?.status}`);
+  }
+  if (taskReviewed?.assignee) {
+    return fail(`Expected assignee cleared after completion, got: ${taskReviewed.assignee}`);
+  }
+  const reviewedMeta = taskReviewed?.metadata?.orchestrator as
+    | { mergeStatus?: string; completionSummary?: string }
+    | undefined;
+  if (reviewedMeta?.mergeStatus !== 'pending') {
+    return fail(`Expected mergeStatus 'pending', got: ${reviewedMeta?.mergeStatus}`);
   }
 
-  return pass(`Task status is '${taskClosed.status}'`, {
+  return pass(`Task status is '${taskReviewed.status}' (awaiting merge review)`, {
     taskId: task.id,
-    status: taskClosed.status,
+    status: taskReviewed.status,
   });
 }
 
