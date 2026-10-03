@@ -10,6 +10,7 @@
 
 import { useState, useMemo, useEffect } from 'react';
 import { useSearch, useNavigate } from '@tanstack/react-router';
+import { ElementNotFound } from '../../components/shared/ElementNotFound';
 import { getCurrentBinding, formatKeyBinding } from '../../lib/keyboard';
 import {
   Workflow,
@@ -228,6 +229,21 @@ export function WorkflowsPage() {
     return (
       <div className="flex items-center justify-center py-16">
         <Loader2 className="w-8 h-8 text-[var(--color-primary)] animate-spin" />
+      </div>
+    );
+  }
+
+  // A selected workflow that finished loading without data is unavailable.
+  if (selectedWorkflowId && !selectedWorkflow) {
+    return (
+      <div className="space-y-6 animate-fade-in" data-testid="workflows-page">
+        <ElementNotFound
+          elementType="Workflow"
+          elementId={selectedWorkflowId}
+          backRoute="/workflows"
+          backLabel="Back to Workflows"
+          onDismiss={handleBackToList}
+        />
       </div>
     );
   }
