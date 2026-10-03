@@ -12,8 +12,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { getFormatter, getOutputMode } from './formatter.js';
 import { failure, ExitCode, type CommandResult } from './types.js';
 import { showCommand } from './commands/crud.js';
@@ -24,9 +25,12 @@ import type { GlobalOptions } from './types.js';
 // Test Helpers
 // ============================================================================
 
-const TEST_DIR = join(import.meta.dir, '__test_workspace_cli_errors__');
-const STONEFORGE_DIR = join(TEST_DIR, '.stoneforge');
-const DB_PATH = join(STONEFORGE_DIR, 'stoneforge.db');
+// Scratch workspace lives in the OS temp dir (NOT next to the sources) so an
+// interrupted run — crash, CI timeout, Ctrl+C — can never leave a
+// __test_workspace_cli_errors__ artifact with a test database inside src/.
+let TEST_DIR: string;
+let STONEFORGE_DIR: string;
+let DB_PATH: string;
 
 function createTestOptions(overrides: Partial<GlobalOptions> = {}): GlobalOptions {
   return {
@@ -237,15 +241,17 @@ describe('Output Mode Selection', () => {
 
 describe('CLI Command Error Handling', () => {
   beforeEach(() => {
-    if (existsSync(TEST_DIR)) {
-      rmSync(TEST_DIR, { recursive: true });
-    }
+    // Fresh isolated workspace per test, in the OS temp dir
+    TEST_DIR = mkdtempSync(join(tmpdir(), 'stoneforge-cli-errors-test-'));
+    STONEFORGE_DIR = join(TEST_DIR, '.stoneforge');
+    DB_PATH = join(STONEFORGE_DIR, 'stoneforge.db');
     mkdirSync(STONEFORGE_DIR, { recursive: true });
   });
 
   afterEach(() => {
-    if (existsSync(TEST_DIR)) {
-      rmSync(TEST_DIR, { recursive: true });
+    // Cleanup test workspace
+    if (TEST_DIR && existsSync(TEST_DIR)) {
+      rmSync(TEST_DIR, { recursive: true, force: true });
     }
   });
 
