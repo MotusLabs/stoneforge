@@ -13,7 +13,10 @@
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "playwright test",
-    "test:ui": "playwright test --ui"
+    "test:ui": "playwright test --ui",
+    "test:e2e:setup": "playwright install chromium",
+    "test:e2e": "bun run test:e2e:setup --only-shell && bun run test",
+    "pretest": "test -d ../../packages/storage/dist || turbo run build --filter=@stoneforge/core --filter=@stoneforge/storage --filter=@stoneforge/quarry --force"
   },
   "dependencies": {
     "@stoneforge/ui": "workspace:*",

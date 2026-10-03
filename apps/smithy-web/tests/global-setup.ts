@@ -10,7 +10,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createStorage, initializeSchema } from '@stoneforge/storage';
+import { createStorageAsync, initializeSchema } from '@stoneforge/storage';
 import { createQuarryAPI } from '@stoneforge/quarry';
 import { ElementType, createTimestamp, EntityTypeValue } from '@stoneforge/core';
 
@@ -24,7 +24,7 @@ export default async function globalSetup() {
   mkdirSync(TEST_STONEFORGE_DIR, { recursive: true });
 
   // Connect to the database (schema may already be initialized by setup-test-db.ts)
-  const backend = createStorage({ path: TEST_DB_PATH, create: true });
+  const backend = await createStorageAsync({ path: TEST_DB_PATH, create: true });
   initializeSchema(backend);
   const api = createQuarryAPI(backend);
 

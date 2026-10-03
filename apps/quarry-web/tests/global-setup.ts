@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createStorage, initializeSchema } from '@stoneforge/storage';
+import { createStorageAsync, initializeSchema } from '@stoneforge/storage';
 import { createQuarryAPI } from '@stoneforge/quarry';
 import { ElementType, createTimestamp, EntityTypeValue } from '@stoneforge/core';
 
@@ -13,7 +13,7 @@ const TEST_DB_PATH = resolve(TEST_STONEFORGE_DIR, 'stoneforge.db');
 export default async function globalSetup() {
   mkdirSync(TEST_STONEFORGE_DIR, { recursive: true });
 
-  const backend = createStorage({ path: TEST_DB_PATH, create: true });
+  const backend = await createStorageAsync({ path: TEST_DB_PATH, create: true });
   initializeSchema(backend);
   const api = createQuarryAPI(backend);
 

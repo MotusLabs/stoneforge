@@ -2,8 +2,10 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
+import { createRequire } from 'node:module';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const require = createRequire(import.meta.url);
 
 // Allow tests to override the API port via VITE_API_PORT env var
 const apiPort = process.env.VITE_API_PORT || '3457';
@@ -22,8 +24,8 @@ export default defineConfig({
   resolve: {
     dedupe: ['react', 'react-dom'],
     alias: {
-      react: resolve(__dirname, 'node_modules/react'),
-      'react-dom': resolve(__dirname, 'node_modules/react-dom'),
+      react: dirname(require.resolve('react/package.json')),
+      'react-dom': dirname(require.resolve('react-dom/package.json')),
       // Resolve @stoneforge/ui from TypeScript source so the dev server works
       // without building the UI package first. Previously used
       // resolve.conditions: ['bun'] for this, but that caused
