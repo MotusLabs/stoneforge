@@ -49,26 +49,24 @@ with dependencies installed (pnpm 8.15.5, Node 22, Bun), permission to push to
 that repository, and passing CI. Verify `git remote -v` points to MotusLabs.
 Do not run release commands while implementing or reviewing documentation.
 
-1. Run `pnpm changeset version` to consume pending changesets, update versions
-   and generate package changelogs. Review the result, including the matching
-   `## <x.y.z>` section in `packages/smithy/CHANGELOG.md`, then commit all
-   version/changelog/lockfile changes and push the commit. Changesets has
-   `commit: false`; the release script requires a clean working tree.
-2. Run `bun run scripts/release.ts <bump> --motuslab <n>`, where the optional
-   `<bump>` is `patch`, `minor` or `major`, and `<n>` is a positive integer
-   (default 1). **Usually omit `<bump>` after Changesets has already selected
-   the release version:** `bun run scripts/release.ts --motuslab 1`.
-   Supplying a bump increases the current smithy version again, rewrites only
-   the six library package manifests, and does not generate changelogs or
-   update the lockfile/apps. If intentionally using that mode, ensure all
-   versions, lockfile and the final smithy changelog section are aligned;
-   otherwise the workflow's frozen install or release-note generation can fail.
+1. Run `pnpm changeset version` to consume pending changesets, update the
+   fixed group of library and app versions, and generate package changelogs.
+   Run `pnpm install --lockfile-only` to refresh the lockfile. Review all changes,
+   including the matching nonempty `## <x.y.z>` section in
+   `packages/smithy/CHANGELOG.md`, then commit all generated changes (including
+   deleted changesets) and push the commit. Changesets has `commit: false`.
+2. Run `bun run scripts/release.ts --motuslab <n>`, where `<n>` is a positive
+   integer (default 1). Changesets is the sole versioning tool; the release
+   script never changes versions or makes a version commit. Positional bump
+   types and `--bump` are rejected. It requires a clean working tree and refuses
+   pending changesets, library/app versions outside the fixed group's release
+   version, missing or empty smithy release notes, and a stale lockfile. Lockfile
+   validation uses an offline frozen lockfile-only install without lifecycle
+   scripts. These checks also run in dry-run mode before any build/tag commands.
 3. The script builds packages and the smithy web UI, creates
    `v<x.y.z>-motuslab.<n>`, and **pushes that tag itself** with
-   `git push origin v<x.y.z>-motuslab.<n>`. In bump mode it also commits the six
-   manifests and pushes `HEAD` before the tag. In no-bump mode it only pushes
-   the tag, so push your prepared version commit first. No separate tag push
-   is needed after a successful script run.
+   `git push origin v<x.y.z>-motuslab.<n>`. Push your prepared version commit
+   first. No separate tag push is needed after a successful script run.
 4. Watch `Release (MotusLab)` in Actions, then verify the Release assets and
    install on a real supported Ubuntu PC. Do not create/upload assets manually.
 
@@ -82,10 +80,13 @@ To inspect the script safely on a clean tree:
 ```bash
 bun run scripts/release.ts --help
 bun run scripts/release.ts --motuslab 2 --dry-run
-bun run scripts/release.ts patch --motuslab 2 --dry-run
+bun run scripts/release.ts --dry-run
 ```
 
-`--dry-run` prints build/commit/tag/push commands without performing them.
+`--dry-run` validates release state and prints build/tag/push commands without
+performing them. Both the default and explicit MotusLab counter can be previewed.
+A checkout with pending changesets must be versioned and committed first; a dry
+run refuses the same inconsistent state as a real release.
 
 ## What the workflow does
 

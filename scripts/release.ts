@@ -1,36 +1,15 @@
-import { execSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync, execSync } from 'node:child_process'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-interface PackageInfo {
-  name: string
-  dir: string
-}
-
-type BumpType = 'patch' | 'minor' | 'major'
-
 interface CliArgs {
-  bump: BumpType | undefined
   dryRun: boolean
   motuslab: number
 }
 
-// ─── Constants ───────────────────────────────────────────────────────────────
-
 const ROOT = resolve(import.meta.dirname, '..')
-
-const PACKAGES: PackageInfo[] = [
-  { name: '@stoneforge/core', dir: 'packages/core' },
-  { name: '@stoneforge/ui', dir: 'packages/ui' },
-  { name: '@stoneforge/storage', dir: 'packages/storage' },
-  { name: '@stoneforge/quarry', dir: 'packages/quarry' },
-  { name: '@stoneforge/shared-routes', dir: 'packages/shared-routes' },
-  { name: '@stoneforge/smithy', dir: 'packages/smithy' },
-]
-
-/** Package that owns the MotusLab release version (see release-pipeline spec). */
 const VERSION_SOURCE = 'packages/smithy'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -65,22 +44,43 @@ function readJson(path: string): Record<string, any> {
   return JSON.parse(readFileSync(path, 'utf-8'))
 }
 
-function writeJson(path: string, data: Record<string, any>) {
-  writeFileSync(path, JSON.stringify(data, null, 2) + '\n')
-}
-
-// ─── Version logic ───────────────────────────────────────────────────────────
-
-function bumpVersion(current: string, type: BumpType): string {
-  const [major, minor, patch] = current.split('.').map(Number)
-  switch (type) {
-    case 'major':
-      return `${major + 1}.0.0`
-    case 'minor':
-      return `${major}.${minor + 1}.0`
-    case 'patch':
-      return `${major}.${minor}.${patch + 1}`
+/** Validate the committed Changesets output before any build or tag command. */
+export function validateRelease(root: string): string {
+  const pending = readdirSync(resolve(root, '.changeset'))
+    .filter((file) => file.endsWith('.md') && file !== 'README.md')
+  if (pending.length) {
+    throw new Error(`Pending changesets: ${pending.join(', ')}. Run pnpm changeset version first.`)
   }
+  const version = readJson(resolve(root, VERSION_SOURCE, 'package.json')).version
+  if (typeof version !== 'string' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
+    throw new Error(`Invalid release version: ${version}`)
+  }
+  const fixed = readJson(resolve(root, '.changeset/config.json')).fixed.flat() as string[]
+  const manifests = ['packages', 'apps'].flatMap((base) =>
+    readdirSync(resolve(root, base), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => resolve(root, base, entry.name, 'package.json'))
+      .filter((path) => existsSync(path)),
+  )
+  for (const name of fixed) {
+    const path = manifests.find((path) => readJson(path).name === name)
+    if (!path) throw new Error(`Missing fixed-group package: ${name}`)
+    if (readJson(path).version !== version) {
+      throw new Error(`${name} is not at release version ${version}. Run pnpm changeset version first.`)
+    }
+  }
+  // Use the same section extraction and nonempty-body check as release CI.
+  const { GITHUB_OUTPUT: _githubOutput, ...env } = process.env
+  execFileSync('bash', [resolve(root, 'scripts/motuslab-release-notes.sh'), motuslabTag(version, 1)],
+    { cwd: root, stdio: 'pipe', env })
+  if (!existsSync(resolve(root, 'pnpm-lock.yaml'))) {
+    throw new Error('Missing pnpm-lock.yaml. Refresh and commit the lockfile before releasing.')
+  }
+  // Frozen + lockfile-only validates all importers without installing packages,
+  // running lifecycle scripts, accessing the network, or rewriting the lockfile.
+  execFileSync('pnpm', ['install', '--lockfile-only', '--frozen-lockfile', '--offline', '--ignore-scripts'],
+    { cwd: root, stdio: 'pipe', env: { ...env, COREPACK_ENABLE_AUTO_PIN: '0' } })
+  return version
 }
 
 function motuslabTag(version: string, motuslab: number): string {
@@ -91,14 +91,16 @@ function motuslabTag(version: string, motuslab: number): string {
 
 function usage(): string {
   return [
-    'Usage: bun run scripts/release.ts [patch|minor|major] [options]',
+    'Usage: bun run scripts/release.ts [options]',
     '',
-    'Bumps workspace package versions, commits, and creates/pushes the MotusLab tag',
+    'Validates committed Changesets versions and creates/pushes the MotusLab tag',
     '  v<version>-motuslab.<n>',
+    '',
+    'First run pnpm changeset version, refresh the lockfile, and commit/push the result.',
     '',
     'Options:',
     '  --motuslab <n>   MotusLab release counter for the tag (default: 1)',
-    '  --dry-run        Print the commands without running them',
+    '  --dry-run        Validate state and print build/tag/push commands without running them',
     '',
     'This script never publishes to npm or any other third-party service.',
   ].join('\n')
@@ -106,7 +108,6 @@ function usage(): string {
 
 function parseArgs(): CliArgs {
   const args = process.argv.slice(2)
-  let bump: BumpType | undefined
   let dryRun = false
   let motuslab = 1
 
@@ -116,23 +117,13 @@ function parseArgs(): CliArgs {
       case 'patch':
       case 'minor':
       case 'major':
-        if (bump) fail(`Multiple bump types given: ${bump}, ${arg}`)
-        bump = arg
-        break
-      case '--bump': {
-        const value = args[++i] as BumpType
-        if (!['patch', 'minor', 'major'].includes(value)) {
-          fail(`Invalid bump type: ${value}. Must be patch, minor, or major.`)
-        }
-        if (bump) fail(`Multiple bump types given: ${bump}, ${value}`)
-        bump = value
-        break
-      }
+      case '--bump':
+        fail('Bump mode was removed. Run pnpm changeset version, refresh the lockfile, and commit/push before releasing.')
       case '--motuslab': {
         const value = args[++i]
         if (!value) fail('--motuslab requires a positive integer')
         motuslab = Number(value)
-        if (!Number.isInteger(motuslab) || motuslab < 1) {
+        if (!Number.isSafeInteger(motuslab) || motuslab < 1) {
           fail(`Invalid --motuslab value: ${value}. Must be a positive integer.`)
         }
         break
@@ -151,14 +142,14 @@ function parseArgs(): CliArgs {
     }
   }
 
-  return { bump, dryRun, motuslab }
+  return { dryRun, motuslab }
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
   const opts = parseArgs()
-  const totalSteps = 5
+  const totalSteps = 3
 
   if (opts.dryRun) {
     console.log(bold('\n🏜️  DRY RUN — no changes will be made\n'))
@@ -174,40 +165,21 @@ async function main() {
   }
   ok('Git working tree clean')
 
-  // ── 2. Compute version ────────────────────────────────────────────────────
-
-  const sourcePkgPath = resolve(ROOT, VERSION_SOURCE, 'package.json')
-  const currentVersion = readJson(sourcePkgPath).version as string
-  const newVersion = opts.bump ? bumpVersion(currentVersion, opts.bump) : currentVersion
-  const tag = motuslabTag(newVersion, opts.motuslab)
-
-  if (opts.bump) {
-    step(2, totalSteps, `Bumping ${bold(currentVersion)} → ${bold(newVersion)} (${opts.bump})`)
-  } else {
-    step(2, totalSteps, `Releasing ${bold(currentVersion)} (no version bump)`)
+  let version: string
+  try {
+    version = validateRelease(ROOT)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    const output = (error as { stdout?: Buffer }).stdout?.toString() ?? ''
+    fail(`Release state is not ready: ${detail}\n${output}Run pnpm changeset version and pnpm install --lockfile-only, then commit/push the result.`)
   }
+  ok('Changesets, workspace versions, release notes and frozen lockfile validated')
+  const tag = motuslabTag(version, opts.motuslab)
   ok(`MotusLab tag ${bold(tag)}`)
 
-  // ── 3. Update versions ────────────────────────────────────────────────────
+  // ── 2. Build ──────────────────────────────────────────────────────────────
 
-  step(3, totalSteps, 'Updating package versions...')
-
-  for (const pkg of PACKAGES) {
-    const pkgPath = resolve(ROOT, pkg.dir, 'package.json')
-    const pkgJson = readJson(pkgPath)
-    if (opts.bump) {
-      const from = pkgJson.version as string
-      pkgJson.version = newVersion
-      if (!opts.dryRun) writeJson(pkgPath, pkgJson)
-      ok(`${pkg.name} ${from} → ${newVersion}`)
-    } else {
-      ok(`${pkg.name} stays at ${pkgJson.version}`)
-    }
-  }
-
-  // ── 4. Build ──────────────────────────────────────────────────────────────
-
-  step(4, totalSteps, 'Building all packages...')
+  step(2, totalSteps, 'Building all packages...')
 
   if (opts.dryRun) {
     console.log(`  ${dim('[dry-run] pnpm run build')}`)
@@ -230,36 +202,10 @@ async function main() {
     }
   }
 
-  // ── 5. Git commit & tag ───────────────────────────────────────────────────
-
-  step(5, totalSteps, 'Git commit & tag...')
-
-  if (opts.bump) {
-    const filesToAdd = PACKAGES.map((p) => `${p.dir}/package.json`)
-
-    if (opts.dryRun) {
-      console.log(`  ${dim(`[dry-run] git add ${filesToAdd.join(' ')}`)}`)
-      console.log(`  ${dim(`[dry-run] git commit -m "release: ${tag}"`)}`)
-      console.log(`  ${dim(`[dry-run] git tag ${tag}`)}`)
-      console.log(`  ${dim(`[dry-run] git push origin HEAD && git push origin ${tag}`)}`)
-    } else {
-      run(`git add ${filesToAdd.join(' ')}`)
-      run(`git commit -m "release: ${tag}"`)
-      run(`git tag ${tag}`)
-      run('git push origin HEAD')
-      run(`git push origin ${tag}`)
-      ok(`Committed and tagged ${bold(tag)}`)
-    }
-  } else {
-    if (opts.dryRun) {
-      console.log(`  ${dim(`[dry-run] git tag ${tag}`)}`)
-      console.log(`  ${dim(`[dry-run] git push origin ${tag}`)}`)
-    } else {
-      run(`git tag ${tag}`)
-      run(`git push origin ${tag}`)
-      ok(`Tagged ${bold(tag)}`)
-    }
-  }
+  step(3, totalSteps, 'Git tag...')
+  run(`git tag ${tag}`, { dryRun: opts.dryRun })
+  run(`git push origin ${tag}`, { dryRun: opts.dryRun })
+  ok(`Prepared tag ${bold(tag)}`)
 
   console.log(
     `\n${green(bold('Done!'))} Prepared MotusLab release ${bold(tag)}. ` +
@@ -268,4 +214,4 @@ async function main() {
   )
 }
 
-main()
+if (import.meta.main) main()

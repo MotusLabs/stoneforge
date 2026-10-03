@@ -52,6 +52,9 @@ jobs:
         run: bun test src
         working-directory: packages/smithy
 
+      - name: Test Changesets release preparation and guards
+        run: bun test scripts/release.test.ts
+
       # Release helpers (scripts/motuslab-version.sh, scripts/motuslab-release-notes.sh)
       # ship their own unit tests; run them here so tag parsing and changelog
       # extraction cannot regress between releases.
