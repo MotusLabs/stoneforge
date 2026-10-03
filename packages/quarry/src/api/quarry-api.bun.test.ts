@@ -296,6 +296,68 @@ describe('QuarryAPI', () => {
       expect(urgentTasks.length).toBe(2);
     });
 
+    it('should filter by multiple tags with AND logic', async () => {
+      // task1 has 'urgent', task3 has 'urgent' AND 'important'
+      const urgentAndImportant = await api.list<Task>({ tags: ['urgent', 'important'] });
+      expect(urgentAndImportant.length).toBe(1);
+      expect(urgentAndImportant[0].title).toBe('Task 3');
+
+      // Order of the required tags must not matter
+      const reversed = await api.list<Task>({ tags: ['important', 'urgent'] });
+      expect(reversed.map((t) => t.id)).toEqual(urgentAndImportant.map((t) => t.id));
+
+      // No element carries this combination
+      const none = await api.list<Task>({ tags: ['urgent', 'later'] });
+      expect(none).toEqual([]);
+    });
+
+    it('should filter by any tag (OR logic) and combine with tags (AND)', async () => {
+      const urgentOrLater = await api.list<Task>({ tagsAny: ['urgent', 'later'] });
+      expect(urgentOrLater.length).toBe(3);
+
+      const combined = await api.list<Task>({ tags: ['urgent'], tagsAny: ['important', 'later'] });
+      // task1 (urgent) lacks both any-tags; only task3 (urgent+important) matches
+      expect(combined.map((t) => t.title)).toEqual(['Task 3']);
+    });
+
+    it('should paginate a multi-tag AND filter with full pages and exact totals', async () => {
+      // Most rows match only one of the two tags — the shape that produced
+      // short/empty pages when the AND was applied after LIMIT (el-4x5w6t).
+      for (let i = 0; i < 30; i++) {
+        const tags = i < 5 ? ['multi-a', 'multi-b'] : ['multi-a'];
+        const task = await createTestTask({ title: `Multi ${String(i).padStart(2, '0')}`, tags });
+        await api.create(toCreateInput(task));
+      }
+
+      const page1 = await api.listPaginated<Task>({ tags: ['multi-a', 'multi-b'], limit: 2, offset: 0 });
+      expect(page1.items.length).toBe(2);
+      expect(page1.items.every((t) => t.tags.includes('multi-a') && t.tags.includes('multi-b'))).toBe(true);
+      expect(page1.total).toBe(5);
+      expect(page1.hasMore).toBe(true);
+
+      const page2 = await api.listPaginated<Task>({ tags: ['multi-a', 'multi-b'], limit: 2, offset: 2 });
+      expect(page2.items.length).toBe(2);
+      expect(page2.hasMore).toBe(true);
+
+      const page3 = await api.listPaginated<Task>({ tags: ['multi-a', 'multi-b'], limit: 2, offset: 4 });
+      expect(page3.items.length).toBe(1);
+      expect(page3.hasMore).toBe(false);
+
+      // Walking pages yields every match exactly once
+      const walked: string[] = [];
+      for (let offset = 0; ; offset += 2) {
+        const page = await api.listPaginated<Task>({ tags: ['multi-a', 'multi-b'], limit: 2, offset });
+        walked.push(...page.items.map((t) => t.id));
+        if (!page.hasMore) break;
+      }
+      expect(walked.length).toBe(5);
+      expect(new Set(walked).size).toBe(5);
+
+      // And the AND set agrees with a one-shot list()
+      const oneShot = await api.list<Task>({ tags: ['multi-a', 'multi-b'] });
+      expect(oneShot.map((t) => t.id).sort()).toEqual([...walked].sort());
+    });
+
     it('should paginate results', async () => {
       const page1 = await api.listPaginated({ limit: 2, offset: 0 });
       expect(page1.items.length).toBe(2);

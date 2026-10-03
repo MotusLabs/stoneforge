@@ -21,6 +21,16 @@
  *  2. the full unpaginated result set for any filter is identical (same rows),
  *  3. ties are broken by the explicit deterministic tiebreaker, so pagination
  *     is stable (no row skipped or repeated across pages).
+ *
+ * Multi-tag AND filters (el-4x5w6t): `tags: [a, b]` means elements with ALL of
+ * the tags. The SQL used to join `t.tag IN (a, b)` — which proves only ONE tag
+ * is present — then apply LIMIT/OFFSET to that too-wide set and re-check the
+ * AND in JavaScript afterwards. Pages came back short or empty (the LIMIT had
+ * already consumed rows that the post-filter then dropped), later pages held
+ * matches the earlier ones skipped, and COUNT/hasMore counted the too-wide set.
+ * The fix compiles each required tag to a correlated EXISTS in SQL, ahead of
+ * LIMIT and COUNT; the multi-tag suite below pins full pages, exact totals and
+ * lossless page walks.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
@@ -341,7 +351,7 @@ describe('listPaginated query plan', () => {
       expect(paged.length).toBe(116);
     });
 
-    it('returns the same items for tag filters as before (DISTINCT + post-filter)', async () => {
+    it('returns the same items for tag filters as before (SQL-side filtering)', async () => {
       for (let i = 0; i < 120; i++) {
         backend.run(`INSERT INTO tags (element_id, tag) VALUES (?, ?)`, [
           `el-plan${String(i).padStart(4, '0')}`,
@@ -412,6 +422,183 @@ describe('listPaginated query plan', () => {
 
       expect(live.total).toBe(116);
       expect(withDeleted.total).toBe(120);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Multi-tag AND filters (el-4x5w6t)
+  //
+  // `tags: [a, b]` must return elements with ALL of the tags, and the AND must
+  // hold in SQL — before LIMIT/OFFSET and before COUNT. The old query joined
+  // `t.tag IN (a, b)` (ANY of the tags), paginated that too-wide set, and only
+  // then re-checked the AND in JavaScript, so pages came back short or empty
+  // and total/hasMore counted the too-wide set.
+  // --------------------------------------------------------------------------
+
+  describe('multi-tag AND filter', () => {
+    /**
+     * Tag layout over the 120 seeded tasks (newest created_at last). The rows
+     * visible to a 2-tag AND filter deliberately interleave: the ten AND
+     * matches sit at the OLD end of created_at, most rows carry only 'alpha',
+     * and a tail carries only 'beta'. Under the old ANY-match SQL + post-filter
+     * this is the worst case: the first desc pages slice rows that the
+     * post-filter then drops, so page 1 came back EMPTY despite ten matches.
+     */
+    const BOTH_TAGGED = Array.from({ length: 10 }, (_, i) => `el-plan${String(i).padStart(4, '0')}`);
+
+    beforeEach(() => {
+      for (let i = 0; i < 120; i++) {
+        const tags: string[] =
+          i < 10 ? ['alpha', 'beta'] : i < 110 ? ['alpha'] : ['beta'];
+        for (const tag of tags) {
+          backend.run(`INSERT INTO tags (element_id, tag) VALUES (?, ?)`, [
+            `el-plan${String(i).padStart(4, '0')}`,
+            tag,
+          ]);
+        }
+      }
+    });
+
+    it('compiles each required tag to a correlated EXISTS ahead of LIMIT and COUNT', () => {
+      const query = buildListQuery({ type: 'task', tags: ['alpha', 'beta'], limit: 7 });
+
+      // One EXISTS per required tag, no tags join: rows cannot fan out, so no
+      // DISTINCT and a plain COUNT(*) are correct.
+      expect(query.sql.match(/EXISTS \(SELECT 1 FROM tags req/g)?.length).toBe(2);
+      expect(query.sql).not.toContain('JOIN tags');
+      expect(query.sql).toContain('SELECT e.*');
+      expect(query.sql).not.toContain('DISTINCT');
+      expect(query.hasTagJoin).toBe(false);
+      expect(query.countSql).toContain('COUNT(*)');
+      expect(query.countSql).not.toContain('COUNT(DISTINCT');
+      expect(query.countSql).toContain('EXISTS');
+      expect(query.params).toEqual(['task', 'alpha', 'beta']);
+    });
+
+    it('serves single- and multi-tag pages without temp b-trees', () => {
+      // EXISTS correlates instead of fanning rows out, so tag pages keep the
+      // ordering-index scan el-2wfmlz introduced (the pre-el-4x5w6t join form
+      // needed a DISTINCT temp b-tree here).
+      const single = planFor(backend, { type: 'task', tags: ['alpha'], limit: 50 });
+      expect(usesTempBTree(single)).toBe(false);
+      expect(single.join('\n')).toContain('idx_elements_type_created_at');
+
+      const multi = planFor(backend, { type: 'task', tags: ['alpha', 'beta'], limit: 50 });
+      expect(usesTempBTree(multi)).toBe(false);
+      expect(multi.join('\n')).toContain('idx_elements_type_created_at');
+    });
+
+    it('returns full pages with exact total/hasMore when most rows match only one tag', async () => {
+      const page1 = await api.listPaginated<Task>({ type: 'task', tags: ['alpha', 'beta'], limit: 7, offset: 0 });
+
+      // The old behavior returned an EMPTY first page here: LIMIT consumed
+      // seven 'beta'-only rows (newest) that the JS post-filter then dropped.
+      expect(page1.items.length).toBe(7);
+      expect(page1.items.every((t) => t.tags.includes('alpha') && t.tags.includes('beta'))).toBe(true);
+      expect(page1.total).toBe(10);
+      expect(page1.hasMore).toBe(true);
+
+      const page2 = await api.listPaginated<Task>({ type: 'task', tags: ['alpha', 'beta'], limit: 7, offset: 7 });
+      expect(page2.items.length).toBe(3);
+      expect(page2.total).toBe(10);
+      expect(page2.hasMore).toBe(false);
+
+      // Offsets past the match set stay empty without inventing hasMore
+      const past = await api.listPaginated<Task>({ type: 'task', tags: ['alpha', 'beta'], limit: 7, offset: 14 });
+      expect(past.items).toEqual([]);
+      expect(past.total).toBe(10);
+      expect(past.hasMore).toBe(false);
+    });
+
+    it('walks every AND match across pages exactly once, in both directions', async () => {
+      for (const orderDir of ['asc', 'desc'] as const) {
+        const expected = [...BOTH_TAGGED];
+        if (orderDir === 'desc') expected.reverse();
+
+        const walked: string[] = [];
+        const pageSizes: number[] = [];
+        let offset = 0;
+        for (;;) {
+          const page = await api.listPaginated<Task>({
+            type: 'task',
+            tags: ['alpha', 'beta'],
+            limit: 7,
+            offset,
+            orderDir,
+          });
+          pageSizes.push(page.items.length);
+          walked.push(...page.items.map((t) => t.id));
+          if (!page.hasMore) break;
+          offset += 7;
+        }
+
+        // Every match exactly once — none skipped, none repeated — in the
+        // deterministic order (created_at values are distinct in this fixture).
+        expect(walked, `orderDir=${orderDir}`).toEqual(expected);
+        expect(new Set(walked).size).toBe(walked.length);
+        // All pages except the last are full
+        expect(pageSizes[pageSizes.length - 1]).toBe(3);
+        expect(pageSizes.slice(0, -1).every((n) => n === 7)).toBe(true);
+      }
+    });
+
+    it('agrees between list(), listPaginated() items and COUNT', async () => {
+      const oneShot = await api.list<Task>({ type: 'task', tags: ['alpha', 'beta'], limit: 1000 });
+      const paged = await api.listPaginated<Task>({ type: 'task', tags: ['alpha', 'beta'], limit: 1000 });
+
+      expect(oneShot.map((t) => t.id).sort()).toEqual([...BOTH_TAGGED].sort());
+      expect(paged.items.map((t) => t.id).sort()).toEqual(oneShot.map((t) => t.id).sort());
+      expect(paged.total).toBe(oneShot.length);
+
+      // The COUNT pass itself counts the AND set, not the ANY set (120 rows
+      // carry at least one of the two tags; only 10 carry both).
+      const query = buildListQuery({ type: 'task', tags: ['alpha', 'beta'] });
+      const countRow = backend.queryOne<{ count: number }>(query.countSql!, query.params);
+      expect(countRow?.count).toBe(10);
+    });
+
+    it('requires three tags when three are given', async () => {
+      backend.run(`INSERT INTO tags (element_id, tag) VALUES (?, ?)`, ['el-plan0000', 'gamma']);
+      // Only el-plan0000 has all three
+      const result = await api.listPaginated<Task>({
+        type: 'task',
+        tags: ['alpha', 'beta', 'gamma'],
+        limit: 5,
+      });
+
+      expect(result.items.map((t) => t.id)).toEqual(['el-plan0000']);
+      expect(result.total).toBe(1);
+      expect(result.hasMore).toBe(false);
+    });
+
+    it('returns an empty page (not a wrong-count page) when no element has all tags', async () => {
+      const result = await api.listPaginated<Task>({
+        type: 'task',
+        tags: ['alpha', 'missing-tag'],
+        limit: 7,
+      });
+
+      expect(result.items).toEqual([]);
+      expect(result.total).toBe(0);
+      expect(result.hasMore).toBe(false);
+    });
+
+    it('combines tags (AND) with tagsAny (OR) as an AND of the two conditions', async () => {
+      backend.run(`INSERT INTO tags (element_id, tag) VALUES (?, ?)`, ['el-plan0000', 'gamma']);
+      backend.run(`INSERT INTO tags (element_id, tag) VALUES (?, ?)`, ['el-plan0100', 'gamma']);
+
+      // Must have alpha AND beta, and at least one of gamma/delta.
+      // el-plan0000 (alpha, beta, gamma) matches; the other nine both-tagged
+      // rows lack gamma/delta; el-plan0100 has gamma but only 'alpha'.
+      const result = await api.listPaginated<Task>({
+        type: 'task',
+        tags: ['alpha', 'beta'],
+        tagsAny: ['gamma', 'delta'],
+        limit: 10,
+      });
+
+      expect(result.items.map((t) => t.id)).toEqual(['el-plan0000']);
+      expect(result.total).toBe(1);
     });
   });
 });

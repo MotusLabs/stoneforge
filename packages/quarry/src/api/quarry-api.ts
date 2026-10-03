@@ -363,7 +363,7 @@ export interface ListQuery {
   params: unknown[];
   limit: number;
   offset: number;
-  /** True when a tags JOIN is present, so rows can duplicate and DISTINCT is required */
+  /** True when a tags JOIN is present (tagsAny filter), so rows can duplicate and DISTINCT is required */
   hasTagJoin: boolean;
 }
 
@@ -381,10 +381,22 @@ export interface ListQueryOptions {
 /**
  * Build the SELECT/COUNT statements for a list query.
  *
- * DISTINCT is emitted only when a tags JOIN is present. Without a join every
- * elements row is unique (id is the primary key), and DISTINCT forces SQLite to
- * materialize the whole match set into a temp b-tree before LIMIT is applied —
- * which makes a fixed page O(n) in table size.
+ * Tag filters keep their exact semantics in SQL, ahead of LIMIT/OFFSET and the
+ * COUNT pass, so pages are full and totals are exact:
+ * - `tags` (all required, AND) compiles to one correlated EXISTS per tag. A
+ *   joined `t.tag IN (...)` only proves that ONE of the tags is present, so the
+ *   row query would over-select, LIMIT would slice the too-wide set, and the
+ *   AND re-check could then only shrink pages after the fact (short or empty
+ *   pages, wrong total/hasMore). EXISTS also correlates instead of fanning
+ *   rows out, so a `tags`-only filter needs neither a JOIN, DISTINCT, nor
+ *   COUNT(DISTINCT e.id).
+ * - `tagsAny` (any matches, OR) compiles to a JOIN + `t.tag IN (...)`. The join
+ *   emits one row per matching tag, so DISTINCT and COUNT(DISTINCT e.id) stay.
+ *
+ * DISTINCT is otherwise omitted. Without a join every elements row is unique
+ * (id is the primary key), and DISTINCT forces SQLite to materialize the whole
+ * match set into a temp b-tree before LIMIT is applied — which makes a fixed
+ * page O(n) in table size.
  */
 export function buildListQuery(
   filter: ElementFilter,
@@ -428,17 +440,18 @@ export function buildListQuery(
   let tagJoin = '';
   let tagWhere = '';
   if (filter.tags && filter.tags.length > 0) {
-    // Must have ALL tags - use GROUP BY with HAVING COUNT
-    tagJoin = ' JOIN tags t ON e.id = t.element_id';
-    const placeholders = filter.tags.map(() => '?').join(', ');
-    tagWhere = ` AND t.tag IN (${placeholders})`;
+    // Must have ALL tags: one correlated EXISTS per required tag. See the
+    // buildListQuery doc comment for why the join + IN form is wrong here.
+    const existsPerTag = filter.tags.map(
+      () => 'EXISTS (SELECT 1 FROM tags req WHERE req.element_id = e.id AND req.tag = ?)'
+    );
+    tagWhere = ` AND (${existsPerTag.join(' AND ')})`;
     params.push(...filter.tags);
   }
   if (filter.tagsAny && filter.tagsAny.length > 0) {
-    // Must have ANY tag
-    if (!tagJoin) {
-      tagJoin = ' JOIN tags t ON e.id = t.element_id';
-    }
+    // Must have ANY tag — the join fans rows out (one row per matching tag),
+    // so DISTINCT and COUNT(DISTINCT e.id) are required below.
+    tagJoin = ' JOIN tags t ON e.id = t.element_id';
     const placeholders = filter.tagsAny.map(() => '?').join(', ');
     tagWhere += ` AND t.tag IN (${placeholders})`;
     params.push(...filter.tagsAny);
@@ -920,33 +933,24 @@ export class QuarryAPIImpl implements QuarryAPI {
       return deserializeElement<T>(row, tags);
     }).filter((el): el is T => el !== null);
 
-    // Check if tags filter requires all tags
-    let filteredItems = items;
-    if (effectiveFilter.tags && effectiveFilter.tags.length > 1) {
-      // Filter to elements that have ALL tags
-      filteredItems = items.filter((item) =>
-        effectiveFilter.tags!.every((tag) => item.tags.includes(tag))
-      );
-    }
-
     // Apply hydration if requested
-    let finalItems: T[] = filteredItems;
+    let finalItems: T[] = items;
     if (effectiveFilter.hydrate) {
       // Hydrate tasks
-      const tasks = filteredItems.filter((item): item is Task & T => isTask(item));
+      const tasks = items.filter((item): item is Task & T => isTask(item));
       if (tasks.length > 0) {
         const hydratedTasks = this.hydrateTasks(tasks, effectiveFilter.hydrate);
         // Create a map for efficient lookup
         const hydratedMap = new Map(hydratedTasks.map((t) => [t.id, t]));
         // Replace tasks with hydrated versions, keeping non-tasks as-is
-        finalItems = filteredItems.map((item) => {
+        finalItems = items.map((item) => {
           const hydrated = hydratedMap.get(item.id);
           return hydrated ? (hydrated as unknown as T) : item;
         });
       }
 
       // Hydrate messages
-      const messages = filteredItems.filter((item): item is Message & T => isMessage(item));
+      const messages = items.filter((item): item is Message & T => isMessage(item));
       if (messages.length > 0) {
         const hydratedMessages = this.hydrateMessages(messages, effectiveFilter.hydrate);
         // Create a map for efficient lookup
