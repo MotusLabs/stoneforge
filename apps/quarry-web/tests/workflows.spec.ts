@@ -1,4 +1,11 @@
 import { test, expect } from '@playwright/test';
+import {
+  makePlaybook,
+  mockPlaybookRoutes,
+  mockWorkflowRoutes,
+  openCreateWorkflowModalFromTemplate,
+  type MockWorkflow,
+} from './helpers/create-workflow-modal';
 
 test.describe('TB25: Workflow List + Create', () => {
   // ============================================================================
@@ -273,166 +280,140 @@ test.describe('TB25: Workflow List + Create', () => {
     await expect(page.getByRole('heading', { name: 'Workflows' })).toBeVisible();
   });
 
-  test('workflows page shows status filter tabs', async ({ page }) => {
+  test('workflows page shows templates and active tabs', async ({ page }) => {
     await page.goto('/workflows');
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
-    await expect(page.getByTestId('workflow-status-filter')).toBeVisible();
 
-    // Check all status filters are present
-    await expect(page.getByTestId('workflow-status-filter-all')).toBeVisible();
-    await expect(page.getByTestId('workflow-status-filter-running')).toBeVisible();
-    await expect(page.getByTestId('workflow-status-filter-pending')).toBeVisible();
-    await expect(page.getByTestId('workflow-status-filter-completed')).toBeVisible();
+    // Both tabs are present (Templates is the default)
+    await expect(page.getByTestId('workflows-tab-templates')).toBeVisible();
+    await expect(page.getByTestId('workflows-tab-active')).toBeVisible();
+    await expect(page.getByTestId('workflows-search')).toBeVisible();
   });
 
-  test('workflows page shows create workflow button', async ({ page }) => {
+  test('workflows page shows create template button', async ({ page }) => {
     await page.goto('/workflows');
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
-    await expect(page.getByTestId('create-workflow-button')).toBeVisible();
+
+    // The templates tab header button creates a new template (playbook)
+    await expect(page.getByTestId('workflows-create')).toBeVisible();
+    await expect(page.getByTestId('workflows-create')).toContainText('Create Template');
   });
 
-  test('clicking create workflow button opens modal', async ({ page }) => {
+  test('clicking create template button opens the template editor', async ({ page }) => {
     await page.goto('/workflows');
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
+    await page.getByTestId('workflows-create').click();
+    await expect(page.getByRole('dialog', { name: 'Create Template', exact: true })).toBeVisible({ timeout: 5000 });
+  });
+
+  test('clicking create workflow on a playbook card opens modal', async ({ page }) => {
+    // Creation is playbook-only: the modal opens from a playbook template
+    // card. Playbook endpoints are mocked because the Quarry server only
+    // serves filesystem discovery for playbooks, not the CRUD/instantiate
+    // API the shared modal uses.
+    const playbook = makePlaybook();
+    await mockPlaybookRoutes(page, { playbooks: [playbook] });
+
+    await openCreateWorkflowModalFromTemplate(page, playbook);
+    await expect(page.getByTestId('create-title-input')).toBeVisible();
   });
 
   test('create workflow modal has input fields', async ({ page }) => {
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+    const playbook = makePlaybook();
+    await mockPlaybookRoutes(page, { playbooks: [playbook] });
 
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
+    await openCreateWorkflowModalFromTemplate(page, playbook);
 
+    // The title input and submit button appear once a playbook is selected
     await expect(page.getByTestId('create-title-input')).toBeVisible();
-    await expect(page.getByTestId('create-playbook-input')).toBeVisible();
     await expect(page.getByTestId('create-submit-button')).toBeVisible();
+    await expect(page.getByTestId('playbook-picker')).toBeVisible();
   });
 
   test('create workflow modal can be closed', async ({ page }) => {
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+    const playbook = makePlaybook();
+    await mockPlaybookRoutes(page, { playbooks: [playbook] });
 
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
+    await openCreateWorkflowModalFromTemplate(page, playbook);
 
     await page.getByRole('dialog', { name: 'Create Workflow', exact: true }).getByRole('button', { name: 'Close dialog', exact: true }).click();
     await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible({ timeout: 5000 });
   });
 
-  test('clicking status filter changes filter', async ({ page }) => {
+  test('clicking the active tab switches tabs', async ({ page }) => {
     await page.goto('/workflows');
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
-    // Click on running filter
-    await page.getByTestId('workflow-status-filter-running').click();
+    // Click on the Active tab
+    await page.getByTestId('workflows-tab-active').click();
 
-    // The running filter should be selected (has different styling)
-    await expect(page.getByTestId('workflow-status-filter-running')).toHaveClass(/bg-white/);
+    // The tab is reflected in the URL
+    await expect(page).toHaveURL(/tab=active/);
   });
 
-  test('workflows list shows workflows when available', async ({ page }) => {
-    const response = await page.request.get('/api/workflows');
-    const workflows = await response.json();
+  test('active tab lists workflows when available', async ({ page }) => {
+    // The shared UI hooks expect envelope responses the Quarry server does
+    // not serve, so the list is exercised against mocked workflows
+    const workflow = { id: 'wf-list-1', title: 'Listed Workflow', tasks: [] };
+    await mockWorkflowRoutes(page, { workflows: [workflow] });
 
-    await page.goto('/workflows');
+    await page.goto('/workflows?tab=active');
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
-    if (workflows.length === 0) {
-      // Should show empty state
-      await expect(page.getByTestId('workflows-empty')).toBeVisible();
-    } else {
-      // Should show workflows list
-      await expect(page.getByTestId('workflows-list')).toBeVisible();
-      // At least one workflow item should be visible
-      await expect(page.getByTestId(`workflow-item-${workflows[0].id}`)).toBeVisible();
-    }
+    // Should show the workflows grid with the workflow card
+    await expect(page.getByTestId('active-workflows-grid')).toBeVisible();
+    await expect(page.getByTestId(`workflow-card-${workflow.id}`)).toBeVisible();
   });
 
-  test('clicking workflow opens detail panel', async ({ page }) => {
-    const response = await page.request.get('/api/workflows');
-    const workflows = await response.json();
+  test('active tab shows empty state when there are no workflows', async ({ page }) => {
+    await mockWorkflowRoutes(page, { workflows: [] });
 
-    if (workflows.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/workflows');
+    await page.goto('/workflows?tab=active');
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
-    // Click on first workflow
-    await page.getByTestId(`workflow-item-${workflows[0].id}`).click();
-
-    // Detail panel should appear
-    await expect(page.getByTestId('workflow-detail-panel')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('heading', { name: 'No workflows' })).toBeVisible();
   });
 
-  test('workflow detail panel shows workflow title', async ({ page }) => {
-    const response = await page.request.get('/api/workflows');
-    const workflows = await response.json();
+  test('clicking workflow card opens detail view', async ({ page }) => {
+    const workflow = {
+      id: 'wf-detail-1',
+      title: 'Detail Workflow',
+      tasks: [{ id: 'task-detail-1', title: 'Detail Task' }],
+    };
+    await mockWorkflowRoutes(page, { workflows: [workflow] });
 
-    if (workflows.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/workflows');
+    await page.goto('/workflows?tab=active');
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
-    // Click on first workflow
-    await page.getByTestId(`workflow-item-${workflows[0].id}`).click();
-    await expect(page.getByTestId('workflow-detail-panel')).toBeVisible({ timeout: 5000 });
+    // Click on the workflow card
+    await page.getByTestId(`workflow-card-${workflow.id}`).click();
 
-    // Check title is displayed
-    await expect(page.getByTestId('workflow-detail-title')).toContainText(workflows[0].title);
+    // Detail view should appear with the workflow's task
+    await expect(page.getByTestId('workflow-detail-page')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('workflow-progress-dashboard')).toBeVisible();
+    await expect(page.getByTestId('workflow-task-task-detail-1')).toBeVisible();
   });
 
-  test('workflow detail panel shows status badge', async ({ page }) => {
-    const response = await page.request.get('/api/workflows');
-    const workflows = await response.json();
+  test('workflow detail view back button works', async ({ page }) => {
+    const workflow = {
+      id: 'wf-back-1',
+      title: 'Back Workflow',
+      tasks: [{ id: 'task-back-1', title: 'Back Task' }],
+    };
+    await mockWorkflowRoutes(page, { workflows: [workflow] });
 
-    if (workflows.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/workflows');
+    await page.goto('/workflows?tab=active');
     await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
-    // Click on first workflow
-    await page.getByTestId(`workflow-item-${workflows[0].id}`).click();
-    await expect(page.getByTestId('workflow-detail-panel')).toBeVisible({ timeout: 5000 });
+    await page.getByTestId(`workflow-card-${workflow.id}`).click();
+    await expect(page.getByTestId('workflow-detail-page')).toBeVisible({ timeout: 5000 });
 
-    // Check status badge is displayed in the detail panel
-    await expect(
-      page.getByTestId('workflow-detail-panel').getByTestId(`workflow-status-badge-${workflows[0].status}`)
-    ).toBeVisible();
-  });
+    // Click back button
+    await page.getByTestId('workflow-back-button').click();
 
-  test('workflow detail panel close button works', async ({ page }) => {
-    const response = await page.request.get('/api/workflows');
-    const workflows = await response.json();
-
-    if (workflows.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
-
-    // Click on first workflow
-    await page.getByTestId(`workflow-item-${workflows[0].id}`).click();
-    await expect(page.getByTestId('workflow-detail-panel')).toBeVisible({ timeout: 5000 });
-
-    // Click close button
-    await page.getByTestId('workflow-detail-close').click();
-
-    // Panel should close
-    await expect(page.getByTestId('workflow-detail-panel')).not.toBeVisible({ timeout: 5000 });
+    // Should return to the workflows list
+    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 5000 });
   });
 
   test('workflows page is navigable via sidebar', async ({ page }) => {
@@ -447,44 +428,44 @@ test.describe('TB25: Workflow List + Create', () => {
     expect(page.url()).toContain('/workflows');
   });
 
-  test('creating a workflow shows it in list', async ({ page }) => {
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+  test('creating a workflow from a playbook shows it in list', async ({ page }) => {
+    // Workflows are created by instantiating a playbook. Both the playbook
+    // and workflow endpoints are mocked: the Quarry server does not serve the
+    // API shapes the shared UI uses. The mocked workflow list is live, so the
+    // workflow created through the modal appears in it.
+    const workflows: MockWorkflow[] = [];
+    await mockWorkflowRoutes(page, { workflows });
 
-    // Get initial count
-    const beforeResponse = await page.request.get('/api/workflows');
-    const beforeWorkflows = await beforeResponse.json();
-    const beforeCount = beforeWorkflows.length;
+    const playbook = makePlaybook();
+    const created = await mockPlaybookRoutes(page, {
+      playbooks: [playbook],
+      onInstantiate: (call) => {
+        // Fires on submit, after `created` has been assigned
+        workflows.push({
+          id: created.id,
+          title: call.title ?? playbook.title,
+          tasks: playbook.steps.map((step, index) => ({
+            id: `${created.id}-task-${index + 1}`,
+            title: step.title,
+          })),
+        });
+      },
+    });
 
-    // Open create modal
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
+    await openCreateWorkflowModalFromTemplate(page, playbook);
 
-    // Fill in the form
-    const timestamp = Date.now();
-    const workflowTitle = `E2E Test Workflow ${timestamp}`;
+    const workflowTitle = `E2E Test Workflow ${Date.now()}`;
     await page.getByTestId('create-title-input').fill(workflowTitle);
-    await page.getByTestId('create-playbook-input').fill(`Test Playbook ${timestamp}`);
-
-    // Submit
     await page.getByTestId('create-submit-button').click();
 
-    // Modal should close
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible({ timeout: 10000 });
+    // The modal closes and the page switches to the active tab
+    await expect(
+      page.getByRole('dialog', { name: 'Create Workflow', exact: true })
+    ).not.toBeVisible({ timeout: 10000 });
 
-    // Verify via API that workflow was created
-    const afterResponse = await page.request.get('/api/workflows');
-    const afterWorkflows = await afterResponse.json();
-    expect(afterWorkflows.length).toBeGreaterThanOrEqual(beforeCount);
-
-    // Find the created workflow and verify
-    const created = afterWorkflows.find((w: { title: string }) => w.title === workflowTitle);
-    expect(created).toBeDefined();
-
-    // Cleanup
-    if (created) {
-      await page.request.delete(`/api/workflows/${created.id}?force=true`);
-    }
+    // The new workflow is listed
+    await expect(page.getByTestId(`workflow-card-${created.id}`)).toBeVisible({ timeout: 10000 });
+    await expect(page.getByTestId(`workflow-card-${created.id}`)).toContainText(workflowTitle);
   });
 });
 
