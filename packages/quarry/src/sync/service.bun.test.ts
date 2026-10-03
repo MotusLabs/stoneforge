@@ -211,29 +211,197 @@ describe('SyncService', () => {
       expect(parsed.blockerId).toBe('el-task2');
     });
 
-    test('incremental export only exports dirty elements', async () => {
-      // Insert test data
+    test('terminates nonempty files with a single newline (async export)', async () => {
+      // Empty export (before any data exists): files exist but contain
+      // nothing — not even a newline
+      const empty = await service.export({ outputDir: join(tempDir, 'empty'), full: true });
+      expect(readFileSync(empty.elementsFile, 'utf-8')).toBe('');
+      expect(readFileSync(empty.dependenciesFile, 'utf-8')).toBe('');
+
       const task1 = createTestElement({ id: 'el-task1' as ElementId });
       const task2 = createTestElement({ id: 'el-task2' as ElementId });
       insertElement(backend, task1);
       insertElement(backend, task2);
-
-      // Mark only task1 as dirty
-      backend.markDirty('el-task1');
+      insertDependency(backend, createTestDependency(task1.id, task2.id));
 
       const outputDir = join(tempDir, 'export');
+      await service.export({ outputDir, full: true });
+
+      // Nonempty files end with exactly one newline: `wc -l` then reports the
+      // element count exactly, and re-exports show no spurious last-line diff
+      // against files written by earlier versions
+      const fullElements = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+      expect(fullElements.endsWith('\n')).toBe(true);
+      expect(fullElements.endsWith('\n\n')).toBe(false);
+      expect(fullElements.split('\n')).toHaveLength(3); // 2 element lines + trailing ''
+
+      const fullDeps = readFileSync(join(outputDir, 'dependencies.jsonl'), 'utf-8');
+      expect(fullDeps.endsWith('\n')).toBe(true);
+      expect(fullDeps.endsWith('\n\n')).toBe(false);
+
+      // The incremental merge path keeps the same convention
+      backend.markDirty('el-task1');
+      await service.export({ outputDir, full: false });
+      const merged = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+      expect(merged.endsWith('\n')).toBe(true);
+      expect(merged.endsWith('\n\n')).toBe(false);
+      expect(merged.split('\n')).toHaveLength(3);
+    });
+
+    test('incremental export merges dirty elements into the existing file', async () => {
+      // Insert test data
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      const task3 = createTestElement({ id: 'el-task3' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+      insertElement(backend, task3);
+
+      const outputDir = join(tempDir, 'export');
+
+      // Full export first — establishes the baseline file
+      await service.export({ outputDir, full: true });
+
+      // Modify task2 and mark only task2 as dirty (mirrors how QuarryAPI updates
+      // an element: the type-specific payload lives in the `data` column)
+      const updatedTitle = 'Updated Title';
+      const { id: _id, type: _t, createdAt: _c, updatedAt: _u, createdBy: _by, tags: _tg, ...taskData } = task2;
+      backend.run('UPDATE elements SET data = ? WHERE id = ?', [
+        JSON.stringify({ ...taskData, title: updatedTitle }),
+        'el-task2',
+      ]);
+      backend.markDirty('el-task2');
 
       const result = await service.export({
         outputDir,
         full: false, // Incremental
       });
 
-      expect(result.elementsExported).toBe(1);
       expect(result.incremental).toBe(true);
+      expect(result.fallbackToFull).toBeFalsy();
+      // The file keeps every element, not just the dirty one
+      expect(result.elementsExported).toBe(3);
+
+      // Verify file content: all 3 elements present, task2 updated
+      const { elements } = parseElements(readFileSync(result.elementsFile, 'utf-8'));
+      expect(elements).toHaveLength(3);
+      const ids = elements.map((el) => el.id).sort();
+      expect(ids).toEqual(['el-task1', 'el-task2', 'el-task3']);
+
+      const modified = elements.find((el) => el.id === 'el-task2');
+      expect((modified as unknown as { title: string }).title).toBe(updatedTitle);
 
       // Verify dirty tracking was cleared
       const dirty = backend.getDirtyElements();
       expect(dirty).toHaveLength(0);
+    });
+
+    test('incremental export writes a tombstone for a deleted element', async () => {
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+
+      const outputDir = join(tempDir, 'export');
+      await service.export({ outputDir, full: true });
+
+      // Soft delete task1 (tombstone), mirroring QuarryAPI.deleteElement(): the
+      // tombstone is recorded in both the `data` payload and `deleted_at`
+      const now = createTimestamp();
+      const { id: _id, type: _t, createdAt: _c, updatedAt: _u, createdBy: _by, tags: _tg, ...taskData } = task1;
+      backend.run(
+        'UPDATE elements SET data = ?, deleted_at = ?, updated_at = ? WHERE id = ?',
+        [
+          JSON.stringify({
+            ...taskData,
+            status: 'tombstone',
+            deletedAt: now,
+            deleteReason: 'test',
+          }),
+          now,
+          now,
+          'el-task1',
+        ]
+      );
+      backend.markDirty('el-task1');
+
+      const result = await service.export({ outputDir, full: false });
+
+      expect(result.incremental).toBe(true);
+      expect(result.elementsExported).toBe(2);
+
+      const { elements } = parseElements(readFileSync(result.elementsFile, 'utf-8'));
+      expect(elements).toHaveLength(2);
+
+      const tombstone = elements.find((el) => el.id === 'el-task1');
+      expect(tombstone).toBeDefined();
+      expect((tombstone as unknown as { deletedAt?: string }).deletedAt).toBe(now);
+
+      // The live element is untouched
+      expect(elements.find((el) => el.id === 'el-task2')).toBeDefined();
+    });
+
+    test('incremental export with a missing file falls back to a full export', async () => {
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+
+      const outputDir = join(tempDir, 'export');
+
+      // No prior export — there is no existing file to merge into
+      backend.markDirty('el-task1');
+
+      const result = await service.export({ outputDir, full: false });
+
+      expect(result.incremental).toBe(true);
+      expect(result.fallbackToFull).toBe(true);
+      // Full export of both elements, not just the dirty one
+      expect(result.elementsExported).toBe(2);
+
+      const { elements } = parseElements(readFileSync(result.elementsFile, 'utf-8'));
+      expect(elements).toHaveLength(2);
+
+      // Dirty tracking was cleared by the fallback full export
+      expect(backend.getDirtyElements()).toHaveLength(0);
+    });
+
+    test('incremental export keeps elements when the file exists but nothing is dirty', async () => {
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      insertElement(backend, task1);
+
+      const outputDir = join(tempDir, 'export');
+      await service.export({ outputDir, full: true });
+
+      const before = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+
+      // No dirty elements — incremental export must be a no-op for content
+      const result = await service.export({ outputDir, full: false });
+
+      expect(result.incremental).toBe(true);
+      expect(result.elementsExported).toBe(1);
+      expect(readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8')).toBe(before);
+    });
+
+    test('incremental export keeps export sort order', async () => {
+      // Insert a task first, then an entity — the entity must sort first
+      const task = createTestElement({ id: 'el-task9' as ElementId });
+      const entity = createTestEntity({ id: 'el-ent1' as ElementId });
+      insertElement(backend, task);
+      insertElement(backend, entity);
+
+      const outputDir = join(tempDir, 'export');
+      await service.export({ outputDir, full: true });
+
+      // Add a new entity and export incrementally — it must land before the task
+      const entity2 = createTestEntity({ id: 'el-ent2' as ElementId });
+      insertElement(backend, entity2);
+      backend.markDirty('el-ent2');
+
+      await service.export({ outputDir, full: false });
+
+      const { elements } = parseElements(readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8'));
+      expect(elements.map((el) => el.id)).toEqual(['el-ent1', 'el-ent2', 'el-task9']);
     });
 
     test('uses custom file names', async () => {
@@ -265,6 +433,73 @@ describe('SyncService', () => {
 
       expect(result.elementsExported).toBe(1);
       expect(existsSync(result.elementsFile)).toBe(true);
+    });
+
+    test('terminates nonempty files with a single newline (sync export)', () => {
+      // Empty export (before any data exists): files exist but contain
+      // nothing — not even a newline
+      const empty = service.exportSync({ outputDir: join(tempDir, 'empty'), full: true });
+      expect(readFileSync(empty.elementsFile, 'utf-8')).toBe('');
+      expect(readFileSync(empty.dependenciesFile, 'utf-8')).toBe('');
+
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+      insertDependency(backend, createTestDependency(task1.id, task2.id));
+
+      const outputDir = join(tempDir, 'export');
+      service.exportSync({ outputDir, full: true });
+
+      const fullElements = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+      expect(fullElements.endsWith('\n')).toBe(true);
+      expect(fullElements.endsWith('\n\n')).toBe(false);
+      expect(fullElements.split('\n')).toHaveLength(3); // 2 element lines + trailing ''
+
+      const fullDeps = readFileSync(join(outputDir, 'dependencies.jsonl'), 'utf-8');
+      expect(fullDeps.endsWith('\n')).toBe(true);
+      expect(fullDeps.endsWith('\n\n')).toBe(false);
+
+      // The incremental merge path keeps the same convention
+      backend.markDirty('el-task2');
+      service.exportSync({ outputDir, full: false });
+      const merged = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+      expect(merged.endsWith('\n')).toBe(true);
+      expect(merged.endsWith('\n\n')).toBe(false);
+      expect(merged.split('\n')).toHaveLength(3);
+    });
+
+    test('incremental exportSync merges instead of overwriting', () => {
+      // This is the `sf export` (CLI) path — it must not clobber the file either
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+
+      const outputDir = join(tempDir, 'export');
+      service.exportSync({ outputDir, full: true });
+
+      backend.markDirty('el-task2');
+      const result = service.exportSync({ outputDir, full: false });
+
+      expect(result.incremental).toBe(true);
+      expect(result.elementsExported).toBe(2);
+
+      const { elements } = parseElements(readFileSync(result.elementsFile, 'utf-8'));
+      expect(elements).toHaveLength(2);
+    });
+
+    test('incremental exportSync falls back to full when the file is missing', () => {
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      insertElement(backend, task1);
+
+      const outputDir = join(tempDir, 'export');
+      backend.markDirty('el-task1');
+
+      const result = service.exportSync({ outputDir, full: false });
+
+      expect(result.fallbackToFull).toBe(true);
+      expect(result.elementsExported).toBe(1);
     });
   });
 

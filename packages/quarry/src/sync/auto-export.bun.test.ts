@@ -179,6 +179,66 @@ describe('AutoExportService', () => {
     service.stop();
   });
 
+  test('incremental ticks keep every element in the file', async () => {
+    // Regression test: an incremental tick used to overwrite elements.jsonl
+    // with only the dirty elements, destroying the git-tracked source of truth.
+    const task1 = createTestElement({ id: 'el-task1' as ElementId });
+    const task2 = createTestElement({ id: 'el-task2' as ElementId });
+    insertElement(backend, task1);
+    insertElement(backend, task2);
+
+    const outputDir = join(tempDir, 'sync');
+    const service = createAutoExportService({
+      syncService,
+      backend,
+      syncConfig: defaultSyncConfig({ exportDebounce: 40 }),
+      outputDir,
+    });
+
+    await service.start();
+
+    const afterStart = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+    expect(afterStart).toContain('el-task1');
+    expect(afterStart).toContain('el-task2');
+
+    // First tick: modify task1, mark dirty
+    backend.run('UPDATE elements SET data = ? WHERE id = ?', [
+      JSON.stringify({ title: 'Tick One', status: 'open', priority: 3, complexity: 3, taskType: 'task', metadata: {} }),
+      'el-task1',
+    ]);
+    backend.markDirty('el-task1');
+    await sleep(100);
+
+    // Second tick: add a brand new element
+    const task3 = createTestElement({ id: 'el-task3' as ElementId });
+    insertElement(backend, task3);
+    backend.markDirty('el-task3');
+    await sleep(100);
+
+    const content = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+    const lines = content.split('\n').filter((l) => l.trim().length > 0);
+    const ids = lines.map((l) => (JSON.parse(l) as { id: string }).id);
+
+    // All three elements survive both incremental ticks
+    expect(ids).toHaveLength(3);
+    expect(ids).toContain('el-task1');
+    expect(ids).toContain('el-task2');
+    expect(ids).toContain('el-task3');
+
+    // The modified element carries its new content
+    const tick1 = lines.find((l) => l.includes('el-task1'));
+    expect(tick1).toContain('Tick One');
+
+    // The file keeps the terminal-newline convention (exactly one)
+    expect(content.endsWith('\n')).toBe(true);
+    expect(content.endsWith('\n\n')).toBe(false);
+
+    // Nothing left pending
+    expect(backend.getDirtyElements()).toHaveLength(0);
+
+    service.stop();
+  });
+
   // --------------------------------------------------------------------------
   // Skips when no dirty elements
   // --------------------------------------------------------------------------

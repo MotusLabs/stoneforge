@@ -256,9 +256,14 @@ describe('exportCommand', () => {
       const firstResult = await exportCommand.handler([], firstOptions);
       expect((firstResult.data as ExportResult).elementsExported).toBe(1);
 
-      // Second incremental export should have 0 elements (dirty was cleared)
+      const elementsFile = (firstResult.data as ExportResult).elementsFile;
+      const afterFirst = readFileSync(elementsFile, 'utf-8');
+
+      // Second incremental export: nothing is dirty, so the file is unchanged
+      // and still holds the full element set (it must not be truncated to 0)
       const secondResult = await exportCommand.handler([], firstOptions);
-      expect((secondResult.data as ExportResult).elementsExported).toBe(0);
+      expect((secondResult.data as ExportResult).elementsExported).toBe(1);
+      expect(readFileSync(elementsFile, 'utf-8')).toBe(afterFirst);
     });
   });
 

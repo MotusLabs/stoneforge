@@ -154,7 +154,13 @@ export interface DependencyConflictRecord {
  * Export result
  */
 export interface ExportResult {
-  /** Number of elements exported */
+  /**
+   * Number of elements in the exported elements file.
+   *
+   * For a full export this is the whole element set; for an incremental export
+   * it is the merged total (existing elements + newly appended ones), since the
+   * file always ends up containing the complete element set.
+   */
   elementsExported: number;
   /** Number of dependencies exported */
   dependenciesExported: number;
@@ -166,6 +172,11 @@ export interface ExportResult {
   dependenciesFile: string;
   /** Export timestamp */
   exportedAt: Timestamp;
+  /**
+   * True when an incremental export was requested but the existing elements
+   * file was missing or unreadable, so a full export was performed instead.
+   */
+  fallbackToFull?: boolean;
 }
 
 /**

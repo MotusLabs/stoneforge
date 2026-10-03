@@ -44,6 +44,12 @@ export {
   type DependencyMergeResult,
 } from './merge.js';
 
+// Incremental Export Merging
+export {
+  mergeElementLines,
+  type MergeLinesResult,
+} from './incremental.js';
+
 // Sync Service
 export { SyncService, createSyncService } from './service.js';
 

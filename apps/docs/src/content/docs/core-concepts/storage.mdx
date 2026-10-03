@@ -202,21 +202,24 @@ This format is designed for Git. Lines can be added, removed, or reordered witho
 
 ## Dirty tracking
 
-Stoneforge uses **dirty tracking** to make exports efficient. Instead of writing every element to JSONL on every export, only elements modified since the last export are written.
+Stoneforge uses **dirty tracking** to make exports efficient. Instead of serializing every element on every export, only elements modified since the last export are rewritten.
 
 When an element is created, updated, or deleted through the API, it's marked dirty in a dedicated `dirty_elements` table. On export:
 
 1. Query all dirty element IDs
-2. Serialize only those elements to JSONL
-3. Clear the dirty flags for exported elements
+2. Serialize only those elements
+3. **Merge** them into the existing `elements.jsonl` — each replaces its own line (keyed by `id`, tombstones included) or is appended, and every other line is copied through unchanged
+4. Clear the dirty flags for exported elements
 
-For a full export (e.g., after a major migration), you can bypass dirty tracking and serialize everything:
+The merge is what makes the JSONL safe to treat as the source of truth: an incremental export never drops elements that are still clean, and a git diff afterwards shows only the elements that actually changed. The merged file is re-sorted into the standard export order and written atomically (temp file + rename), so a crash mid-write cannot truncate it.
+
+For a full export (e.g., after a major migration), you can bypass dirty tracking and rewrite the file from the complete element set:
 
 ```bash
 sf sync export --full
 ```
 
-Incremental exports are the default, keeping the export operation fast even in large projects.
+Incremental exports are the default, keeping the export operation fast even in large projects. If `elements.jsonl` does not exist yet (or cannot be read), an incremental export automatically falls back to a full export.
 
 ## Multi-runtime backends
 

@@ -7,8 +7,18 @@
  * - Conflict resolution
  */
 
-import { writeFile, readFile, mkdir } from 'node:fs/promises';
-import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { readFile, mkdir, open, rename, unlink } from 'node:fs/promises';
+import {
+  existsSync,
+  readFileSync,
+  mkdirSync,
+  openSync,
+  writeSync,
+  fsyncSync,
+  closeSync,
+  renameSync,
+  unlinkSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import type { StorageBackend } from '@stoneforge/storage';
 import type { Element, ElementId, Timestamp, EntityId, Dependency, DependencyType } from '@stoneforge/core';
@@ -31,6 +41,7 @@ import {
   sortDependenciesForExport,
 } from './serialization.js';
 import { mergeElements, mergeDependencies } from './merge.js';
+import { mergeElementLines } from './incremental.js';
 
 // ============================================================================
 // Types
@@ -48,6 +59,32 @@ interface ElementRow {
   [key: string]: unknown;
 }
 
+/**
+ * Everything needed to perform one export, with all storage reads and file
+ * reads already done. Shared by the async and sync export paths so they cannot
+ * drift apart.
+ */
+interface ExportPlan {
+  /** Path of elements.jsonl to write */
+  elementsPath: string;
+  /** Path of dependencies.jsonl to write */
+  dependenciesPath: string;
+  /** Whether the elements file is rewritten from the full element set */
+  full: boolean;
+  /** True when an incremental export fell back to a full export */
+  fallbackToFull: boolean;
+  /** elements.jsonl content (no trailing newline; writeAtomic appends it) */
+  elementsContent: string;
+  /** Number of element lines that will be written */
+  elementCount: number;
+  /** Elements skipped because they failed validation */
+  skippedCount: number;
+  /** dependencies.jsonl content (no trailing newline; writeAtomic appends it) */
+  dependenciesContent: string;
+  /** Number of dependency lines that will be written */
+  dependencyCount: number;
+}
+
 interface TagRow {
   element_id: string;
   tag: string;
@@ -62,6 +99,19 @@ interface DependencyRow {
   created_by: string;
   metadata: string | null;
   [key: string]: unknown;
+}
+
+/**
+ * Terminate nonempty JSONL content with a single newline; empty content stays
+ * empty.
+ *
+ * This is the historical writeFile() convention
+ * (`content + (content ? '\n' : '')`). The atomic writers must keep it so a
+ * re-export produces no spurious last-line diff against files written by older
+ * versions, and so `wc -l` reports the element count exactly.
+ */
+function withTerminalNewline(content: string): string {
+  return content.length > 0 ? `${content}\n` : content;
 }
 
 // ============================================================================
@@ -81,6 +131,12 @@ export class SyncService {
   /**
    * Export elements to JSONL format
    *
+   * An incremental export (`full: false`) *merges* the dirty elements into the
+   * existing `elements.jsonl` rather than replacing it — the JSONL files are
+   * the git-tracked source of truth, so overwriting them with only the dirty
+   * subset would destroy data. If the existing file is missing or unreadable,
+   * the incremental export falls back to a full export.
+   *
    * @param options - Export configuration
    * @returns Export result with file paths and counts
    */
@@ -92,36 +148,16 @@ export class SyncService {
       await mkdir(options.outputDir, { recursive: true });
     }
 
-    // Get elements to export
-    const elements = options.full
-      ? this.getAllElements(options.includeEphemeral ?? false)
-      : this.getDirtyElementsData();
+    const plan = this.prepareExport(options);
 
-    // Sort elements for export (entities first, then by creation time)
-    const sortedElements = sortElementsForExport(elements);
-
-    // Get dependencies
-    const dependencies = this.getAllDependencies();
-    const sortedDependencies = sortDependenciesForExport(dependencies);
-
-    // Build file paths
-    const elementsFile = options.elementsFile ?? 'elements.jsonl';
-    const dependenciesFile = options.dependenciesFile ?? 'dependencies.jsonl';
-    const elementsPath = join(options.outputDir, elementsFile);
-    const dependenciesPath = join(options.outputDir, dependenciesFile);
-
-    // Serialize to JSONL (skip invalid elements with a warning)
-    const { content: elementsContent, skipped: skippedCount } =
-      this.serializeElementsSafe(sortedElements);
-    const dependenciesContent = sortedDependencies.map((d) => serializeDependency(d)).join('\n');
-
-    if (skippedCount > 0) {
-      console.warn(`[sync] Skipped ${skippedCount} invalid element(s) during export`);
+    if (plan.skippedCount > 0) {
+      console.warn(`[sync] Skipped ${plan.skippedCount} invalid element(s) during export`);
     }
 
-    // Write files
-    await writeFile(elementsPath, elementsContent + (elementsContent ? '\n' : ''));
-    await writeFile(dependenciesPath, dependenciesContent + (dependenciesContent ? '\n' : ''));
+    // Write files atomically (temp file + rename) so a crash mid-write can
+    // never truncate the source of truth
+    await this.writeAtomic(plan.elementsPath, plan.elementsContent);
+    await this.writeAtomic(plan.dependenciesPath, plan.dependenciesContent);
 
     // Clear dirty tracking after successful export
     if (!options.full) {
@@ -129,12 +165,13 @@ export class SyncService {
     }
 
     return {
-      elementsExported: sortedElements.length - skippedCount,
-      dependenciesExported: sortedDependencies.length,
+      elementsExported: plan.elementCount,
+      dependenciesExported: plan.dependencyCount,
       incremental: !options.full,
-      elementsFile: elementsPath,
-      dependenciesFile: dependenciesPath,
+      elementsFile: plan.elementsPath,
+      dependenciesFile: plan.dependenciesPath,
       exportedAt: now,
+      ...(plan.fallbackToFull ? { fallbackToFull: true } : {}),
     };
   }
 
@@ -149,36 +186,15 @@ export class SyncService {
       mkdirSync(options.outputDir, { recursive: true });
     }
 
-    // Get elements to export
-    const elements = options.full
-      ? this.getAllElements(options.includeEphemeral ?? false)
-      : this.getDirtyElementsData();
+    const plan = this.prepareExport(options);
 
-    // Sort elements for export
-    const sortedElements = sortElementsForExport(elements);
-
-    // Get dependencies
-    const dependencies = this.getAllDependencies();
-    const sortedDependencies = sortDependenciesForExport(dependencies);
-
-    // Build file paths
-    const elementsFile = options.elementsFile ?? 'elements.jsonl';
-    const dependenciesFile = options.dependenciesFile ?? 'dependencies.jsonl';
-    const elementsPath = join(options.outputDir, elementsFile);
-    const dependenciesPath = join(options.outputDir, dependenciesFile);
-
-    // Serialize to JSONL (skip invalid elements with a warning)
-    const { content: elementsContent, skipped: skippedCount } =
-      this.serializeElementsSafe(sortedElements);
-    const dependenciesContent = sortedDependencies.map((d) => serializeDependency(d)).join('\n');
-
-    if (skippedCount > 0) {
-      console.warn(`[sync] Skipped ${skippedCount} invalid element(s) during export`);
+    if (plan.skippedCount > 0) {
+      console.warn(`[sync] Skipped ${plan.skippedCount} invalid element(s) during export`);
     }
 
-    // Write files
-    writeFileSync(elementsPath, elementsContent + (elementsContent ? '\n' : ''));
-    writeFileSync(dependenciesPath, dependenciesContent + (dependenciesContent ? '\n' : ''));
+    // Write files atomically (temp file + rename)
+    this.writeAtomicSync(plan.elementsPath, plan.elementsContent);
+    this.writeAtomicSync(plan.dependenciesPath, plan.dependenciesContent);
 
     // Clear dirty tracking after successful export
     if (!options.full) {
@@ -186,12 +202,13 @@ export class SyncService {
     }
 
     return {
-      elementsExported: sortedElements.length - skippedCount,
-      dependenciesExported: sortedDependencies.length,
+      elementsExported: plan.elementCount,
+      dependenciesExported: plan.dependencyCount,
       incremental: !options.full,
-      elementsFile: elementsPath,
-      dependenciesFile: dependenciesPath,
+      elementsFile: plan.elementsPath,
+      dependenciesFile: plan.dependenciesPath,
       exportedAt: now,
+      ...(plan.fallbackToFull ? { fallbackToFull: true } : {}),
     };
   }
 
@@ -217,6 +234,206 @@ export class SyncService {
       elements: elementsContent,
       dependencies: dependenciesContent,
     };
+  }
+
+  // --------------------------------------------------------------------------
+  // Export Planning
+  // --------------------------------------------------------------------------
+
+  /**
+   * Read everything needed for an export and decide what to write.
+   *
+   * A full export serializes the complete element set. An incremental export
+   * reads the existing elements file and merges only the dirty elements into
+   * it (replacing entries by id, appending new ones), so elements that are
+   * still clean survive in the file.
+   */
+  private prepareExport(options: SyncExportOptions): ExportPlan {
+    // Build file paths
+    const elementsFile = options.elementsFile ?? 'elements.jsonl';
+    const dependenciesFile = options.dependenciesFile ?? 'dependencies.jsonl';
+    const elementsPath = join(options.outputDir, elementsFile);
+    const dependenciesPath = join(options.outputDir, dependenciesFile);
+
+    // Dependencies are always written as a complete snapshot from storage, so
+    // dependency insertions and deletions are both reflected without needing a
+    // merge step.
+    const dependencies = sortDependenciesForExport(this.getAllDependencies());
+    const dependenciesContent = dependencies.map((d) => serializeDependency(d)).join('\n');
+
+    if (options.full) {
+      const serialized = this.serializeAllElements(options.includeEphemeral ?? false);
+      return {
+        elementsPath,
+        dependenciesPath,
+        full: true,
+        fallbackToFull: false,
+        elementsContent: serialized.content,
+        elementCount: serialized.count,
+        skippedCount: serialized.skipped,
+        dependenciesContent,
+        dependencyCount: dependencies.length,
+      };
+    }
+
+    // Incremental export — merge dirty elements into the existing file.
+    const existing = this.readElementsFile(elementsPath);
+
+    if (existing === null) {
+      // Without a readable base there is nothing to merge into; a full export
+      // is the only way to produce a correct file.
+      console.warn(
+        `[sync] elements.jsonl not found or unreadable at ${elementsPath}; falling back to full export`
+      );
+      const serialized = this.serializeAllElements(options.includeEphemeral ?? false);
+      return {
+        elementsPath,
+        dependenciesPath,
+        full: true,
+        fallbackToFull: true,
+        elementsContent: serialized.content,
+        elementCount: serialized.count,
+        skippedCount: serialized.skipped,
+        dependenciesContent,
+        dependencyCount: dependencies.length,
+      };
+    }
+
+    // Dirty elements, with ephemeral ones excluded exactly like a full export
+    // would exclude them (otherwise they would creep into the file and only
+    // disappear again on the next full export).
+    let dirty = this.getDirtyElementsData();
+    if (!options.includeEphemeral) {
+      dirty = this.filterOutEphemeral(dirty);
+    }
+
+    // Serialize each dirty element. Elements that fail validation are skipped —
+    // their existing line (if any) is left untouched in the file.
+    const updates = new Map<string, string>();
+    let skipped = 0;
+    for (const element of dirty) {
+      try {
+        updates.set(element.id, serializeElement(element));
+      } catch {
+        console.warn(
+          `[sync] Skipping invalid element ${element.id} (type=${element.type})`
+        );
+        skipped++;
+      }
+    }
+
+    const merged = mergeElementLines(existing, updates);
+
+    return {
+      elementsPath,
+      dependenciesPath,
+      full: false,
+      fallbackToFull: false,
+      elementsContent: merged.content,
+      elementCount: merged.total,
+      skippedCount: skipped,
+      dependenciesContent,
+      dependencyCount: dependencies.length,
+    };
+  }
+
+  /**
+   * Serialize the full element set for a full export
+   */
+  private serializeAllElements(includeEphemeral: boolean): {
+    content: string;
+    count: number;
+    skipped: number;
+  } {
+    const elements = this.getAllElements(includeEphemeral);
+    const sortedElements = sortElementsForExport(elements);
+    const { content, skipped } = this.serializeElementsSafe(sortedElements);
+    return { content, count: sortedElements.length - skipped, skipped };
+  }
+
+  /**
+   * Read the current elements file, or null when it is missing/unreadable.
+   */
+  private readElementsFile(path: string): string | null {
+    try {
+      return readFileSync(path, 'utf-8');
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        console.warn(`[sync] Failed to read ${path} (${code ?? 'unknown error'})`);
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Unique temp file path next to the destination (safe against concurrent
+   * exports from the same or another process).
+   */
+  private tempPath(filePath: string): string {
+    const rand = Math.random().toString(36).slice(2, 10);
+    return `${filePath}.tmp-${process.pid}-${Date.now()}-${rand}`;
+  }
+
+  /**
+   * Write a file atomically: write to a temp file, flush, then rename over the
+   * destination. Readers either see the old file or the new one, never a
+   * partially written file.
+   *
+   * Nonempty content is terminated with a single newline (see
+   * withTerminalNewline) so files stay byte-compatible with exports written by
+   * earlier versions.
+   */
+  private async writeAtomic(filePath: string, content: string): Promise<void> {
+    const tmpPath = this.tempPath(filePath);
+    try {
+      const handle = await open(tmpPath, 'w');
+      try {
+        await handle.writeFile(withTerminalNewline(content), 'utf-8');
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(tmpPath, filePath);
+    } catch (err) {
+      await unlink(tmpPath).catch(() => {});
+      throw err;
+    }
+  }
+
+  /**
+   * Synchronous atomic write (see writeAtomic)
+   */
+  private writeAtomicSync(filePath: string, content: string): void {
+    const tmpPath = this.tempPath(filePath);
+    let fd: number | null = null;
+    try {
+      fd = openSync(tmpPath, 'w');
+      const buffer = Buffer.from(withTerminalNewline(content), 'utf-8');
+      let offset = 0;
+      while (offset < buffer.length) {
+        // writeSync may write fewer bytes than requested; keep going until done
+        offset += writeSync(fd, buffer, offset, buffer.length - offset);
+      }
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = null;
+      renameSync(tmpPath, filePath);
+    } catch (err) {
+      if (fd !== null) {
+        try {
+          closeSync(fd);
+        } catch {
+          // best effort cleanup
+        }
+      }
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        // best effort cleanup
+      }
+      throw err;
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -446,24 +663,47 @@ export class SyncService {
 
     // If not including ephemeral, also filter out tasks that are children of ephemeral workflows
     if (!includeEphemeral) {
-      elements = this.filterOutEphemeralTasks(elements);
+      elements = this.filterOutEphemeral(elements);
     }
 
     return elements;
   }
 
   /**
-   * Filter out tasks that are children of ephemeral workflows
+   * Ids of ephemeral workflows currently in storage.
+   *
+   * Queried from the database rather than derived from the candidate set, so
+   * the incremental export path (which only sees dirty elements) can apply the
+   * same exclusion as a full export.
    */
-  private filterOutEphemeralTasks(elements: Element[]): Element[] {
-    // Find ephemeral workflow IDs
-    const ephemeralWorkflowIds = new Set<string>();
-    for (const el of elements) {
-      if (el.type === 'workflow' && (el as unknown as { ephemeral?: boolean }).ephemeral) {
-        ephemeralWorkflowIds.add(el.id);
-      }
-    }
+  private getEphemeralWorkflowIds(): Set<string> {
+    const rows = this.backend.query<{ id: string }>(
+      `SELECT id FROM elements
+       WHERE type = 'workflow' AND deleted_at IS NULL
+         AND JSON_EXTRACT(data, '$.ephemeral') IS TRUE`
+    );
+    return new Set(rows.map((r) => r.id));
+  }
 
+  /**
+   * Exclude ephemeral workflows and their child tasks from a set of elements
+   */
+  private filterOutEphemeral(elements: Element[]): Element[] {
+    const ephemeralWorkflowIds = this.getEphemeralWorkflowIds();
+    if (ephemeralWorkflowIds.size === 0) {
+      return elements;
+    }
+    return this.filterOutEphemeralTasks(elements, ephemeralWorkflowIds);
+  }
+
+  /**
+   * Filter out ephemeral workflows and tasks that are children of ephemeral
+   * workflows
+   */
+  private filterOutEphemeralTasks(
+    elements: Element[],
+    ephemeralWorkflowIds: Set<string>
+  ): Element[] {
     if (ephemeralWorkflowIds.size === 0) {
       return elements;
     }
@@ -481,8 +721,10 @@ export class SyncService {
       }
     }
 
-    // Filter out ephemeral workflows (already filtered) and their tasks
-    return elements.filter((el) => !ephemeralTaskIds.has(el.id));
+    // Filter out ephemeral workflows and their tasks
+    return elements.filter(
+      (el) => !ephemeralWorkflowIds.has(el.id) && !ephemeralTaskIds.has(el.id)
+    );
   }
 
   /**

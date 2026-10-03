@@ -152,8 +152,12 @@ export const exportCommand: Command = {
   usage: 'sf export [options]',
   help: `Export elements and dependencies to JSONL files for version control.
 
-By default, only exports elements that have been modified since the last export
-(incremental export). Use --full for a complete export.
+By default performs an incremental export: elements modified since the last
+export are merged into the existing elements.jsonl (replacing their entries by
+id), leaving every other element in the file untouched. The resulting file
+always contains the complete element set. If elements.jsonl does not exist yet,
+a full export is performed instead. Use --full to rewrite the file from
+scratch.
 
 Options:
   -o, --output <dir>       Output directory (default: .stoneforge/sync)
