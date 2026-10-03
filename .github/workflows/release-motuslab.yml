@@ -1,0 +1,206 @@
+name: Release (MotusLab)
+
+# The MotusLab release pipeline (spec el-12jf6c, design D5/D6, capability
+# "release-pipeline"): build the Ubuntu .deb once, install and smoke-test that
+# exact file on Ubuntu 22.04 and 24.04, then publish it — and nothing else —
+# as a GitHub Release on this repository (MotusLabs/stoneforge).
+#
+# Hard rule: no artifact, package or site is uploaded to any third-party
+# service. Downloading build inputs (npm dependencies, the Node.js runtime
+# from nodejs.org, GitHub Actions) is allowed; uploads go only to this repo's
+# Releases. scripts/check-no-third-party-publish.sh runs in the build job so a
+# release can never happen while a third-party publish step exists anywhere in
+# .github/workflows/.
+#
+# Cutting a release: push a tag v<x.y.z>-motuslab.<n> (or dispatch manually
+# with that tag). The tag's x.y.z must equal packages/smithy/package.json at
+# the tagged commit; the Debian version becomes <x.y.z>+motuslab<n>.
+
+on:
+  push:
+    tags: ['v*-motuslab.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build and publish (v<x.y.z>-motuslab.<n>)'
+        required: true
+        type: string
+
+# Least privilege: everything runs with read access; only the publish job
+# escalates to contents: write, and creating the GitHub Release is the single
+# write anywhere in this workflow.
+permissions:
+  contents: read
+
+# One release per tag at a time; never cancel mid-publish.
+concurrency:
+  group: release-motuslab-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # Tag pushes carry the tag in github.ref_name; a manual dispatch names it.
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  # Build once, on the oldest supported Ubuntu (design D3), so the native
+  # binaries link against glibc 2.35 and the package also loads on 24.04.
+  build:
+    runs-on: ubuntu-22.04 # never ubuntu-latest: the target must not drift
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      app_version: ${{ steps.version.outputs.app_version }}
+      deb_version: ${{ steps.version.outputs.deb_version }}
+      deb_file: ${{ steps.version.outputs.deb_file }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        # On a manual dispatch, build the commit the tag points at — the same
+        # thing a tag push builds — rather than whatever HEAD is.
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # Design D5: fail before building anything if the tag is malformed or
+      # its x.y.z disagrees with packages/smithy/package.json. The error names
+      # both versions. Needs only the checkout (node/jq/sed fallback).
+      - name: Parse and validate the release tag
+        id: version
+        run: scripts/motuslab-version.sh "$RELEASE_TAG"
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 8.15.5
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # build-deb.sh drives `pnpm build` itself but does not install first.
+      - run: pnpm install --frozen-lockfile
+
+      - name: Refuse third-party upload steps in workflows
+        run: scripts/check-no-third-party-publish.sh
+
+      - name: Build the .deb
+        run: scripts/build-deb.sh "${{ steps.version.outputs.deb_version }}" dist-deb
+
+      - name: Verify the built artifact checksums
+        run: |
+          cd dist-deb
+          sha256sum -c SHA256SUMS
+          ls -lh
+
+      # Repo-scoped artifact storage (never a third-party service); 7 days is
+      # enough for a release run and keeps the storage bill bounded.
+      - name: Upload the .deb and SHA256SUMS
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: motuslab-deb
+          path: |
+            dist-deb/*.deb
+            dist-deb/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  # Install and exercise the exact file that was just built, on both supported
+  # LTS releases (design D7). A failure here stops the release: publish does
+  # not run.
+  smoke:
+    needs: build
+    name: smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Download the built .deb
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: motuslab-deb
+          path: dist-deb
+
+      # Default (CI) mode: apt install the .deb, check `sf --version` (the
+      # bundled runtime, not a PATH node), `sf init` in a temp workspace,
+      # `sf serve` health + web UI under an outbound-connection audit, spawn a
+      # PTY, then purge and confirm user data survived. Needs sudo; the runner
+      # is disposable.
+      - name: Smoke-test the .deb
+        run: >
+          sudo scripts/smoke-test-deb.sh dist-deb/*.deb
+          --expect-version "${{ needs.build.outputs.app_version }}"
+
+  # The only job with write access: create the GitHub Release for the tag and
+  # attach the .deb and SHA256SUMS that passed the smoke tests.
+  publish:
+    needs: [build, smoke] # smoke already needs build; build is here for its outputs
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      APP_VERSION: ${{ needs.build.outputs.app_version }}
+      DEB_VERSION: ${{ needs.build.outputs.deb_version }}
+      DEB_FILE: ${{ needs.build.outputs.deb_file }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # The SAME artifact the smoke jobs verified, so what was tested is what
+      # is published (requirement "Release build and verification").
+      - name: Download the exact artifact that passed the smoke tests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: motuslab-deb
+          path: dist-deb
+
+      - name: Verify the artifact checksums
+        run: |
+          cd dist-deb
+          sha256sum -c SHA256SUMS
+
+      - name: Build the release notes
+        run: |
+          scripts/motuslab-release-notes.sh "$RELEASE_TAG" packages/smithy/CHANGELOG.md > release-notes.md
+          echo "--- release-notes.md (first 20 lines) ---"
+          head -n 20 release-notes.md
+
+      # An existing release for the tag is never overwritten (design D6):
+      # fail and let a human delete it or cut v<x.y.z>-motuslab.<n+1>.
+      - name: Refuse to overwrite an existing release
+        run: |
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            echo "::error::A release for $RELEASE_TAG already exists. Delete it (gh release delete \"$RELEASE_TAG\" --yes) or cut the next build as a new tag instead of overwriting."
+            exit 1
+          fi
+
+      - name: Create the GitHub Release
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --verify-tag \
+            --title "Stoneforge $DEB_VERSION (MotusLab build)" \
+            --notes-file release-notes.md \
+            "dist-deb/$DEB_FILE" \
+            dist-deb/SHA256SUMS
+
+      # Close the loop on the spec's "Published release" scenario: the assets
+      # must download back and match the published SHA256SUMS.
+      - name: Verify the published assets
+        run: |
+          rm -rf published
+          gh release download "$RELEASE_TAG" --dir published --clobber
+          expected="$(awk '$2 ~ /amd64\.deb$/ { print $1 }' published/SHA256SUMS)"
+          actual="$(sha256sum published/*.deb | awk '{ print $1 }')"
+          if [[ -z "$expected" || "$expected" != "$actual" ]]; then
+            echo "::error::The published .deb does not match the published SHA256SUMS (expected $expected, got $actual)."
+            exit 1
+          fi
+          echo "Published assets match SHA256SUMS:"
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name'

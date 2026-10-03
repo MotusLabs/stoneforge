@@ -52,6 +52,14 @@ jobs:
         run: bun test src
         working-directory: packages/smithy
 
+      # Release helpers (scripts/motuslab-version.sh, scripts/motuslab-release-notes.sh)
+      # ship their own unit tests; run them here so tag parsing and changelog
+      # extraction cannot regress between releases.
+      - name: Self-test the MotusLab release helper scripts
+        run: |
+          scripts/motuslab-version.sh --self-test
+          scripts/motuslab-release-notes.sh --self-test
+
   # Continuous packaging check (spec el-12jf6c, "Continuous packaging check";
   # design D7): build the .deb and prove it installs and runs on Ubuntu on
   # every PR and push to master, so packaging breakage shows up before a
