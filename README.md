@@ -39,7 +39,7 @@ What you should know before going further:
 
 - **Token consumption is high.** Stoneforge dispatches work to multiple agents continuously. A typical session can burn through several Claude MAX/Pro or Codex subscriptions worth of tokens per week. This is by design — it's the cost of running a parallel team.
 - **Agents run autonomously.** Stoneforge spawns agents with permissions bypassed — there are no human approval gates before agents take actions. This is intentional; approval prompts would bottleneck a parallel pipeline. But it means agents will read, write, execute, and push code without asking. Use this at your own risk.
-- **Things move fast.** Stoneforge is under active development. New capabilities ship weekly, defaults may change, and documentation sometimes lags behind the code. Published packages follow [semver](https://semver.org/) with changelogs, so breaking changes are always signaled. We [build in the open](https://x.com/notadamking) and iterate quickly.
+- **Things move fast.** Stoneforge is under active development. New capabilities ship weekly, defaults may change, and documentation sometimes lags behind the code. Release versions follow [semver](https://semver.org/) with changelogs, so breaking changes are always signaled. We [build in the open](https://x.com/notadamking) and iterate quickly.
 
 If a single coding agent handles your workload today, you probably don't need this yet. It'll be here once you start running multiple agents in parallel.
 
@@ -94,25 +94,52 @@ Compared to running a single agent (Claude Code, Cursor), Stoneforge gives you p
 
 ## Quick Start
 
-### Prerequisites
+### Install on Ubuntu
 
-- **Node.js 18+** or **Bun** (any recent version)
+MotusLab builds support Ubuntu 22.04 and 24.04 LTS on amd64. The `.deb`
+bundles Node.js, production dependencies and the web UI; no Node.js, npm, pnpm
+or Bun installation is needed to run it. Git and standard system libraries
+must be available (apt resolves package dependencies).
+
+This fork **no longer publishes npm packages**. Download the `.deb` and
+`SHA256SUMS` from the same release on
+[MotusLabs/stoneforge GitHub Releases](https://github.com/MotusLabs/stoneforge/releases).
+For example, for tag `v1.25.0-motuslab.1` (choose an available release):
+
+```bash
+curl -fLO 'https://github.com/MotusLabs/stoneforge/releases/download/v1.25.0-motuslab.1/stoneforge_1.25.0+motuslab1_amd64.deb'
+curl -fLO 'https://github.com/MotusLabs/stoneforge/releases/download/v1.25.0-motuslab.1/SHA256SUMS'
+sha256sum -c SHA256SUMS
+# Continue only if verification succeeds
+sudo apt install ./stoneforge_1.25.0+motuslab1_amd64.deb
+sf --version
+```
+
+To upgrade, download the newer release's `.deb` and `SHA256SUMS` into a fresh
+directory, verify with `sha256sum -c SHA256SUMS`, then run
+`sudo apt install ./stoneforge_<ver>_amd64.deb` with its actual Debian version
+(e.g. `1.25.0+motuslab2`). There is no apt repository: upgrades require a new
+file download. Upgrades and removal preserve user `.stoneforge/` workspaces.
+
+An npm-installed `sf` earlier on `PATH` will shadow `/usr/bin/sf`, including
+for spawned agents. Check `type -a sf stoneforge`; remove the old global
+installation or adjust `PATH`, then run `hash -r` and confirm `command -v sf`
+resolves to `/usr/bin/sf`.
 
 ### From Zero to Orchestrating
 
 ```bash
-# 1. Install the Stoneforge CLI globally
-npm install -g @stoneforge/smithy
+# Initialize a workspace in your project
+cd your-project
+sf init
 
-# 2. Initialize a workspace in your project
-cd your-project && sf init
-
-# 3. Start the server + web dashboard at http://localhost:3457
+# Start the server + web dashboard at http://localhost:3457
 sf serve
-
-# 4. Open the dashboard
-open http://localhost:3457
 ```
+
+Open http://localhost:3457 in your browser. See
+[Releasing and Installing MotusLab Builds](docs/motuslab-release.md) for
+release preparation, rollback and upstream merge guidance.
 
 Once the dashboard is running:
 
@@ -331,10 +358,10 @@ The documentation site is built with Astro and lives in `apps/docs/`. For the mo
 
 ```bash
 # Clone the repo
-git clone https://github.com/stoneforge-ai/stoneforge
+git clone https://github.com/MotusLabs/stoneforge
 cd stoneforge
 
-# Init Stoneforge (make sure you've globally installed stoneforge NPM package)
+# Init Stoneforge (install the MotusLab .deb first; see Quick Start)
 pnpm install && sf init
 
 # Start stoneforge server
@@ -353,7 +380,7 @@ Then go to the Documents page and open the Documentation library. Use the Docume
 
 ```bash
 # Clone the repository
-git clone https://github.com/stoneforge-ai/stoneforge.git
+git clone https://github.com/MotusLabs/stoneforge.git
 cd stoneforge
 
 # Install dependencies (uses pnpm)
@@ -381,15 +408,9 @@ pnpm clean      # Clean all build artifacts
 
 ### Using Stoneforge as a Library
 
-To use Stoneforge packages in your own project:
-
-```bash
-npm install @stoneforge/core @stoneforge/storage @stoneforge/quarry
-
-# Or install individual packages as needed
-npm install @stoneforge/smithy    # Agent orchestration
-npm install @stoneforge/ui        # React component library
-```
+This fork's workspace packages are private and are no longer published to npm.
+Develop custom integrations from the source workspace; npm packages under the
+upstream names do not provide these MotusLab builds. The API usage looks like:
 
 ```typescript
 import { createQuarryAPI } from "@stoneforge/quarry";
