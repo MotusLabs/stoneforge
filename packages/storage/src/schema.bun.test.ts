@@ -249,6 +249,18 @@ describe('Schema Management', () => {
       expect(indexes).toContain('idx_elements_created_at');
       expect(indexes).toContain('idx_elements_content_hash');
       expect(indexes).toContain('idx_elements_deleted_at');
+      // Ordering indexes (migration 13) — they let listPaginated read a page
+      // straight from the index instead of sorting the whole match set. One
+      // index per (leading equality column, ordering column) pair: the rowid
+      // tiebreaker mirrors the query direction, so a forward scan serves asc
+      // pages and a backward scan of the same index serves desc pages.
+      // idx_elements_updated_at covers the unfiltered includeDeleted path,
+      // which has no leading equality term (created_at got one in migration 1).
+      expect(indexes).toContain('idx_elements_type_created_at');
+      expect(indexes).toContain('idx_elements_type_updated_at');
+      expect(indexes).toContain('idx_elements_deleted_at_created_at');
+      expect(indexes).toContain('idx_elements_deleted_at_updated_at');
+      expect(indexes).toContain('idx_elements_updated_at');
     });
 
     it('should enforce type constraint', () => {

@@ -128,6 +128,33 @@ async function measureTime<T>(fn: () => Promise<T>): Promise<{ result: T; durati
 }
 
 /**
+ * Measure per-call duration of an async function, avoiding sub-millisecond samples.
+ *
+ * Repeats the call inside a single timed block until the sample is at least
+ * `minMs` milliseconds (or `maxBatch` calls), then returns the per-call average.
+ * Sub-millisecond timings are dominated by timer resolution and scheduler noise,
+ * which makes ratio assertions flaky under full-suite load.
+ */
+async function measurePerCall(
+  fn: () => Promise<unknown>,
+  minMs = 1,
+  maxBatch = 64
+): Promise<number> {
+  let batch = 1;
+  for (;;) {
+    const { duration } = await measureTime(async () => {
+      for (let i = 0; i < batch; i++) {
+        await fn();
+      }
+    });
+    if (duration >= minMs || batch >= maxBatch) {
+      return duration / batch;
+    }
+    batch *= 2;
+  }
+}
+
+/**
  * Create multiple tasks in batch with unique IDs
  */
 async function createTaskBatch(
@@ -597,7 +624,22 @@ describe('Query API Performance', () => {
     });
 
     it('should maintain list performance as dataset grows', async () => {
-      const sizes = [50, 100, 150];
+      // What this asserts: a FIXED page (limit: 50) costs the same regardless
+      // of table size. This became true when listPaginated's default path
+      // stopped materializing the match set: DISTINCT is only emitted for tag
+      // joins, the ordering indexes on (type, ...) and (deleted_at, ...) let
+      // SQLite read a page straight from the index with LIMIT applied first
+      // (the ORDER BY ends with an explicit rowid tiebreaker in the query's
+      // direction, so a forward or backward scan of one index serves asc and
+      // desc pages), and list() skips the COUNT pass entirely
+      // (list-query-plan.bun.test.ts pins the query plan and the tie order).
+      //
+      // Before that fix the plan was "SEARCH e USING INDEX idx_elements_type |
+      // USE TEMP B-TREE FOR DISTINCT | USE TEMP B-TREE FOR ORDER BY", so even a
+      // fixed page was O(n) in table size and any ratio assertion sat on the
+      // linear edge (see el-2htt05, which had to assert linear growth instead).
+      const sizes = [100, 250, 500];
+      const PAGE_SIZE = 50;
       const listTimes: number[] = [];
       const RUNS_PER_SIZE = 5;
 
@@ -613,24 +655,27 @@ describe('Query API Performance', () => {
         await createTaskBatch(api, size);
 
         // Warmup run to avoid cold-start variance
-        await api.list<Task>({ type: 'task', limit: size });
+        await api.list<Task>({ type: 'task', limit: PAGE_SIZE });
 
-        // Take multiple measurements and use the median to reduce noise
+        // Median of several runs. Each run batches calls inside the timed block
+        // until the sample is ≥1ms so we never compare sub-millisecond timings.
         const runs: number[] = [];
         for (let r = 0; r < RUNS_PER_SIZE; r++) {
-          const { duration } = await measureTime(() =>
-            api.list<Task>({ type: 'task', limit: size })
+          runs.push(
+            await measurePerCall(() => api.list<Task>({ type: 'task', limit: PAGE_SIZE }))
           );
-          runs.push(duration);
         }
         runs.sort((a, b) => a - b);
         listTimes.push(runs[Math.floor(runs.length / 2)]);
       }
 
-      // List time should grow sub-linearly (less than 2x for 2x data)
+      // A page read from the ordering index should not care about table size at
+      // all (measured ratio ~1). 2x headroom for scheduler noise, far below the
+      // 5x the table grew — a regression back to temp-b-tree materialization
+      // pushes the ratio toward sizeRatio and fails this.
       const ratio = listTimes[listTimes.length - 1] / listTimes[0];
       const sizeRatio = sizes[sizes.length - 1] / sizes[0];
-      expect(ratio).toBeLessThan(sizeRatio);
+      expect(ratio).toBeLessThan(sizeRatio * 0.4);
     });
 
     it('should maintain ready query performance as dependencies grow', async () => {

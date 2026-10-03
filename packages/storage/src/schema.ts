@@ -14,7 +14,7 @@ import type { Migration, MigrationResult, StorageBackend } from './index.js';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 12;
+export const CURRENT_SCHEMA_VERSION = 13;
 
 // ============================================================================
 // Migrations
@@ -554,9 +554,67 @@ ALTER TABLE provider_metrics DROP COLUMN cache_creation_tokens;
 };
 
 /**
+ * Migration 13: Ordering indexes on elements
+ *
+ * listPaginated serves `WHERE [type = ?] [AND deleted_at IS NULL] ORDER BY
+ * <created_at|updated_at> <dir>, rowid <dir> LIMIT ? OFFSET ?`. Without a
+ * composite index SQLite satisfies the filter with a single-column index (or a
+ * table scan) and then materializes every matching row into a temp b-tree for
+ * the sort, so even a fixed page costs O(n) in table size.
+ *
+ * These indexes let the page be read straight from the index with LIMIT applied
+ * first:
+ * - (type, created_at|updated_at): single-type filter (type is an equality term
+ *   and leads the index)
+ * - (deleted_at, created_at|updated_at): no/multi-type filter (deleted_at IS
+ *   NULL is on every default query and becomes the leading equality term)
+ * - (updated_at): unfiltered includeDeleted, which has no leading equality term
+ *   at all (created_at already has its single-column index from migration 1)
+ *
+ * Tie order note: the rowid tiebreaker in the ORDER BY matches the direction of
+ * the ordering column (`<col> <dir>, rowid <dir>`), so ONE index per column
+ * pair serves BOTH directions. A B-tree index stores equal keys in ascending
+ * rowid order, so a forward scan of `(leading, col)` yields `col ASC, rowid
+ * ASC` and a backward scan yields `col DESC, rowid DESC` — either satisfies the
+ * ORDER BY as written. Tie order among rows sharing a sort key was never defined
+ * behavior before this migration (it fell out of the plan), and it is now
+ * deterministic: tied rows come back in ascending rowid order for asc queries
+ * and descending rowid order for desc queries. See the decision log (workspace
+ * doc el-2mnn98) for the full rationale.
+ *
+ * Trade-off: five new indexes on the hottest write table. The single-column
+ * idx_elements_deleted_at is largely subsumed by the deleted_at-leading pairs
+ * and is a candidate for removal in a later migration; it is kept here to avoid
+ * changing unrelated query plans.
+ */
+const migration013: Migration = {
+  version: 13,
+  description:
+    'Add ordering indexes on elements (type+created_at/updated_at, deleted_at+created_at/updated_at, updated_at)',
+  up: `
+-- Ordering indexes for listPaginated's default paths. One index per
+-- (leading equality column, ordering column) pair: the rowid tiebreaker
+-- mirrors the query's direction, so forward and backward scans of the same
+-- index serve asc and desc pages without a temp b-tree sort.
+CREATE INDEX idx_elements_type_created_at ON elements(type, created_at);
+CREATE INDEX idx_elements_type_updated_at ON elements(type, updated_at);
+CREATE INDEX idx_elements_deleted_at_created_at ON elements(deleted_at, created_at);
+CREATE INDEX idx_elements_deleted_at_updated_at ON elements(deleted_at, updated_at);
+CREATE INDEX idx_elements_updated_at ON elements(updated_at);
+`,
+  down: `
+DROP INDEX IF EXISTS idx_elements_updated_at;
+DROP INDEX IF EXISTS idx_elements_deleted_at_updated_at;
+DROP INDEX IF EXISTS idx_elements_deleted_at_created_at;
+DROP INDEX IF EXISTS idx_elements_type_updated_at;
+DROP INDEX IF EXISTS idx_elements_type_created_at;
+`,
+};
+
+/**
  * All migrations in order
  */
-export const MIGRATIONS: readonly Migration[] = [migration001, migration002, migration003, migration004, migration005, migration006, migration007, migration008, migration009, migration010, migration011, migration012];
+export const MIGRATIONS: readonly Migration[] = [migration001, migration002, migration003, migration004, migration005, migration006, migration007, migration008, migration009, migration010, migration011, migration012, migration013];
 
 // ============================================================================
 // Schema Functions

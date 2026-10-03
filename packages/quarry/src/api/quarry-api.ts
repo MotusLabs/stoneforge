@@ -326,6 +326,174 @@ function buildWhereClause(
 }
 
 /**
+ * Map of ElementFilter.orderBy field names to SQL expressions.
+ *
+ * Fields on the elements table are referenced directly; fields stored in the
+ * JSON data column need JSON_EXTRACT. Only the direct references can be served
+ * by an index — JSON_EXTRACT orderings always materialize a temp b-tree.
+ */
+const ORDER_BY_COLUMNS: Record<string, string> = {
+  created_at: 'e.created_at',
+  updated_at: 'e.updated_at',
+  type: 'e.type',
+  id: 'e.id',
+  // Task-specific JSON fields
+  title: "JSON_EXTRACT(e.data, '$.title')",
+  status: "JSON_EXTRACT(e.data, '$.status')",
+  priority: "JSON_EXTRACT(e.data, '$.priority')",
+  complexity: "JSON_EXTRACT(e.data, '$.complexity')",
+  taskType: "JSON_EXTRACT(e.data, '$.taskType')",
+  assignee: "JSON_EXTRACT(e.data, '$.assignee')",
+  owner: "JSON_EXTRACT(e.data, '$.owner')",
+  // Document-specific JSON fields
+  name: "JSON_EXTRACT(e.data, '$.name')",
+  contentType: "JSON_EXTRACT(e.data, '$.contentType')",
+  version: "JSON_EXTRACT(e.data, '$.version')",
+};
+
+/**
+ * Query shape produced by buildListQuery()
+ */
+export interface ListQuery {
+  /** Row query. LIMIT/OFFSET placeholders come last: bind [...params, limit, offset] */
+  sql: string;
+  /** Total-count query, or null when the caller does not need totals */
+  countSql: string | null;
+  /** Bound parameters shared by sql and countSql (limit/offset excluded) */
+  params: unknown[];
+  limit: number;
+  offset: number;
+  /** True when a tags JOIN is present, so rows can duplicate and DISTINCT is required */
+  hasTagJoin: boolean;
+}
+
+/**
+ * Options for buildListQuery()
+ */
+export interface ListQueryOptions {
+  /**
+   * When false, countSql is null and no COUNT pass is issued. Use for callers
+   * that only need items (list()); COUNT is a second full scan of the match set.
+   */
+  includeCount?: boolean;
+}
+
+/**
+ * Build the SELECT/COUNT statements for a list query.
+ *
+ * DISTINCT is emitted only when a tags JOIN is present. Without a join every
+ * elements row is unique (id is the primary key), and DISTINCT forces SQLite to
+ * materialize the whole match set into a temp b-tree before LIMIT is applied —
+ * which makes a fixed page O(n) in table size.
+ */
+export function buildListQuery(
+  filter: ElementFilter,
+  options: ListQueryOptions = {}
+): ListQuery {
+  const includeCount = options.includeCount ?? true;
+
+  const params: unknown[] = [];
+  const { where: baseWhere } = buildWhereClause(filter, params);
+
+  // Build task-specific WHERE clause if filtering tasks
+  let taskWhere = '';
+  if (filter.type === 'task' || (Array.isArray(filter.type) && filter.type.includes('task'))) {
+    const { where: tw } = buildTaskWhereClause(filter as TaskFilter, params);
+    if (tw) {
+      taskWhere = ` AND ${tw}`;
+    }
+  }
+
+  // Build document-specific WHERE clause if filtering documents
+  let documentWhere = '';
+  if (filter.type === 'document' || (Array.isArray(filter.type) && filter.type.includes('document'))) {
+    const { where: dw } = buildDocumentWhereClause(filter as DocumentFilter, params);
+    if (dw) {
+      // When filtering multiple types, scope document clauses to document rows only
+      const isMultiType = Array.isArray(filter.type) && filter.type.length > 1;
+      documentWhere = isMultiType ? ` AND (e.type != 'document' OR (${dw}))` : ` AND ${dw}`;
+    }
+  }
+
+  // Build message-specific WHERE clause if filtering messages
+  let messageWhere = '';
+  if (filter.type === 'message' || (Array.isArray(filter.type) && filter.type.includes('message'))) {
+    const { where: mw } = buildMessageWhereClause(filter as MessageFilter, params);
+    if (mw) {
+      messageWhere = ` AND ${mw}`;
+    }
+  }
+
+  // Handle tag filtering
+  let tagJoin = '';
+  let tagWhere = '';
+  if (filter.tags && filter.tags.length > 0) {
+    // Must have ALL tags - use GROUP BY with HAVING COUNT
+    tagJoin = ' JOIN tags t ON e.id = t.element_id';
+    const placeholders = filter.tags.map(() => '?').join(', ');
+    tagWhere = ` AND t.tag IN (${placeholders})`;
+    params.push(...filter.tags);
+  }
+  if (filter.tagsAny && filter.tagsAny.length > 0) {
+    // Must have ANY tag
+    if (!tagJoin) {
+      tagJoin = ' JOIN tags t ON e.id = t.element_id';
+    }
+    const placeholders = filter.tagsAny.map(() => '?').join(', ');
+    tagWhere += ` AND t.tag IN (${placeholders})`;
+    params.push(...filter.tagsAny);
+  }
+
+  const hasTagJoin = tagJoin !== '';
+  const where = `${baseWhere}${taskWhere}${documentWhere}${messageWhere}${tagWhere}`;
+  // Rows only duplicate when the tags JOIN fans out, so DISTINCT is only needed then
+  const distinct = hasTagJoin ? 'DISTINCT ' : '';
+
+  const countSql = includeCount
+    ? `
+      SELECT ${hasTagJoin ? 'COUNT(DISTINCT e.id)' : 'COUNT(*)'} as count
+      FROM elements e${tagJoin}
+      WHERE ${where}
+    `
+    : null;
+
+  // Build ORDER BY
+  const orderBy = filter.orderBy ?? 'created_at';
+  const orderDir = filter.orderDir ?? 'desc';
+  const orderColumn = ORDER_BY_COLUMNS[orderBy] ?? `e.${orderBy}`;
+
+  // Every ordering ends with an explicit rowid tiebreaker in the SAME direction
+  // as orderDir. Tie order was never defined before this change — it fell out of
+  // whichever plan SQLite picked (a stable temp-b-tree sort fed by a rowid
+  // ordered scan on some paths, a reversed index scan on others) — so the
+  // observable contract is now the explicit `<col> <dir>, rowid <dir>`. Making
+  // the tiebreaker mirror orderDir is what keeps the default paths index-served
+  // without temp b-trees: a B-tree index stores equal keys in ascending rowid
+  // order, so a forward scan of `<leading>, <col>` yields `<col> ASC, rowid ASC`
+  // and a backward scan yields `<col> DESC, rowid DESC` — either satisfies the
+  // ORDER BY as stated, and one index serves both directions. (A mixed
+  // `<col> <dir>, rowid ASC` is satisfiable by no single-direction scan of an
+  // ASC/DESC pair; it would force a sort.) The tiebreaker also makes pagination
+  // stable: no row is skipped or repeated across pages.
+  const dir = orderDir.toUpperCase();
+  const orderClause = `ORDER BY ${orderColumn} ${dir}, e.rowid ${dir}`;
+
+  // Apply pagination
+  const limit = Math.min(filter.limit ?? DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
+  const offset = filter.offset ?? 0;
+
+  const sql = `
+      SELECT ${distinct}e.*
+      FROM elements e${tagJoin}
+      WHERE ${where}
+      ${orderClause}
+      LIMIT ? OFFSET ?
+    `;
+
+  return { sql, countSql, params, limit, offset, hasTagJoin };
+}
+
+/**
  * Build task-specific WHERE clause additions
  */
 function buildTaskWhereClause(
@@ -704,118 +872,42 @@ export class QuarryAPIImpl implements QuarryAPI {
   }
 
   async list<T extends Element>(filter?: ElementFilter): Promise<T[]> {
-    const result = await this.listPaginated<T>(filter);
-    return result.items;
+    // list() only needs the items, so skip the COUNT pass (a second full scan
+    // of the match set) that listPaginated() runs to report totals.
+    const { items } = await this.queryElements<T>(filter, { includeCount: false });
+    return items;
   }
 
   async listPaginated<T extends Element>(filter?: ElementFilter): Promise<ListResult<T>> {
+    const { items, total, offset, limit, hasMore } = await this.queryElements<T>(filter, {
+      includeCount: true,
+    });
+    return { items, total: total ?? 0, offset, limit, hasMore };
+  }
+
+  /**
+   * Shared implementation behind list() and listPaginated().
+   *
+   * `includeCount: false` skips the COUNT query; `total` is then null and
+   * `hasMore` falls back to the cheap "did the page fill up" signal.
+   */
+  private async queryElements<T extends Element>(
+    filter: ElementFilter | undefined,
+    options: { includeCount: boolean }
+  ): Promise<{ items: T[]; total: number | null; offset: number; limit: number; hasMore: boolean }> {
+    const query = buildListQuery(filter ?? {}, options);
+
+    // Count total matching elements (only when the caller needs totals)
+    let total: number | null = null;
+    if (query.countSql) {
+      const countRow = this.backend.queryOne<CountRow>(query.countSql, query.params);
+      total = countRow?.count ?? 0;
+    }
+
+    const { sql, params, limit, offset } = query;
     const effectiveFilter = filter ?? {};
 
-    // Build base WHERE clause (params will be accumulated here)
-    const params: unknown[] = [];
-    const { where: baseWhere } = buildWhereClause(effectiveFilter, params);
-
-    // Build task-specific WHERE clause if filtering tasks
-    let taskWhere = '';
-    if (effectiveFilter.type === 'task' || (Array.isArray(effectiveFilter.type) && effectiveFilter.type.includes('task'))) {
-      const taskFilter = effectiveFilter as TaskFilter;
-      const { where: tw } = buildTaskWhereClause(taskFilter, params);
-      if (tw) {
-        taskWhere = ` AND ${tw}`;
-      }
-    }
-
-    // Build document-specific WHERE clause if filtering documents
-    let documentWhere = '';
-    if (effectiveFilter.type === 'document' || (Array.isArray(effectiveFilter.type) && effectiveFilter.type.includes('document'))) {
-      const documentFilter = effectiveFilter as DocumentFilter;
-      const { where: dw } = buildDocumentWhereClause(documentFilter, params);
-      if (dw) {
-        // When filtering multiple types, scope document clauses to document rows only
-        const isMultiType = Array.isArray(effectiveFilter.type) && effectiveFilter.type.length > 1;
-        documentWhere = isMultiType ? ` AND (e.type != 'document' OR (${dw}))` : ` AND ${dw}`;
-      }
-    }
-
-    // Build message-specific WHERE clause if filtering messages
-    let messageWhere = '';
-    if (effectiveFilter.type === 'message' || (Array.isArray(effectiveFilter.type) && effectiveFilter.type.includes('message'))) {
-      const messageFilter = effectiveFilter as MessageFilter;
-      const { where: mw } = buildMessageWhereClause(messageFilter, params);
-      if (mw) {
-        messageWhere = ` AND ${mw}`;
-      }
-    }
-
-    // Handle tag filtering
-    let tagJoin = '';
-    let tagWhere = '';
-    if (effectiveFilter.tags && effectiveFilter.tags.length > 0) {
-      // Must have ALL tags - use GROUP BY with HAVING COUNT
-      tagJoin = ' JOIN tags t ON e.id = t.element_id';
-      const placeholders = effectiveFilter.tags.map(() => '?').join(', ');
-      tagWhere = ` AND t.tag IN (${placeholders})`;
-      params.push(...effectiveFilter.tags);
-    }
-    if (effectiveFilter.tagsAny && effectiveFilter.tagsAny.length > 0) {
-      // Must have ANY tag
-      if (!tagJoin) {
-        tagJoin = ' JOIN tags t ON e.id = t.element_id';
-      }
-      const placeholders = effectiveFilter.tagsAny.map(() => '?').join(', ');
-      tagWhere += ` AND t.tag IN (${placeholders})`;
-      params.push(...effectiveFilter.tagsAny);
-    }
-
-    // Count total matching elements
-    const countSql = `
-      SELECT COUNT(DISTINCT e.id) as count
-      FROM elements e${tagJoin}
-      WHERE ${baseWhere}${taskWhere}${documentWhere}${messageWhere}${tagWhere}
-    `;
-    const countRow = this.backend.queryOne<CountRow>(countSql, params);
-    const total = countRow?.count ?? 0;
-
-    // Build ORDER BY
-    const orderBy = effectiveFilter.orderBy ?? 'created_at';
-    const orderDir = effectiveFilter.orderDir ?? 'desc';
-    // Map field names to SQL expressions
-    // Fields on the elements table can be referenced directly
-    // Fields stored in JSON data need JSON_EXTRACT
-    const columnMap: Record<string, string> = {
-      created_at: 'e.created_at',
-      updated_at: 'e.updated_at',
-      type: 'e.type',
-      id: 'e.id',
-      // Task-specific JSON fields
-      title: "JSON_EXTRACT(e.data, '$.title')",
-      status: "JSON_EXTRACT(e.data, '$.status')",
-      priority: "JSON_EXTRACT(e.data, '$.priority')",
-      complexity: "JSON_EXTRACT(e.data, '$.complexity')",
-      taskType: "JSON_EXTRACT(e.data, '$.taskType')",
-      assignee: "JSON_EXTRACT(e.data, '$.assignee')",
-      owner: "JSON_EXTRACT(e.data, '$.owner')",
-      // Document-specific JSON fields
-      name: "JSON_EXTRACT(e.data, '$.name')",
-      contentType: "JSON_EXTRACT(e.data, '$.contentType')",
-      version: "JSON_EXTRACT(e.data, '$.version')",
-    };
-    const orderColumn = columnMap[orderBy] ?? `e.${orderBy}`;
-    const orderClause = `ORDER BY ${orderColumn} ${orderDir.toUpperCase()}`;
-
-    // Apply pagination
-    const limit = Math.min(effectiveFilter.limit ?? DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
-    const offset = effectiveFilter.offset ?? 0;
-
     // Query elements
-    const sql = `
-      SELECT DISTINCT e.*
-      FROM elements e${tagJoin}
-      WHERE ${baseWhere}${taskWhere}${documentWhere}${messageWhere}${tagWhere}
-      ${orderClause}
-      LIMIT ? OFFSET ?
-    `;
-
     const rows = this.backend.query<ElementRow>(sql, [...params, limit, offset]);
 
     // Batch fetch tags for all returned elements (eliminates N+1 query issue)
@@ -885,7 +977,10 @@ export class QuarryAPIImpl implements QuarryAPI {
       total,
       offset,
       limit,
-      hasMore: offset + finalItems.length < total,
+      hasMore: total !== null
+        ? offset + finalItems.length < total
+        // No COUNT pass: a full page means there may be more, a short page means there is not
+        : finalItems.length === limit,
     };
   }
 
@@ -2976,7 +3071,7 @@ export class QuarryAPIImpl implements QuarryAPI {
           OR JSON_EXTRACT(e.data, '$.content') LIKE ?
           OR t.tag LIKE ?
         )
-      ORDER BY e.updated_at DESC
+      ORDER BY e.updated_at DESC, e.rowid DESC
       LIMIT 100
     `;
     params.push(searchPattern, searchPattern, searchPattern);
@@ -3026,7 +3121,7 @@ export class QuarryAPIImpl implements QuarryAPI {
           JSON_EXTRACT(e.data, '$.name') LIKE ?
           OR t.tag LIKE ?
         )
-      ORDER BY e.updated_at DESC
+      ORDER BY e.updated_at DESC, e.rowid DESC
       LIMIT 100
     `;
     params.push(searchPattern, searchPattern);

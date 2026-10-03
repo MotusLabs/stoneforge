@@ -610,8 +610,16 @@ describe('Channel Membership Operations', () => {
       await api.create(toCreateInput(channel1));
       await api.create(toCreateInput(channel2));
 
-      // Update the first channel to make it more recent
+      // Update the first channel to make it more recent. The timestamps are
+      // forced apart explicitly: updated_at has millisecond resolution and the
+      // update above can land in the same millisecond as channel2's creation,
+      // which would turn this into a tie — and tie order is defined by the
+      // rowid tiebreaker (newest-inserted first for desc), not by recency.
       await api.update(channel1.id, { tags: ['updated'] });
+      backend.run(
+        `UPDATE elements SET updated_at = ? WHERE id = ?`,
+        [new Date(Date.now() + 60_000).toISOString(), channel1.id]
+      );
 
       const results = await api.searchChannels('channel');
 

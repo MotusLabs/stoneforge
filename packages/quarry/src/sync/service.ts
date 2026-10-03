@@ -670,7 +670,11 @@ export class SyncService {
     if (conditions.length > 0) {
       sql += ` WHERE ${conditions.join(' AND ')}`;
     }
-    sql += ' ORDER BY created_at';
+    // The rowid tiebreaker makes the order of rows sharing a created_at explicit
+    // and deterministic (same direction as the ordering — see buildListQuery).
+    // It also lets this be a forward scan of idx_elements_created_at, which
+    // migration 13 keeps, instead of relying on the planner picking that index.
+    sql += ' ORDER BY created_at, rowid ASC';
 
     const rows = this.backend.query<ElementRow>(sql);
     let elements = rows.map((row) => this.rowToElement(row));

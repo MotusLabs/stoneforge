@@ -1,0 +1,7 @@
+---
+'@stoneforge/storage': patch
+---
+
+Add migration 13 with ordering indexes on `elements`, so queries that filter by type (or rely on `deleted_at IS NULL`) and order by `created_at`/`updated_at` — the shape `QuarryAPI.list()/listPaginated()` produces — are served straight from the index with `LIMIT` applied first, instead of sorting the full match set in a temp b-tree: `(type, created_at)`, `(type, updated_at)`, `(deleted_at, created_at)`, `(deleted_at, updated_at)` composites plus a single-column `(updated_at)` for the unfiltered `includeDeleted` path (created_at already has one from the initial schema).
+
+One index per column pair serves BOTH directions because the API's `ORDER BY` now ends with an explicit rowid tiebreaker in the query's direction (`<col> ASC, rowid ASC` / `<col> DESC, rowid DESC`): a B-tree stores equal keys in ascending rowid order, so a forward scan of the index satisfies the asc form and a backward scan of the same index satisfies the desc form — no temp b-tree either way. Note on tie order: the relative order of rows sharing a sort key was never defined before (it depended on the plan SQLite picked) and it changes here — ties now come back in ascending rowid order for asc queries and descending rowid order for desc queries, deterministically. Trade-off: five new indexes on the hottest write table; the single-column `idx_elements_deleted_at` is now largely subsumed by the deleted_at-leading composites and is a candidate for removal in a later migration.
