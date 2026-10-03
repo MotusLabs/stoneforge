@@ -197,6 +197,14 @@ export interface SpawnedSession {
   startedAt?: Timestamp;
   /** Session ended timestamp (when terminated) */
   endedAt?: Timestamp;
+  /**
+   * Terminal provider error that ended (or doomed) this session, e.g.
+   * `unexpected status 401 Unauthorized: …`. Set when the provider emits an
+   * `error` message (failed turn, rejected request) so the reason survives
+   * after the process is gone — without it, exits look like anonymous
+   * process deaths ("Process no longer alive") and the real cause is lost.
+   */
+  lastError?: string;
 }
 
 /**
@@ -1020,6 +1028,7 @@ export class SpawnerServiceImpl implements SpawnerService {
         // forever, leaving the worker occupied after a failed request.
         if (message.type === 'error') {
           providerErrorDetected = true;
+          session.lastError = message.content ?? 'Unknown provider error';
           headlessSession.close();
           break;
         }
@@ -1041,6 +1050,7 @@ export class SpawnerServiceImpl implements SpawnerService {
         return;
       }
       if (!resumeErrorDetected) {
+        session.lastError = error instanceof Error ? error.message : String(error);
         session.events.emit('error', error);
       }
     } finally {
@@ -1398,6 +1408,7 @@ export class SpawnerServiceImpl implements SpawnerService {
       lastActivityAt: session.lastActivityAt,
       startedAt: session.startedAt,
       endedAt: session.endedAt,
+      lastError: session.lastError,
     };
   }
 }

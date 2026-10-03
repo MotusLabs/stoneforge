@@ -156,6 +156,24 @@ daemon.updateConfig({ pollIntervalMs: 10000 });
 4. Send dispatch message to worker's inbox
 5. Spawn worker in task worktree
 
+#### Merge steward spawn guard
+
+Before spawning or recovering a merge steward, the daemon probes the steward's
+provider with the optional `AgentProvider.getReadinessIssue()` hook (cached 30s
+per provider). A provider can be installed (`isAvailable()` true) and still be
+unable to run a single turn — the canonical case is the Codex CLI without
+credentials, whose sessions start and then die ~15s later with
+`401 Unauthorized`. When the probe reports an issue, the spawn is refused, the
+reason is logged once per agent to the operation log (`sf log -c steward`, e.g.
+"run `codex login`"), and `stewardRecoveryCount` is **not** incremented — an
+environment problem is not a stuck task. Steward recovery also only resumes an
+`orchestrator.sessionId` that the task's session history attributes to a
+steward; a worker-owned leftover ID is cleared and the steward fresh-spawns.
+Terminal provider errors are recorded on the session (`lastError`) and quoted
+in `mergeFailureReason` when recovery gives up. Both server bootstraps
+construct and inject the operation log service, so these events are queryable
+via `sf log`.
+
 #### Inbox routing
 
 | Agent type | Active session | No session |

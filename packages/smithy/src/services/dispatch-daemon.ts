@@ -62,6 +62,7 @@ import {
   type TaskSessionHistoryEntry,
 } from '../types/task-meta.js';
 import type { OperationLogService } from './operation-log-service.js';
+import { getProviderRegistry } from '../providers/registry.js';
 
 const logger = createLogger('dispatch-daemon');
 
@@ -710,6 +711,16 @@ export class DispatchDaemonImpl implements DispatchDaemon {
 
   /** TTL for emitted warning deduplication keys (5 minutes). */
   private static readonly WARNING_DEDUP_TTL_MS = 5 * 60 * 1000;
+
+  /**
+   * Cache of provider readiness probe results, by provider name. The probe
+   * may shell out to the provider's CLI, and recovery polls every few
+   * seconds — the TTL keeps that to at most one probe per provider per 30s.
+   */
+  private readonly providerReadinessCache = new Map<string, { checkedAt: number; issue: string | undefined }>();
+
+  /** TTL for {@link providerReadinessCache} entries (30 seconds). */
+  private static readonly PROVIDER_READINESS_TTL_MS = 30 * 1000;
 
   constructor(
     api: QuarryAPI,
@@ -1417,6 +1428,12 @@ export class DispatchDaemonImpl implements DispatchDaemon {
           errors++;
           const errorMessage = error instanceof Error ? error.message : String(error);
           errorMessages.push(`Merge steward ${steward.name}: ${errorMessage}`);
+          this.operationLog?.write(
+            'error',
+            'steward',
+            `Failed to spawn merge steward ${steward.name} for task ${taskAssignment.taskId}: ${errorMessage}`,
+            { agentId: steward.id, taskId: taskAssignment.taskId }
+          );
         }
       }
 
@@ -1633,13 +1650,39 @@ export class DispatchDaemonImpl implements DispatchDaemon {
           continue;
         }
 
+        // Skip recovery — without spending the stewardRecoveryCount budget — when
+        // the steward's provider cannot run sessions at all (e.g. an installed
+        // but unauthenticated CLI). Resuming or re-spawning into that state
+        // fails identically every cycle; that is an environment problem to fix,
+        // not a stuck task to burn recovery attempts on.
+        const stewardReadinessIssue = await this.getAgentProviderReadinessIssue(steward);
+        if (stewardReadinessIssue) {
+          this.reportStewardProviderIssue(steward, stewardTasks[0]!.task, stewardReadinessIssue);
+          continue;
+        }
+
         const orphanedAssignment = stewardTasks[0];
 
         // Safety valve: cap steward recovery attempts to prevent infinite re-dispatch loops
         const stewardRecoveryCount = orphanedAssignment.orchestratorMeta?.stewardRecoveryCount ?? 0;
         if (stewardRecoveryCount >= 3) {
+          // Surface WHY the steward kept dying, when the provider said so.
+          // "Recovery limit reached" alone hid the real cause of a 2026-10-03
+          // outage where every merge failed because the steward's provider
+          // rejected every turn (401 Unauthorized) — the reason was only in
+          // the session history, which nobody looks at.
+          const lastSessionError = await this.getAgentLastSessionError(stewardId);
+          const failureReason = lastSessionError
+            ? `Steward recovery limit reached after ${stewardRecoveryCount} attempts; last steward session failed: ${lastSessionError}`
+            : `Steward recovery limit reached after ${stewardRecoveryCount} attempts`;
           logger.warn(
             `Steward recovery limit reached for task ${orphanedAssignment.task.id}, setting mergeStatus to 'failed'`
+          );
+          this.operationLog?.write(
+            'error',
+            'merge',
+            `Merge failed for task ${orphanedAssignment.task.id}: ${failureReason}`,
+            { agentId: stewardId, taskId: orphanedAssignment.task.id, recoveryCount: stewardRecoveryCount }
           );
           try {
             await this.api.update<Task>(orphanedAssignment.task.id, {
@@ -1648,7 +1691,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
                 orphanedAssignment.task.metadata as Record<string, unknown> | undefined,
                 {
                   mergeStatus: 'failed' as const,
-                  mergeFailureReason: `Steward recovery limit reached after ${stewardRecoveryCount} attempts`,
+                  mergeFailureReason: failureReason,
                 }
               ),
             });
@@ -1670,6 +1713,12 @@ export class DispatchDaemonImpl implements DispatchDaemon {
               { stewardRecoveryCount: stewardRecoveryCount + 1 }
             ),
           });
+          this.operationLog?.write(
+            'info',
+            'recovery',
+            `Recovering orphaned steward task ${orphanedAssignment.task.id} on ${steward.name} (attempt ${stewardRecoveryCount + 1}/3)`,
+            { agentId: stewardId, taskId: orphanedAssignment.task.id, recoveryCount: stewardRecoveryCount + 1 }
+          );
           await this.recoverOrphanedStewardTask(steward, orphanedAssignment.task, orphanedAssignment.orchestratorMeta);
           processed++;
         } catch (error) {
@@ -1677,6 +1726,12 @@ export class DispatchDaemonImpl implements DispatchDaemon {
           const errorMessage = error instanceof Error ? error.message : String(error);
           errorMessages.push(`Merge steward ${steward.name}: ${errorMessage}`);
           logger.error(`Error recovering orphaned steward task for ${steward.name}:`, error);
+          this.operationLog?.write(
+            'error',
+            'recovery',
+            `Failed to recover orphaned steward task ${orphanedAssignment.task.id} on ${steward.name}: ${errorMessage}`,
+            { agentId: stewardId, taskId: orphanedAssignment.task.id }
+          );
         }
       }
 
@@ -2240,10 +2295,19 @@ export class DispatchDaemonImpl implements DispatchDaemon {
    * clears or the TTL expires.  Only `warning` type notifications are
    * deduplicated — `info` and `error` notifications bypass this helper.
    */
+  /**
+   * Emits a deduplicated `daemon:notification` warning.
+   *
+   * @returns true when the warning was newly emitted (i.e. this call was the
+   * first for `key` within the dedupe TTL), false when it was suppressed.
+   * Callers can use the return value to pair side effects — e.g. writing an
+   * operation-log entry — with the warning instead of repeating them on every
+   * poll cycle.
+   */
   private emitWarningOnce(
     key: string,
     data: { type: 'warning'; title: string; message?: string },
-  ): void {
+  ): boolean {
     // Prune expired entries on each call (lightweight — typically < 10 entries)
     const now = Date.now();
     for (const [k, ts] of this.emittedWarnings) {
@@ -2253,11 +2317,12 @@ export class DispatchDaemonImpl implements DispatchDaemon {
     }
 
     if (this.emittedWarnings.has(key)) {
-      return; // Already emitted and still within TTL
+      return false; // Already emitted and still within TTL
     }
 
     this.emittedWarnings.set(key, now);
     this.emitter.emit('daemon:notification', data);
+    return true;
   }
 
   /**
@@ -2443,6 +2508,94 @@ export class DispatchDaemonImpl implements DispatchDaemon {
     return executableOverride
       ? normalizeExecutableKey(executableOverride)
       : resolveAccountKey(agent, this.settingsService);
+  }
+
+  /**
+   * Returns the terminal error of the agent's most recently ended session,
+   * when the provider reported one (e.g. an API authentication failure).
+   *
+   * Used to give merge-failure reporting the *cause* of a steward death
+   * rather than only the fact that recovery stopped retrying.
+   */
+  private async getAgentLastSessionError(agentId: EntityId): Promise<string | undefined> {
+    try {
+      const history = await this.sessionManager.getSessionHistory(agentId, 5);
+      const failed = history.find((entry) => Boolean(entry.lastError));
+      return failed?.lastError;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Returns a human-readable reason the agent's provider cannot run sessions
+   * (not installed, or installed but unable to authenticate), or undefined
+   * when the provider is ready.
+   *
+   * Why this matters: a provider can be "installed" and still be unable to
+   * run a single turn — the canonical case being an unauthenticated CLI whose
+   * sessions start, then die on their first request. Spawning into that
+   * state produces sessions that fail identically no matter how often they
+   * are resumed, which recovery then mistakes for a stuck agent. Refusing
+   * the spawn up front keeps the failure mode loud, cheap and actionable.
+   *
+   * Results are cached briefly: the probe may shell out to the provider's
+   * CLI, and recovery polls every few seconds while a task waits.
+   */
+  private async getAgentProviderReadinessIssue(agent: AgentEntity): Promise<string | undefined> {
+    const meta = getAgentMetadata(agent);
+    if (!meta) return undefined;
+
+    const providerName = (meta as { provider?: string }).provider ?? 'claude-code';
+
+    const cached = this.providerReadinessCache.get(providerName);
+    if (cached && Date.now() - cached.checkedAt < DispatchDaemonImpl.PROVIDER_READINESS_TTL_MS) {
+      return cached.issue;
+    }
+
+    let issue: string | undefined;
+    const provider = getProviderRegistry().get(providerName);
+    if (!provider) {
+      issue = `Provider '${providerName}' is not registered. Available providers: ${getProviderRegistry().list().join(', ')}`;
+    } else {
+      // Credential/auth problems first — they are more specific than availability.
+      if (provider.getReadinessIssue) {
+        issue = await provider.getReadinessIssue();
+      }
+      if (!issue && !(await provider.isAvailable())) {
+        issue = `Provider '${providerName}' is not available. ${provider.getInstallInstructions()}`.trim();
+      }
+    }
+
+    this.providerReadinessCache.set(providerName, { checkedAt: Date.now(), issue });
+    return issue;
+  }
+
+  /**
+   * Reports — once per agent within the warning dedupe TTL, to both the UI
+   * notification stream and the operation log — that a steward was not
+   * spawned because its provider cannot run sessions.
+   *
+   * The task is deliberately left in its current state (pending/unassigned
+   * for a fresh dispatch, or claimed for recovery): this is an environment
+   * problem, not a task problem, so no recovery budget is spent on it.
+   */
+  private reportStewardProviderIssue(steward: AgentEntity, task: Task, issue: string): void {
+    const key = `steward-provider-not-ready:${steward.id}`;
+    const message = `Cannot spawn merge steward ${steward.name} for task ${task.id}: ${issue}`;
+    const emitted = this.emitWarningOnce(key, {
+      type: 'warning' as const,
+      title: 'Merge steward not spawned — provider not ready',
+      message,
+    });
+    if (emitted) {
+      logger.error(message);
+      this.operationLog?.write('error', 'steward', message, {
+        agentId: steward.id,
+        taskId: task.id,
+        reason: issue,
+      });
+    }
   }
 
   /**
@@ -2987,9 +3140,49 @@ export class DispatchDaemonImpl implements DispatchDaemon {
     }
     const workingDirectory = worktreePath ?? this.config.projectRoot;
 
-    // 2. Try resume first if we have a previous session ID
+    // 2. Try resume first if we have a previous session ID that this steward owns.
+    //
+    // `orchestrator.sessionId` is a shared field: workers write their own
+    // session ID to it while working the task, and the steward spawn
+    // overwrites it with the steward's. Resuming an ID that belongs to a
+    // different agent would attach this steward to that agent's conversation
+    // (and, for a different provider, fail outright) — so only resume IDs the
+    // task's own session history attributes to this steward.
     const previousSessionId = taskMeta?.sessionId;
-    if (previousSessionId) {
+    const resumeOwnedBySteward = previousSessionId
+      ? (taskMeta?.sessionHistory ?? []).some(
+          (entry) => entry.agentRole === 'steward' && entry.providerSessionId === previousSessionId
+        )
+      : false;
+
+    if (previousSessionId && !resumeOwnedBySteward) {
+      const owner = (taskMeta?.sessionHistory ?? []).find(
+        (entry) => entry.providerSessionId === previousSessionId
+      );
+      logger.warn(
+        `Not resuming session ${previousSessionId} for steward ${steward.name} on task ${task.id}: ` +
+        `it belongs to ${owner ? `agent ${owner.agentName} (${owner.agentRole})` : 'no session on this task'}. Falling back to fresh spawn.`
+      );
+      this.operationLog?.write(
+        'warn',
+        'recovery',
+        `Skipped invalid steward resume for task ${task.id}: session ${previousSessionId} does not belong to steward ${steward.name}`,
+        { agentId: stewardId, taskId: task.id, providerSessionId: previousSessionId }
+      );
+
+      // Clear the foreign session ID so no later cycle tries to resume it either.
+      // Re-read the task first: recovery may have written to its metadata since
+      // this object was loaded (e.g. the stewardRecoveryCount increment), and a
+      // stale write would clobber it.
+      const freshTask = await this.api.get<Task>(task.id);
+      if (freshTask) {
+        const clearedMeta = updateOrchestratorTaskMeta(
+          freshTask.metadata as Record<string, unknown> | undefined,
+          { sessionId: undefined }
+        );
+        await this.api.update(task.id, { metadata: clearedMeta });
+      }
+    } else if (previousSessionId) {
       try {
         const { session, events } = await this.sessionManager.resumeSession(stewardId, {
           providerSessionId: previousSessionId,
@@ -3030,19 +3223,38 @@ export class DispatchDaemonImpl implements DispatchDaemon {
         }
         this.emitter.emit('agent:spawned', stewardId, worktreePath);
         logger.info(`Resumed steward session for orphaned task ${task.id} on ${steward.name}`);
+        this.operationLog?.write(
+          'info',
+          'recovery',
+          `Resumed steward session for orphaned task ${task.id} on ${steward.name}`,
+          { agentId: stewardId, taskId: task.id, sessionId: session.id, providerSessionId: previousSessionId }
+        );
         return;
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
         logger.warn(
           `Failed to resume steward session ${previousSessionId} for ${steward.name}, falling back to fresh spawn:`,
           error
         );
-
-        // Clear stale session ID so next recovery cycle doesn't try to resume again
-        const clearedMeta = updateOrchestratorTaskMeta(
-          task.metadata as Record<string, unknown> | undefined,
-          { sessionId: undefined }
+        this.operationLog?.write(
+          'error',
+          'recovery',
+          `Failed to resume steward session for task ${task.id} on ${steward.name}: ${errorMessage}`,
+          { agentId: stewardId, taskId: task.id, providerSessionId: previousSessionId }
         );
-        await this.api.update(task.id, { metadata: clearedMeta });
+
+        // Clear stale session ID so next recovery cycle doesn't try to resume again.
+        // Re-read the task first: recovery may have written to its metadata since
+        // this object was loaded (e.g. the stewardRecoveryCount increment), and a
+        // stale write would clobber it.
+        const freshTask = await this.api.get<Task>(task.id);
+        if (freshTask) {
+          const clearedMeta = updateOrchestratorTaskMeta(
+            freshTask.metadata as Record<string, unknown> | undefined,
+            { sessionId: undefined }
+          );
+          await this.api.update(task.id, { metadata: clearedMeta });
+        }
       }
     }
 
@@ -3614,6 +3826,16 @@ export class DispatchDaemonImpl implements DispatchDaemon {
       return;
     }
 
+    // Provider readiness gate: refuse to spawn a steward whose provider cannot
+    // run sessions (e.g. an installed but unauthenticated CLI). Such a session
+    // would start and then die on its first provider request, over and over,
+    // with recovery mistaking it for an interrupted steward.
+    const readinessIssue = await this.getAgentProviderReadinessIssue(steward);
+    if (readinessIssue) {
+      this.reportStewardProviderIssue(steward, task, readinessIssue);
+      return;
+    }
+
     // Get task metadata for worktree path
     const taskMeta = task.metadata as Record<string, unknown> | undefined;
     const orchestratorMeta = taskMeta?.orchestrator as Record<string, unknown> | undefined;
@@ -3659,10 +3881,15 @@ export class DispatchDaemonImpl implements DispatchDaemon {
       logger.debug(`Syncing task ${task.id} branch before steward spawn...`);
       syncResult = await this.syncTaskBranch(task);
 
-      // Store sync result in task metadata for audit trail
+      // Store sync result in task metadata for audit trail. Re-read the task
+      // first: callers may hold a stale copy (recovery increments
+      // stewardRecoveryCount after loading the task), and writing metadata
+      // derived from it would silently revert those updates.
+      const taskForSync = await this.api.get<Task>(task.id);
+      const syncBaseMeta = (taskForSync ?? task).metadata as Record<string, unknown> | undefined;
       await this.api.update<Task>(task.id, {
         metadata: updateOrchestratorTaskMeta(
-          task.metadata as Record<string, unknown> | undefined,
+          syncBaseMeta,
           {
             lastSyncResult: {
               success: syncResult.success,
@@ -3736,6 +3963,13 @@ export class DispatchDaemonImpl implements DispatchDaemon {
 
     this.emitter.emit('agent:spawned', stewardId, worktreePath);
     logger.info(`Spawned merge steward ${steward.name} for task ${task.id}`);
+    this.operationLog?.write('info', 'steward', `Spawned merge steward ${steward.name} for task ${task.id}`, {
+      agentId: stewardId,
+      taskId: task.id,
+      sessionId: session.id,
+      providerSessionId: session.providerSessionId,
+      worktree: worktreePath,
+    });
   }
 
   /**
