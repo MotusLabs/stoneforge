@@ -95,7 +95,13 @@ test.describe('TB41: Dashboard Overview Panel', () => {
 
     // Should stay on dashboard and show modal
     await expect(page).toHaveURL(/\/dashboard/);
-    await expect(page.getByTestId('create-workflow-modal')).toBeVisible();
+    const dialog = page.getByRole('dialog', { name: 'Create Workflow', exact: true });
+    await expect(dialog).toBeVisible();
+
+    await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
+    await expect(dialog).not.toBeVisible();
+    await expect(page.getByTestId('dashboard-page')).toBeVisible();
+    await expect(page).toHaveURL(/\/dashboard/);
   });
 
   test('dashboard shows recent activity section', async ({ page }) => {
