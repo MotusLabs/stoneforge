@@ -45,7 +45,7 @@ jobs:
   # Build once, on the oldest supported Ubuntu (design D3), so the native
   # binaries link against glibc 2.35 and the package also loads on 24.04.
   build:
-    runs-on: ubuntu-22.04 # never ubuntu-latest: the target must not drift
+    runs-on: ubuntu-22.04 # explicit runner version: the target must not drift
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       app_version: ${{ steps.version.outputs.app_version }}
