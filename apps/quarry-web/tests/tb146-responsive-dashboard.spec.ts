@@ -150,32 +150,66 @@ test.describe('TB146: Responsive Dashboard Page', () => {
   });
 
   test.describe('Dependency Graph - Responsive', () => {
-    test('dependency graph loads on desktop', async ({ page }) => {
-      await page.setViewportSize({ width: 1280, height: 800 });
-      await page.goto('/dependencies');
-      await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
-
-      // Task selector should be visible
-      await expect(page.getByTestId('task-selector')).toBeVisible();
+    // Own the task data: global setup only creates the operator entity.
+    const graphTest = test.extend<{ graphTask: { id: string; title: string } }>({
+      graphTask: async ({ request }, use) => {
+        const response = await request.post('/api/tasks', {
+          data: {
+            title: 'Responsive dependency graph task',
+            createdBy: 'el-0000',
+            priority: 2,
+            complexity: 3,
+            taskType: 'task',
+          },
+        });
+        expect(response.ok()).toBe(true);
+        const task = await response.json();
+        try {
+          await use(task);
+        } finally {
+          const deletion = await request.delete(`/api/tasks/${task.id}`);
+          expect(deletion.ok()).toBe(true);
+        }
+      },
     });
 
-    test('dependency graph adapts to tablet view', async ({ page }) => {
-      await page.setViewportSize({ width: 768, height: 1024 });
-      await page.goto('/dependencies');
-      await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
+    for (const { name, width, height } of [
+      { name: 'desktop', width: 1280, height: 800 },
+      { name: 'tablet', width: 768, height: 1024 },
+      { name: 'mobile', width: 375, height: 667 },
+    ]) {
+      graphTest(`dependency graph is usable on ${name} with tasks`, async ({ page, graphTask }) => {
+        await page.setViewportSize({ width, height });
+        await page.goto('/dependencies');
+        await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
 
-      // Task selector should remain visible
-      await expect(page.getByTestId('task-selector')).toBeVisible();
-    });
+        const selector = page.getByTestId('task-selector');
+        await expect(selector).toBeVisible();
+        await selector.getByRole('button', { name: `${graphTask.title} ${graphTask.id}`, exact: true }).click();
+        await expect(page.getByTestId('graph-node').filter({ hasText: graphTask.id })).toBeVisible();
+        await expect(page.getByTestId('graph-canvas')).toBeVisible();
+        await expect(page.getByTestId('graph-search-input')).toBeVisible();
+        await expect(page.getByTestId('fit-view-button')).toBeVisible();
+        await page.getByTestId('fit-view-button').click();
+        if (name === 'mobile') {
+          await expect(page.locator('.react-flow__minimap')).toHaveCount(0);
+        } else {
+          await expect(page.locator('.react-flow__minimap')).toBeVisible();
+        }
+      });
 
-    test('dependency graph is usable on mobile', async ({ page }) => {
-      await page.setViewportSize({ width: 375, height: 667 });
-      await page.goto('/dependencies');
-      await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
-
-      // Task selector should still be usable
-      await expect(page.getByTestId('task-selector')).toBeVisible();
-    });
+      test(`dependency graph shows empty state on ${name} without tasks`, async ({ page }) => {
+        // Isolate the empty state from tasks created by other browser tests.
+        await page.route('**/api/tasks/ready', route => route.fulfill({ json: [] }));
+        await page.route('**/api/tasks/blocked', route => route.fulfill({ json: [] }));
+        await page.setViewportSize({ width, height });
+        await page.goto('/dependencies');
+        await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
+        await expect(page.getByText('No tasks available. Create some tasks to visualize their dependencies.')).toBeVisible();
+        await expect(page.getByTestId('task-selector')).toHaveCount(0);
+        await expect(page.getByTestId('graph-canvas')).toHaveCount(0);
+      });
+    }
   });
 
   test.describe('Viewport Transition Tests', () => {
