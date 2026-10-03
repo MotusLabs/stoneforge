@@ -9,7 +9,7 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
   async function enterDocumentEditMode(page: Page): Promise<boolean> {
     // Get first document
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
 
     if (documents.length === 0) {
       return false;

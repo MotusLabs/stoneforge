@@ -9,7 +9,7 @@ test.describe('TB23: Document Versions', () => {
     // First get a list of documents
     const listResponse = await page.request.get('/api/documents?limit=10');
     expect(listResponse.ok()).toBe(true);
-    const documents = await listResponse.json();
+    const documents = (await listResponse.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -45,7 +45,7 @@ test.describe('TB23: Document Versions', () => {
     // First get a list of documents
     const listResponse = await page.request.get('/api/documents?limit=10');
     expect(listResponse.ok()).toBe(true);
-    const documents = await listResponse.json();
+    const documents = (await listResponse.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -66,7 +66,7 @@ test.describe('TB23: Document Versions', () => {
     // First get a list of documents
     const listResponse = await page.request.get('/api/documents?limit=10');
     expect(listResponse.ok()).toBe(true);
-    const documents = await listResponse.json();
+    const documents = (await listResponse.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -84,7 +84,7 @@ test.describe('TB23: Document Versions', () => {
     // First get a list of documents
     const listResponse = await page.request.get('/api/documents?limit=10');
     expect(listResponse.ok()).toBe(true);
-    const documents = await listResponse.json();
+    const documents = (await listResponse.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -103,7 +103,7 @@ test.describe('TB23: Document Versions', () => {
     // First get a list of documents with multiple versions
     const listResponse = await page.request.get('/api/documents?limit=50');
     expect(listResponse.ok()).toBe(true);
-    const documents = await listResponse.json();
+    const documents = (await listResponse.json()).items;
 
     // Find a document with version > 1 (has history)
     const docWithHistory = documents.find((doc: { version?: number }) => (doc.version || 1) > 1);
@@ -149,7 +149,7 @@ test.describe('TB23: Document Versions', () => {
 
   test('POST /api/documents/:id/restore validates version number', async ({ page }) => {
     const listResponse = await page.request.get('/api/documents?limit=10');
-    const documents = await listResponse.json();
+    const documents = (await listResponse.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -172,7 +172,7 @@ test.describe('TB23: Document Versions', () => {
   // Helper function to navigate to a document
   async function navigateToDocument(page: import('@playwright/test').Page) {
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
 
     if (documents.length === 0) {
       return null;
@@ -328,7 +328,7 @@ test.describe('TB23: Document Versions', () => {
   test('preview button shows on non-current versions', async ({ page }) => {
     // Find a document with multiple versions
     const listResponse = await page.request.get('/api/documents?limit=50');
-    const documents = await listResponse.json();
+    const documents = (await listResponse.json()).items;
     const docWithHistory = documents.find((d: { version?: number }) => (d.version || 1) > 1);
 
     if (!docWithHistory) {
@@ -387,7 +387,7 @@ test.describe('TB23: Document Versions', () => {
   test('clicking preview shows preview banner', async ({ page }) => {
     // Find a document with multiple versions
     const listResponse = await page.request.get('/api/documents?limit=50');
-    const documents = await listResponse.json();
+    const documents = (await listResponse.json()).items;
     const docWithHistory = documents.find((d: { version?: number }) => (d.version || 1) > 1);
 
     if (!docWithHistory) {
@@ -450,7 +450,7 @@ test.describe('TB23: Document Versions', () => {
   test('exit preview button clears preview', async ({ page }) => {
     // Find a document with multiple versions
     const listResponse = await page.request.get('/api/documents?limit=50');
-    const documents = await listResponse.json();
+    const documents = (await listResponse.json()).items;
     const docWithHistory = documents.find((d: { version?: number }) => (d.version || 1) > 1);
 
     if (!docWithHistory) {
@@ -516,7 +516,7 @@ test.describe('TB23: Document Versions', () => {
   test('edit button is disabled during preview', async ({ page }) => {
     // Find a document with multiple versions
     const listResponse = await page.request.get('/api/documents?limit=50');
-    const documents = await listResponse.json();
+    const documents = (await listResponse.json()).items;
     const docWithHistory = documents.find((d: { version?: number }) => (d.version || 1) > 1);
 
     if (!docWithHistory) {

@@ -48,7 +48,7 @@ test.describe('TB21: Document Display', () => {
     // First get a list of documents
     const listResponse = await page.request.get('/api/documents?limit=10');
     expect(listResponse.ok()).toBe(true);
-    const documents = await listResponse.json();
+    const documents = (await listResponse.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -77,7 +77,7 @@ test.describe('TB21: Document Display', () => {
   test('GET /api/documents returns documents with required fields', async ({ page }) => {
     const response = await page.request.get('/api/documents?limit=10');
     expect(response.ok()).toBe(true);
-    const documents = await response.json();
+    const documents = (await response.json()).items;
     expect(Array.isArray(documents)).toBe(true);
 
     // Check each document has required fields
@@ -98,7 +98,7 @@ test.describe('TB21: Document Display', () => {
   test('clicking a document opens the detail panel', async ({ page }) => {
     // First check if there are any documents
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -155,7 +155,7 @@ test.describe('TB21: Document Display', () => {
 
   test('document detail panel shows document title', async ({ page }) => {
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -205,7 +205,7 @@ test.describe('TB21: Document Display', () => {
 
   test('document detail panel shows content type badge', async ({ page }) => {
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -255,7 +255,7 @@ test.describe('TB21: Document Display', () => {
 
   test('document detail panel shows document ID', async ({ page }) => {
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -298,7 +298,7 @@ test.describe('TB21: Document Display', () => {
 
   test('document detail panel close button works', async ({ page }) => {
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -340,7 +340,7 @@ test.describe('TB21: Document Display', () => {
 
   test('document content is displayed', async ({ page }) => {
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -379,7 +379,7 @@ test.describe('TB21: Document Display', () => {
 
   test('selected document shows selection state in list', async ({ page }) => {
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
 
     if (documents.length === 0) {
       test.skip();
@@ -427,7 +427,7 @@ test.describe('TB21: Document Display', () => {
   test('text content renders correctly', async ({ page }) => {
     // Find a text document
     const response = await page.request.get('/api/documents?limit=50');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
     const textDoc = documents.find((doc: { contentType: string }) => doc.contentType === 'text');
 
     if (!textDoc) {
@@ -479,7 +479,7 @@ test.describe('TB21: Document Display', () => {
   test('markdown content renders correctly', async ({ page }) => {
     // Find a markdown document
     const response = await page.request.get('/api/documents?limit=50');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
     const markdownDoc = documents.find((doc: { contentType: string }) => doc.contentType === 'markdown');
 
     if (!markdownDoc) {
@@ -530,7 +530,7 @@ test.describe('TB21: Document Display', () => {
   test('json content renders correctly', async ({ page }) => {
     // Find a JSON document
     const response = await page.request.get('/api/documents?limit=50');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
     const jsonDoc = documents.find((doc: { contentType: string }) => doc.contentType === 'json');
 
     if (!jsonDoc) {
@@ -584,7 +584,7 @@ test.describe('TB21: Document Display', () => {
 
   test('document detail panel handles loading state', async ({ page }) => {
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
 
     if (documents.length === 0) {
       test.skip();

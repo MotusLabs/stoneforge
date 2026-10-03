@@ -72,7 +72,7 @@ test.describe('TB20: Library Tree', () => {
   test('GET /api/documents endpoint returns documents', async ({ page }) => {
     const response = await page.request.get('/api/documents');
     expect(response.ok()).toBe(true);
-    const documents = await response.json();
+    const documents = (await response.json()).items;
     expect(Array.isArray(documents)).toBe(true);
   });
 

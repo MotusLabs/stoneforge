@@ -8,7 +8,7 @@ test.describe('TB31: Create Channel', () => {
   test('POST /api/channels endpoint creates a group channel', async ({ page }) => {
     // Get an entity to use as createdBy and member
     const entitiesResponse = await page.request.get('/api/entities');
-    const entities = await entitiesResponse.json();
+    const entities = (await entitiesResponse.json()).items;
 
     if (entities.length < 2) {
       test.skip();
@@ -47,7 +47,7 @@ test.describe('TB31: Create Channel', () => {
   test('POST /api/channels endpoint creates a direct channel', async ({ page }) => {
     // Get entities to use for direct channel
     const entitiesResponse = await page.request.get('/api/entities');
-    const entities = await entitiesResponse.json();
+    const entities = (await entitiesResponse.json()).items;
 
     if (entities.length < 2) {
       test.skip();
@@ -103,7 +103,7 @@ test.describe('TB31: Create Channel', () => {
 
     // Missing name for group channel
     const entitiesResponse = await page.request.get('/api/entities');
-    const entities = await entitiesResponse.json();
+    const entities = (await entitiesResponse.json()).items;
     if (entities.length > 0) {
       const response3 = await page.request.post('/api/channels', {
         data: {
@@ -117,7 +117,7 @@ test.describe('TB31: Create Channel', () => {
 
   test('POST /api/channels endpoint validates direct channel entities', async ({ page }) => {
     const entitiesResponse = await page.request.get('/api/entities');
-    const entities = await entitiesResponse.json();
+    const entities = (await entitiesResponse.json()).items;
 
     if (entities.length < 1) {
       test.skip();
@@ -295,7 +295,7 @@ test.describe('TB31: Create Channel', () => {
 
     // Check that the channel was created by fetching the API and looking for our unique name
     const finalResponse = await page.request.get('/api/channels');
-    const finalChannels = await finalResponse.json();
+    const finalChannels = (await finalResponse.json()).items;
     const expectedName = uniqueName.toLowerCase();
     expect(finalChannels.some((ch: { name: string }) => ch.name === expectedName)).toBe(true);
   });

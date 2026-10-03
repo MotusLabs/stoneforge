@@ -4,14 +4,14 @@ test.describe('TB16: Channel List', () => {
   test('GET /api/channels endpoint returns channels', async ({ page }) => {
     const response = await page.request.get('/api/channels');
     expect(response.ok()).toBe(true);
-    const channels = await response.json();
+    const channels = (await response.json()).items;
     expect(Array.isArray(channels)).toBe(true);
   });
 
   test('GET /api/channels/:id endpoint returns channel', async ({ page }) => {
     // First get list of channels
     const listResponse = await page.request.get('/api/channels');
-    const channels = await listResponse.json();
+    const channels = (await listResponse.json()).items;
 
     if (channels.length === 0) {
       test.skip();
@@ -73,7 +73,7 @@ test.describe('TB16: Channel List', () => {
   test('clicking channel shows channel view', async ({ page }) => {
     // First check if there are any channels
     const response = await page.request.get('/api/channels');
-    const channels = await response.json();
+    const channels = (await response.json()).items;
 
     if (channels.length === 0) {
       test.skip();
@@ -94,7 +94,7 @@ test.describe('TB16: Channel List', () => {
 
   test('channel item shows correct info', async ({ page }) => {
     const response = await page.request.get('/api/channels');
-    const channels = await response.json();
+    const channels = (await response.json()).items;
 
     if (channels.length === 0) {
       test.skip();
@@ -112,7 +112,7 @@ test.describe('TB16: Channel List', () => {
 
   test('group channels are separated from direct messages', async ({ page }) => {
     const response = await page.request.get('/api/channels');
-    const channels = await response.json();
+    const channels = (await response.json()).items;
 
     const hasGroup = channels.some((c: { channelType: string }) => c.channelType === 'group');
     const hasDirect = channels.some((c: { channelType: string }) => c.channelType === 'direct');
@@ -132,7 +132,7 @@ test.describe('TB16: Channel List', () => {
   test('empty state is shown when no channels', async ({ page }) => {
     // This test is more of a UI verification - if no channels exist
     const response = await page.request.get('/api/channels');
-    const channels = await response.json();
+    const channels = (await response.json()).items;
 
     if (channels.length > 0) {
       test.skip();
@@ -146,7 +146,7 @@ test.describe('TB16: Channel List', () => {
 
   test('selected channel is highlighted', async ({ page }) => {
     const response = await page.request.get('/api/channels');
-    const channels = await response.json();
+    const channels = (await response.json()).items;
 
     if (channels.length === 0) {
       test.skip();

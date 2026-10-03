@@ -8,7 +8,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   // Helper to get or create a channel for testing
   async function getOrCreateTestChannel(page: import('@playwright/test').Page): Promise<{ id: string; members: string[] }> {
     const response = await page.request.get('/api/channels');
-    const channels = await response.json();
+    const channels = (await response.json()).items;
 
     if (channels.length > 0) {
       return channels[0];
@@ -16,16 +16,27 @@ test.describe('TB52: Attach Documents to Messages', () => {
 
     // Get an entity to use as createdBy
     const entitiesResp = await page.request.get('/api/entities');
-    const entities = await entitiesResp.json();
-    const createdBy = entities.length > 0 ? entities[0].id : 'test-user';
+    const entities = (await entitiesResp.json()).items;
+    expect(entities.length).toBeGreaterThan(0);
+    const createdBy = entities[0].id;
+    // Group channels require two members; global setup only creates the operator.
+    const memberResponse = await page.request.post('/api/entities', {
+      data: {
+        name: `attachment-recipient-${Date.now()}`,
+        entityType: 'human',
+        createdBy,
+      },
+    });
+    expect(memberResponse.ok()).toBe(true);
+    const member = await memberResponse.json();
 
     // Create a channel if none exists
     const createResponse = await page.request.post('/api/channels', {
       data: {
-        name: `Test Channel ${Date.now()}`,
+        name: `test-channel-${Date.now()}`,
         channelType: 'group',
         createdBy,
-        members: [createdBy],
+        members: [createdBy, member.id],
         permissions: {
           visibility: 'public',
           joinPolicy: 'open',
@@ -41,7 +52,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   async function createTestDocument(page: import('@playwright/test').Page, options: { title?: string } = {}) {
     // Get an entity to use as createdBy
     const entitiesResp = await page.request.get('/api/entities');
-    const entities = await entitiesResp.json();
+    const entities = (await entitiesResp.json()).items;
     const createdBy = entities.length > 0 ? entities[0].id : 'test-user';
 
     const response = await page.request.post('/api/documents', {

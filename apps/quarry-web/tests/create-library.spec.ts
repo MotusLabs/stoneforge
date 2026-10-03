@@ -8,7 +8,7 @@ test.describe('TB29: Create Library', () => {
   test('POST /api/libraries endpoint creates a library', async ({ page }) => {
     // Get an entity to use as createdBy
     const entitiesResponse = await page.request.get('/api/entities');
-    const entities = await entitiesResponse.json();
+    const entities = (await entitiesResponse.json()).items;
 
     if (entities.length === 0) {
       test.skip();
@@ -60,7 +60,7 @@ test.describe('TB29: Create Library', () => {
   test('POST /api/libraries endpoint creates library with parent', async ({ page }) => {
     // Get an entity to use as createdBy
     const entitiesResponse = await page.request.get('/api/entities');
-    const entities = await entitiesResponse.json();
+    const entities = (await entitiesResponse.json()).items;
 
     if (entities.length === 0) {
       test.skip();
@@ -103,7 +103,7 @@ test.describe('TB29: Create Library', () => {
   test('POST /api/libraries endpoint rejects invalid parent', async ({ page }) => {
     // Get an entity to use as createdBy
     const entitiesResponse = await page.request.get('/api/entities');
-    const entities = await entitiesResponse.json();
+    const entities = (await entitiesResponse.json()).items;
 
     if (entities.length === 0) {
       test.skip();

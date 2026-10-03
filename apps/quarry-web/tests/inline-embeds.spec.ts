@@ -6,7 +6,7 @@ test.describe('TB57: Inline Task/Document Embeds', () => {
   // ============================================================================
   async function enterDocumentEditMode(page: import('@playwright/test').Page) {
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
 
     if (documents.length === 0) {
       return null;
@@ -61,7 +61,7 @@ test.describe('TB57: Inline Task/Document Embeds', () => {
   // Helper: Get a document (not the current one) from the API
   async function getAnotherDocument(page: import('@playwright/test').Page, excludeId: string) {
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
     return documents.find((d: { id: string }) => d.id !== excludeId) || null;
   }
 

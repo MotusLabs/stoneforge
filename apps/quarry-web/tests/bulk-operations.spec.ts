@@ -11,7 +11,7 @@ test.describe('TB15: Bulk Operations', () => {
   // Helper to get first entity
   async function getFirstEntity(page: import('@playwright/test').Page): Promise<{ id: string } | null> {
     const response = await page.request.get('/api/entities');
-    const entities = await response.json();
+    const entities = (await response.json()).items;
     return entities.length > 0 ? entities[0] : null;
   }
 

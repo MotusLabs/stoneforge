@@ -105,7 +105,7 @@ test.describe('TB14: Kanban View', () => {
   test('can create task from kanban view', async ({ page }) => {
     // Get an entity for createdBy
     const entitiesResponse = await page.request.get('/api/entities');
-    const entities = await entitiesResponse.json();
+    const entities = (await entitiesResponse.json()).items;
     if (entities.length === 0) {
       test.skip();
       return;
@@ -143,7 +143,7 @@ test.describe('TB14: Kanban View', () => {
 
     // Create a task to test with
     const entitiesResponse = await page.request.get('/api/entities');
-    const entities = await entitiesResponse.json();
+    const entities = (await entitiesResponse.json()).items;
     if (entities.length === 0) {
       test.skip();
       return;

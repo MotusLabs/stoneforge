@@ -6,7 +6,7 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   // ============================================================================
   async function enterDocumentEditMode(page: import('@playwright/test').Page) {
     const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const documents = (await response.json()).items;
 
     if (documents.length === 0) {
       return null;

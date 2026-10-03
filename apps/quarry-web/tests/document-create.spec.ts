@@ -4,7 +4,7 @@ test.describe('TB27: Create Document', () => {
   // Helper to get first entity for createdBy field
   async function getFirstEntity(page: import('@playwright/test').Page): Promise<{ id: string; name: string } | null> {
     const response = await page.request.get('/api/entities');
-    const entities = await response.json();
+    const entities = (await response.json()).items;
     return entities.length > 0 ? entities[0] : null;
   }
 
@@ -291,7 +291,7 @@ test.describe('TB27: Create Document', () => {
 
     // Verify document was created via API
     const response = await page.request.get('/api/documents');
-    const docs = await response.json();
+    const docs = (await response.json()).items;
     const createdDoc = docs.find((d: { title: string }) => d.title === title);
     expect(createdDoc).toBeDefined();
     expect(createdDoc.contentType).toBe('markdown');
@@ -341,7 +341,7 @@ test.describe('TB27: Create Document', () => {
 
     // Verify document was created with tags via API
     const response = await page.request.get('/api/documents');
-    const docs = await response.json();
+    const docs = (await response.json()).items;
     const createdDoc = docs.find((d: { title: string }) => d.title === title);
     expect(createdDoc).toBeDefined();
     expect(createdDoc.tags).toEqual(['spec', 'draft', 'api']);
