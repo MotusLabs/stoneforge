@@ -13,6 +13,7 @@ import type { PluginsConfig } from './plugin-types.js';
 import { discoverPlugins, logPluginWarnings } from './plugin-loader.js';
 import { registerAllPlugins, logConflictWarnings } from './plugin-registry.js';
 import { suggestCommands } from './suggest.js';
+import { exitGracefully, installStreamEpipeGuards } from './exit.js';
 
 // ============================================================================
 // Command Registry
@@ -248,7 +249,13 @@ function outputResult(result: CommandResult, options: GlobalOptions): number {
 /**
  * Main CLI entry point
  */
-export async function main(argv: string[] = process.argv.slice(2)): Promise<never> {
+export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
+  // Piping into a short-lived reader (`sf ... | head`) must not crash the
+  // process with an unhandled EPIPE now that we exit by draining the streams
+  // instead of calling process.exit() while writes may still be in flight.
+  // (No-op under Bun, which needs stdio left completely untouched.)
+  installStreamEpipeGuards();
+
   // Register all commands
   const { initCommand } = await import('./commands/init.js');
   const { resetCommand } = await import('./commands/reset.js');
@@ -423,6 +430,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<neve
     }
   }
 
+  // Never process.exit() straight after running a command: when stdout is a
+  // pipe, writes are asynchronous and exiting before they flush truncates the
+  // output at the pipe size. exitGracefully() records the exit code, drains
+  // the streams and lets the process end by itself (with a fallback that
+  // guarantees the process still terminates).
   const exitCode = await run(argv);
-  process.exit(exitCode);
+  await exitGracefully(exitCode);
 }

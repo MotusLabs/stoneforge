@@ -27,6 +27,7 @@ import {
 import { EntityTypeValue, asEntityId } from '@stoneforge/core';
 import { createSyncService } from '../../sync/service.js';
 import { installSkillsToWorkspace } from './install.js';
+import { exitGracefully } from '../exit.js';
 import type { QuarryAPI } from '../../api/quarry-api.js';
 import type { WorkflowPreset, PartialConfiguration } from '../../config/types.js';
 import { VALID_WORKFLOW_PRESETS } from '../../config/types.js';
@@ -480,7 +481,9 @@ async function promptWorkflowPreset(): Promise<WorkflowPreset> {
       // Ctrl+C — exit gracefully
       if (data === '\x03') {
         cleanup();
-        process.exit(0);
+        // Fire-and-forget: drain the cursor-restore write before ending,
+        // instead of process.exit() discarding it.
+        void exitGracefully(ExitCode.SUCCESS);
       }
 
       // Enter — confirm selection

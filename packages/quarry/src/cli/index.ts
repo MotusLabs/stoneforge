@@ -20,6 +20,9 @@ export { getFormatter, getOutputMode, getStatusIcon, type OutputFormatter, type 
 // Runner
 export { registerCommand, registerAlias, getCommand, getAllCommands, getAllAliases, run, main } from './runner.js';
 
+// Graceful exit (never truncate buffered stdout/stderr — see exit.ts)
+export { exitGracefully, flushStdio, installStreamEpipeGuards, tolerateStreamEpipe } from './exit.js';
+
 // Commands
 export { initCommand, OPERATOR_ENTITY_ID, OPERATOR_ENTITY_NAME } from './commands/init.js';
 export { resetCommand } from './commands/reset.js';

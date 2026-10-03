@@ -11,7 +11,7 @@
  */
 
 import type { Command, GlobalOptions, CommandResult } from '@stoneforge/quarry/cli';
-import { success, failure, ExitCode } from '@stoneforge/quarry/cli';
+import { success, failure, ExitCode, exitGracefully } from '@stoneforge/quarry/cli';
 import type { TestContext } from '../../testing/test-context.js';
 import type { OrchestrationTest } from '../../testing/orchestration-tests.js';
 
@@ -457,18 +457,23 @@ Examples:
   bun run test:orchestration --mode real --test "worker-marks-task-complete" --verbose --skip-cleanup
   bun run test:orchestration --test "director" --verbose
 `);
-      process.exit(0);
+      // Drain the help text before ending — process.exit() can truncate it.
+      // Under Bun the hard exit inside never returns; under Node this return
+      // lets the process end naturally with the recorded exit code.
+      await exitGracefully(ExitCode.SUCCESS);
+      return;
     }
   }
 
   const result = await runOrchestrationTests(options);
-  process.exit(result.exitCode);
+  // Test reports are large; never truncate them with a hard process.exit().
+  await exitGracefully(result.exitCode);
 }
 
 // Run if this file is executed directly
 if (import.meta.main) {
   main().catch((error) => {
     console.error('Fatal error:', error);
-    process.exit(1);
+    void exitGracefully(ExitCode.GENERAL_ERROR);
   });
 }

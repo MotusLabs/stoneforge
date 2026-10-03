@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import type { Command, GlobalOptions, CommandResult } from '../types.js';
 import { failure, ExitCode } from '../types.js';
 import { findStoneforgeDir } from '../../config/file.js';
+import { exitGracefully } from '../exit.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -270,8 +271,11 @@ function hasDashboardMarker(): boolean {
  * (>24h) are cleaned up by hasDashboardMarker() instead.
  */
 function registerMarkerCleanup(): void {
-  process.on('SIGINT', () => { process.exit(0); });
-  process.on('SIGTERM', () => { process.exit(0); });
+  // exitGracefully() instead of process.exit(): the server keeps the event
+  // loop alive with its listening sockets, so it force-exits after the
+  // streams have drained — no buffered log output is lost.
+  process.on('SIGINT', () => { void exitGracefully(ExitCode.SUCCESS); });
+  process.on('SIGTERM', () => { void exitGracefully(ExitCode.SUCCESS); });
 }
 
 /**
