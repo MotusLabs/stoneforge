@@ -2130,12 +2130,12 @@ describe('DispatchDaemon Rate Limit Integration', () => {
   // 1. Rate limit event updates tracker
   // --------------------------------------------------------------------------
 
-  test('handleRateLimitDetected marks executable as limited in tracker', () => {
+  test('handleRateLimitDetected marks executable as limited in tracker', async () => {
     // Use a time above the minimum floor (15 min) so the exact value is preserved
     const resetsAt = new Date(Date.now() + 20 * 60 * 1000);
     daemon.handleRateLimitDetected('claude2', resetsAt);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     // Plan-level rate limits: marking 'claude2' (which is in the fallback chain
     // ['claude2', 'claude']) marks ALL chain entries as limited
     expect(status.limits).toHaveLength(2);
@@ -2146,14 +2146,14 @@ describe('DispatchDaemon Rate Limit Integration', () => {
     }
   });
 
-  test('handleRateLimitDetected marks ALL fallback chain entries when a chain executable is rate-limited', () => {
+  test('handleRateLimitDetected marks ALL fallback chain entries when a chain executable is rate-limited', async () => {
     // When a fallback executable (e.g. 'claude2') hits a plan-level rate limit,
     // all executables in the fallback chain should be marked as limited because
     // they share the same API plan.
     const resetsAt = new Date(Date.now() + 20 * 60 * 1000);
     daemon.handleRateLimitDetected('claude2', resetsAt);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     // Both 'claude2' and 'claude' should be limited (fallback chain is ['claude2', 'claude'])
     expect(status.limits).toHaveLength(2);
     const executables = status.limits.map(l => l.executable).sort();
@@ -2164,12 +2164,12 @@ describe('DispatchDaemon Rate Limit Integration', () => {
     }
   });
 
-  test('handleRateLimitDetected marks ALL fallback chain entries when any chain executable hits limit', () => {
+  test('handleRateLimitDetected marks ALL fallback chain entries when any chain executable hits limit', async () => {
     // Same behavior when 'claude' (the second entry) is the one hitting the limit
     const resetsAt = new Date(Date.now() + 20 * 60 * 1000);
     daemon.handleRateLimitDetected('claude', resetsAt);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     expect(status.limits).toHaveLength(2);
     const executables = status.limits.map(l => l.executable).sort();
     expect(executables).toEqual(['claude', 'claude2']);
@@ -2189,18 +2189,18 @@ describe('DispatchDaemon Rate Limit Integration', () => {
 
     // With the fix, ALL chain entries should be marked, so the daemon should
     // report as fully paused (all_limited)
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     expect(status.isPaused).toBe(true);
   });
 
-  test('handleRateLimitDetected marks ONLY the reported key when it is not a chain entry', () => {
+  test('handleRateLimitDetected marks ONLY the reported key when it is not a chain entry', async () => {
     // A limit reported for an executable outside the fallback chain (for example
     // a worker's own wrapper) belongs to that account only. Widening it to the
     // chain would block healthy workers on other accounts.
     const resetsAt = new Date(Date.now() + 20 * 60 * 1000);
     daemon.handleRateLimitDetected('some-other-executable', resetsAt);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     // Only the reported executable is marked — the chain entries stay available
     expect(status.limits).toHaveLength(1);
     expect(status.limits[0].executable).toBe('some-other-executable');
@@ -2227,7 +2227,7 @@ describe('DispatchDaemon Rate Limit Integration', () => {
     // Worker should NOT be dispatched because all chain entries are limited
     expect(result.processed).toBe(0);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     expect(status.isPaused).toBe(true);
   });
 
@@ -2283,13 +2283,17 @@ describe('DispatchDaemon Rate Limit Integration', () => {
       settingsService
     );
 
+    // A worker on the default account so the "all accounts limited" pause
+    // (D7) has an account to evaluate. With zero workers, dispatch is not
+    // reported as paused.
+    await createTestWorker('pause-poll-worker');
     // Mark all executables in the fallback chain as limited
     const resetsAt = new Date(Date.now() + 60_000);
     pauseDaemon.handleRateLimitDetected('claude2', resetsAt);
     pauseDaemon.handleRateLimitDetected('claude', resetsAt);
 
-    // Verify the daemon reports paused state
-    const status = pauseDaemon.getRateLimitStatus();
+    // Verify the daemon reports paused state (every enabled worker's account limited)
+    const status = await pauseDaemon.getRateLimitStatus();
     expect(status.isPaused).toBe(true);
 
     // Track which poll events fire during a single poll cycle
@@ -2329,7 +2333,7 @@ describe('DispatchDaemon Rate Limit Integration', () => {
     //
     // For this test, we simply verify dispatch works when no limits are active.
     // The getRateLimitStatus should show NOT paused with no limits.
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     expect(status.isPaused).toBe(false);
     expect(status.limits).toHaveLength(0);
 
@@ -2345,9 +2349,12 @@ describe('DispatchDaemon Rate Limit Integration', () => {
   // 6. getRateLimitStatus returns correct data
   // --------------------------------------------------------------------------
 
-  test('getRateLimitStatus returns correct data when executables are limited', () => {
+  test('getRateLimitStatus returns correct data when executables are limited', async () => {
+    // A worker on the default account so "all accounts limited" can pause (D7)
+    await createTestWorker('status-default-worker');
+
     // Initially no limits
-    const initialStatus = daemon.getRateLimitStatus();
+    const initialStatus = await daemon.getRateLimitStatus();
     expect(initialStatus.isPaused).toBe(false);
     expect(initialStatus.limits).toHaveLength(0);
     expect(initialStatus.soonestReset).toBeUndefined();
@@ -2357,8 +2364,9 @@ describe('DispatchDaemon Rate Limit Integration', () => {
     const resetTime1 = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes from now
     daemon.handleRateLimitDetected('claude2', resetTime1);
 
-    const afterFirstLimit = daemon.getRateLimitStatus();
-    // Plan-level: marking 'claude2' marks both chain entries
+    const afterFirstLimit = await daemon.getRateLimitStatus();
+    // Plan-level: marking 'claude2' marks both chain entries, so the worker's
+    // account is limited and every enabled worker is limited → paused
     expect(afterFirstLimit.isPaused).toBe(true);
     expect(afterFirstLimit.limits).toHaveLength(2);
     expect(afterFirstLimit.soonestReset).toBe(resetTime1.toISOString());
@@ -2369,7 +2377,7 @@ describe('DispatchDaemon Rate Limit Integration', () => {
     const resetTime2 = new Date(Date.now() + 20 * 60 * 1000); // 20 minutes from now
     daemon.handleRateLimitDetected('claude', resetTime2);
 
-    const fullStatus = daemon.getRateLimitStatus();
+    const fullStatus = await daemon.getRateLimitStatus();
     expect(fullStatus.isPaused).toBe(true); // Both are limited
     expect(fullStatus.limits).toHaveLength(2);
 
@@ -2396,12 +2404,13 @@ describe('DispatchDaemon Rate Limit Integration', () => {
     );
 
     // When the default provider ('claude') is rate-limited and there's no fallback chain,
-    // isPaused should be true — there's no alternative executable to fall back to.
-    // Previously this was always false with an empty chain, which caused orphan recovery
-    // to run every cycle and incorrectly increment resumeCount for rate-limited tasks.
+    // a worker on that account has no alternative — isPaused is true (D7: every
+    // enabled worker's account is limited). This keeps orphan recovery from
+    // running every cycle and incrementing resumeCount for rate-limited tasks.
+    await createTestWorker('no-chain-default-worker');
     noSettingsDaemon.handleRateLimitDetected('claude', new Date(Date.now() + 60_000));
 
-    const status = noSettingsDaemon.getRateLimitStatus();
+    const status = await noSettingsDaemon.getRateLimitStatus();
     expect(status.isPaused).toBe(true);
     expect(status.limits).toHaveLength(1);
 
@@ -2511,7 +2520,7 @@ describe('Rate limit attribution to the producing account', () => {
     return api.create(task as unknown as Record<string, unknown> & { createdBy: EntityId }) as Promise<Task>;
   }
 
-  test('explicit limit on a wrapper marks only the wrapper account, not the chain', () => {
+  test('explicit limit on a wrapper marks only the wrapper account, not the chain', async () => {
     // Scenario "Explicit limit on a wrapper": a session started by a worker on
     // `claude-glm` emits a recognised limit message. server/services.ts
     // normalises the session's executablePath and forwards it here. Only the
@@ -2520,7 +2529,7 @@ describe('Rate limit attribution to the producing account', () => {
     const resetsAt = new Date(Date.now() + 20 * 60 * 1000);
     daemon.handleRateLimitDetected('claude-glm', resetsAt);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     expect(status.limits).toHaveLength(1);
     expect(status.limits[0].executable).toBe('claude-glm');
     expect(status.limits[0].resetsAt).toBe(resetsAt.toISOString());
@@ -2528,13 +2537,15 @@ describe('Rate limit attribution to the producing account', () => {
     expect(status.isPaused).toBe(false);
   });
 
-  test('explicit limit on a chain entry marks both chain entries', () => {
+  test('explicit limit on a chain entry marks both chain entries', async () => {
     // The other half of the pair: a limit on `claude` (itself a chain entry)
-    // is plan-level and marks the whole chain.
+    // is plan-level and marks the whole chain. A default worker on that
+    // account then has no unlimited account left → paused (D7).
+    await createTestWorker('chain-entry-default-e1');
     const resetsAt = new Date(Date.now() + 20 * 60 * 1000);
     daemon.handleRateLimitDetected('claude', resetsAt);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     const executables = status.limits.map(l => l.executable).sort();
     expect(executables).toEqual(['claude', 'claude-alt']);
     expect(status.isPaused).toBe(true);
@@ -2556,7 +2567,7 @@ describe('Rate limit attribution to the producing account', () => {
     // The task is dispatched — the limited wrapper account did not pause dispatch
     expect(result.processed).toBe(1);
     expect(sessionManager.startSession).toHaveBeenCalled();
-    expect(daemon.getRateLimitStatus().isPaused).toBe(false);
+    expect((await daemon.getRateLimitStatus()).isPaused).toBe(false);
   });
 
   test('scenario "Wrapper worker ignores chain": session runs the worker executable, not a chain entry', async () => {
@@ -2589,8 +2600,13 @@ describe('Rate limit attribution to the producing account', () => {
     const result = await daemon.pollWorkerAvailability();
     expect(result.processed).toBe(0);
     expect(sessionManager.startSession).not.toHaveBeenCalled();
-    // The chain itself is untouched — a default worker stays dispatchable
-    expect(daemon.getRateLimitStatus().isPaused).toBe(false);
+    // The chain itself is untouched (limits list only claude-glm), but this
+    // test has only the wrapper worker and its account is limited — under D7
+    // that is "all accounts limited" and dispatch is paused. A default worker
+    // on an unlimited chain account would unpause (covered above).
+    const status = await daemon.getRateLimitStatus();
+    expect(status.limits.map((l) => l.executable)).toEqual(['claude-glm']);
+    expect(status.isPaused).toBe(true);
   });
 
   test('scenario "Chain still serves default workers": chain selection is unchanged', async () => {
@@ -2614,6 +2630,280 @@ describe('Rate limit attribution to the producing account', () => {
     // 'claude' is itself a chain entry → the whole chain is limited
     daemon.handleRateLimitDetected('claude', new Date(Date.now() + 60 * 60 * 1000));
     expect(impl.resolveExecutableWithFallback(e1)).toBe('all_limited');
+  });
+});
+
+// ============================================================================
+// Dispatch paused state (design D7) — paused only when all accounts are limited
+// ============================================================================
+
+describe('Dispatch paused state (design D7)', () => {
+  let api: QuarryAPI;
+  let inboxService: InboxService;
+  let agentRegistry: AgentRegistry;
+  let taskAssignment: TaskAssignmentService;
+  let dispatchService: DispatchService;
+  let sessionManager: SessionManager;
+  let worktreeManager: WorktreeManager;
+  let stewardScheduler: StewardScheduler;
+  let settingsService: SettingsService;
+  let daemon: DispatchDaemon;
+  let testDbPath: string;
+  let systemEntity: EntityId;
+
+  beforeEach(async () => {
+    pinPathForRateLimitTests();
+    testDbPath = `/tmp/dispatch-daemon-rl-paused-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const storage = createStorage({ path: testDbPath, create: true });
+    initializeSchema(storage);
+
+    api = createQuarryAPI(storage);
+    inboxService = createInboxService(storage);
+    agentRegistry = createAgentRegistry(api);
+    taskAssignment = createTaskAssignmentService(api);
+    dispatchService = createDispatchService(api, taskAssignment, agentRegistry);
+    sessionManager = createMockSessionManager();
+    worktreeManager = createMockWorktreeManager();
+    stewardScheduler = createMockStewardScheduler();
+    // Chain of [claude, claude-alt]: one plan, several binaries. Workers with
+    // their own wrapper executable (claude-glm) are separate accounts.
+    settingsService = createMockSettingsService({
+      fallbackChain: ['claude', 'claude-alt'],
+    });
+
+    const { createEntity, EntityTypeValue } = await import('@stoneforge/core');
+    const entity = await createEntity({
+      name: 'test-system-rl-paused',
+      entityType: EntityTypeValue.SYSTEM,
+      createdBy: 'system:test' as EntityId,
+    });
+    const saved = await api.create(entity as unknown as Record<string, unknown> & { createdBy: EntityId });
+    systemEntity = saved.id as unknown as EntityId;
+
+    const config: DispatchDaemonConfig = {
+      ensureTargetBranchExists: mockEnsureTargetBranchExists,
+      pollIntervalMs: 100,
+      workerAvailabilityPollEnabled: true,
+      inboxPollEnabled: false,
+      stewardTriggerPollEnabled: false,
+      workflowTaskPollEnabled: false,
+    };
+
+    daemon = new DispatchDaemonImpl(
+      api,
+      agentRegistry,
+      sessionManager,
+      dispatchService,
+      worktreeManager,
+      taskAssignment,
+      stewardScheduler,
+      inboxService,
+      config,
+      undefined, // poolService
+      settingsService
+    );
+  });
+
+  afterEach(async () => {
+    await daemon.stop();
+    if (fs.existsSync(testDbPath)) {
+      fs.unlinkSync(testDbPath);
+    }
+    restorePathAfterRateLimitTests();
+  });
+
+  async function createTestWorker(
+    name: string,
+    options?: { executablePath?: string; disabled?: boolean }
+  ): Promise<AgentEntity> {
+    const worker = await agentRegistry.registerWorker({
+      name,
+      workerMode: 'ephemeral',
+      createdBy: systemEntity,
+      maxConcurrentTasks: 1,
+      executablePath: options?.executablePath,
+    });
+    if (options?.disabled) {
+      await agentRegistry.updateAgentMetadata(worker.id as EntityId, {
+        disabled: true,
+      } as Partial<import('../types/agent.js').AgentMetadata>);
+    }
+    return worker;
+  }
+
+  test('scenario "Partial limit": status lists the limited account and reports dispatch as active', async () => {
+    // Tier-1 wrapper account limited; tier-2 default account not.
+    await createTestWorker('e1-cheap', { executablePath: 'claude-glm' });
+    await createTestWorker('e3-expensive');
+
+    const resetsAt = new Date(Date.now() + 20 * 60 * 1000);
+    daemon.handleRateLimitDetected('claude-glm', resetsAt);
+
+    const status = await daemon.getRateLimitStatus();
+
+    // The limited account is listed with its reset time …
+    expect(status.limits).toHaveLength(1);
+    expect(status.limits[0].executable).toBe('claude-glm');
+    expect(status.limits[0].resetsAt).toBe(resetsAt.toISOString());
+    expect(status.soonestReset).toBe(resetsAt.toISOString());
+    // … and dispatch is NOT paused: e3's account is still unlimited
+    expect(status.isPaused).toBe(false);
+  });
+
+  test('scenario "Partial limit": dispatch falls through to the unlimited account', async () => {
+    await createTestWorker('e1-cheap-dispatch', { executablePath: 'claude-glm' });
+    await createTestWorker('e3-expensive-dispatch');
+    const task = await createTask({
+      title: 'Task during partial limit',
+      createdBy: systemEntity,
+      status: TaskStatus.OPEN,
+    });
+    await api.create(task as unknown as Record<string, unknown> & { createdBy: EntityId });
+
+    daemon.handleRateLimitDetected('claude-glm', new Date(Date.now() + 20 * 60 * 1000));
+
+    // Not paused → the poll cycle keeps dispatching, and the task goes to e3
+    expect((await daemon.getRateLimitStatus()).isPaused).toBe(false);
+    const result = await daemon.pollWorkerAvailability();
+    expect(result.processed).toBe(1);
+    expect(sessionManager.startSession).toHaveBeenCalled();
+  });
+
+  test('scenario "All accounts limited": status reports dispatch as paused until the soonest reset', async () => {
+    await createTestWorker('e1-cheap-all', { executablePath: 'claude-glm' });
+    await createTestWorker('e3-expensive-all');
+
+    const wrapperReset = new Date(Date.now() + 30 * 60 * 1000);
+    const chainReset = new Date(Date.now() + 20 * 60 * 1000);
+    daemon.handleRateLimitDetected('claude-glm', wrapperReset);
+    // Chain entry → marks the whole chain, so e3's account is limited too
+    daemon.handleRateLimitDetected('claude', chainReset);
+
+    const status = await daemon.getRateLimitStatus();
+    expect(status.isPaused).toBe(true);
+    // Both accounts are listed with their reset times
+    const executables = status.limits.map((l) => l.executable).sort();
+    expect(executables).toEqual(['claude', 'claude-alt', 'claude-glm']);
+    // Paused until the soonest reset
+    expect(status.soonestReset).toBe(chainReset.toISOString());
+  });
+
+  test('scenario "All accounts limited": every worker shares one limited account', async () => {
+    // Two workers on the same wrapper account — one limit covers both.
+    await createTestWorker('e1-shared', { executablePath: 'claude-glm' });
+    await createTestWorker('e2-shared', { executablePath: 'claude-glm' });
+
+    daemon.handleRateLimitDetected('claude-glm', new Date(Date.now() + 20 * 60 * 1000));
+
+    const status = await daemon.getRateLimitStatus();
+    expect(status.isPaused).toBe(true);
+    expect(status.limits).toHaveLength(1);
+  });
+
+  test('disabled workers are ignored when deciding the paused state', async () => {
+    // The only unlimited account belongs to a disabled (parked) worker, so
+    // every *enabled* worker's account is limited → paused.
+    await createTestWorker('e1-enabled-limited', { executablePath: 'claude-glm' });
+    await createTestWorker('e2-disabled-unlimited', { disabled: true });
+
+    daemon.handleRateLimitDetected('claude-glm', new Date(Date.now() + 20 * 60 * 1000));
+
+    const status = await daemon.getRateLimitStatus();
+    expect(status.isPaused).toBe(true);
+
+    // Re-enable the other worker → its unlimited account unpause dispatch
+    const disabledWorker = (await agentRegistry.listAgents({ role: 'worker' })).find(
+      (w) => w.name === 'e2-disabled-unlimited'
+    );
+    expect(disabledWorker).toBeDefined();
+    await agentRegistry.updateAgentMetadata(disabledWorker!.id as EntityId, {
+      disabled: undefined,
+    } as Partial<import('../types/agent.js').AgentMetadata>);
+
+    expect((await daemon.getRateLimitStatus()).isPaused).toBe(false);
+  });
+
+  test('busy workers still count as unlimited accounts (busy/idle state is ignored)', async () => {
+    // e1 is limited; e2 is busy but its account is unlimited → not paused.
+    await createTestWorker('e1-idle-limited', { executablePath: 'claude-glm' });
+    const busy = await createTestWorker('e2-busy-unlimited');
+    // Simulate an active session so e2 is not idle
+    (sessionManager.getActiveSession as ReturnType<typeof mock>).mockImplementation(
+      (agentId: unknown) =>
+        agentId === busy.id
+          ? { id: 'session-busy', agentId: busy.id, status: 'running' }
+          : undefined
+    );
+
+    daemon.handleRateLimitDetected('claude-glm', new Date(Date.now() + 20 * 60 * 1000));
+
+    expect((await daemon.getRateLimitStatus()).isPaused).toBe(false);
+  });
+
+  test('no enabled ephemeral workers → dispatch is not reported as paused', async () => {
+    // Limits may exist, but with nobody to dispatch to there is no stall.
+    daemon.handleRateLimitDetected('claude-glm', new Date(Date.now() + 20 * 60 * 1000));
+    daemon.handleRateLimitDetected('claude', new Date(Date.now() + 20 * 60 * 1000));
+
+    const status = await daemon.getRateLimitStatus();
+    expect(status.isPaused).toBe(false);
+    // The limited keys are still listed so the UI can show them
+    expect(status.limits.length).toBeGreaterThan(0);
+  });
+
+  test('a limit on an account no worker uses does not pause dispatch', async () => {
+    await createTestWorker('e1-default');
+    daemon.handleRateLimitDetected('/opt/wrappers/unrelated', new Date(Date.now() + 20 * 60 * 1000));
+
+    const status = await daemon.getRateLimitStatus();
+    expect(status.limits).toHaveLength(1);
+    expect(status.isPaused).toBe(false);
+  });
+
+  test('the global rate-limit sleep timer arms only under a full pause', async () => {
+    await daemon.stop();
+    const timerDaemon = new DispatchDaemonImpl(
+      api,
+      agentRegistry,
+      sessionManager,
+      dispatchService,
+      worktreeManager,
+      taskAssignment,
+      stewardScheduler,
+      inboxService,
+      {
+        ensureTargetBranchExists: mockEnsureTargetBranchExists,
+        pollIntervalMs: 60_000, // drive poll cycles manually below
+        workerAvailabilityPollEnabled: true,
+        inboxPollEnabled: false,
+        stewardTriggerPollEnabled: false,
+        workflowTaskPollEnabled: false,
+        orphanRecoveryEnabled: false,
+      },
+      undefined,
+      settingsService
+    );
+    daemon = timerDaemon;
+
+    await createTestWorker('e1-timer-cheap', { executablePath: 'claude-glm' });
+    await createTestWorker('e2-timer-default');
+
+    const timer = () =>
+      (timerDaemon as unknown as { rateLimitSleepTimer?: unknown }).rateLimitSleepTimer;
+    const poll = () =>
+      (timerDaemon as unknown as { runPollCycle: () => Promise<void> }).runPollCycle();
+
+    // Partial limit: sleep timer must NOT arm
+    timerDaemon.handleRateLimitDetected('claude-glm', new Date(Date.now() + 20 * 60 * 1000));
+    await poll();
+    expect(timer()).toBeUndefined();
+
+    // Complete the pause: now every account is limited → timer arms
+    timerDaemon.handleRateLimitDetected('claude', new Date(Date.now() + 20 * 60 * 1000));
+    await poll();
+    expect(timer()).toBeDefined();
+
+    await timerDaemon.stop();
   });
 });
 
@@ -2832,6 +3122,15 @@ describe('wake() lastWakeAt - invalidate stale rate limit detection', () => {
     }
   });
 
+  async function createTestWorker(name: string): Promise<AgentEntity> {
+    return agentRegistry.registerWorker({
+      name,
+      workerMode: 'ephemeral',
+      createdBy: systemEntity,
+      maxConcurrentTasks: 1,
+    });
+  }
+
   test('wake() sets lastWakeAt timestamp', () => {
     const before = Date.now();
     daemon.wake();
@@ -2843,25 +3142,29 @@ describe('wake() lastWakeAt - invalidate stale rate limit detection', () => {
     expect(lastWakeAt).toBeLessThanOrEqual(after);
   });
 
-  test('wake() clears rate limits and sleep timer', () => {
+  test('wake() clears rate limits and sleep timer', async () => {
+    // A worker on the default account so "all accounts limited" can pause (D7)
+    await createTestWorker('wake-limit-worker');
     // Set a rate limit first
     const resetsAt = new Date(Date.now() + 60 * 60 * 1000);
     daemon.handleRateLimitDetected('claude2', resetsAt);
 
     // Verify it's set
-    let status = daemon.getRateLimitStatus();
+    let status = await daemon.getRateLimitStatus();
     expect(status.isPaused).toBe(true);
 
     // Wake clears the rate limit
     daemon.wake();
 
     // Rate limit should be cleared
-    status = daemon.getRateLimitStatus();
+    status = await daemon.getRateLimitStatus();
     expect(status.isPaused).toBe(false);
     expect(status.limits).toHaveLength(0);
   });
 
-  test('wake() does NOT suppress handleRateLimitDetected() — new rate limits are recorded', () => {
+  test('wake() does NOT suppress handleRateLimitDetected() — new rate limits are recorded', async () => {
+    // A worker on the default account so "all accounts limited" can pause (D7)
+    await createTestWorker('wake-unsuppressed-worker');
     // Call wake
     daemon.wake();
 
@@ -2869,7 +3172,7 @@ describe('wake() lastWakeAt - invalidate stale rate limit detection', () => {
     const resetsAt = new Date(Date.now() + 60 * 60 * 1000);
     daemon.handleRateLimitDetected('claude2', resetsAt);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     expect(status.isPaused).toBe(true);
     expect(status.limits.length).toBeGreaterThan(0);
   });
@@ -4518,20 +4821,31 @@ describe('runPollCycle - allLimited with empty fallback chain', () => {
     }
   });
 
-  test('reports isPaused when default provider is rate-limited with empty fallback chain', () => {
+  async function createTestWorker(name: string): Promise<AgentEntity> {
+    return agentRegistry.registerWorker({
+      name,
+      workerMode: 'ephemeral',
+      createdBy: systemEntity,
+      maxConcurrentTasks: 1,
+    });
+  }
+
+  test('reports isPaused when default provider is rate-limited with empty fallback chain', async () => {
+    // A worker on the default account so "all accounts limited" can pause (D7)
+    await createTestWorker('empty-chain-default-worker');
     // Mark the default provider as rate-limited
     daemon.handleRateLimitDetected('claude', new Date(Date.now() + 60_000));
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     expect(status.isPaused).toBe(true);
   });
 
-  test('reports not paused when default provider is not rate-limited with empty fallback chain', () => {
-    const status = daemon.getRateLimitStatus();
+  test('reports not paused when default provider is not rate-limited with empty fallback chain', async () => {
+    const status = await daemon.getRateLimitStatus();
     expect(status.isPaused).toBe(false);
   });
 
-  test('reports isPaused when custom executable path is rate-limited with empty fallback chain', () => {
+  test('reports isPaused when custom executable path is rate-limited with empty fallback chain', async () => {
     // Configure a custom executable path for the claude-code provider.
     // When the rate limit is recorded against this custom path (not the string 'claude'),
     // getRateLimitStatus() should still report isPaused: true.
@@ -4559,10 +4873,13 @@ describe('runPollCycle - allLimited with empty fallback chain', () => {
       })
     );
 
+    // A worker on the provider-default account: customDaemon's settings map
+    // that account to '/custom/claude', the key the limit is recorded under.
+    await createTestWorker('empty-chain-custom-worker');
     // Rate limit recorded against the custom executable path
     customDaemon.handleRateLimitDetected('/custom/claude', new Date(Date.now() + 60_000));
 
-    const status = customDaemon.getRateLimitStatus();
+    const status = await customDaemon.getRateLimitStatus();
     expect(status.isPaused).toBe(true);
     expect(status.limits).toHaveLength(1);
     expect(status.limits[0].executable).toBe('/custom/claude');
@@ -4571,7 +4888,7 @@ describe('runPollCycle - allLimited with empty fallback chain', () => {
     customDaemon.stop();
   });
 
-  test('widens to the chain only when the reported key matches a chain entry after normalisation', () => {
+  test('widens to the chain only when the reported key matches a chain entry after normalisation', async () => {
     // A session spawned from the chain reports the executable it ran with.
     // Normalisation reconciles spellings: a bare chain entry and its resolved
     // PATH location are the same account, so a limit reported for either
@@ -4598,12 +4915,14 @@ describe('runPollCycle - allLimited with empty fallback chain', () => {
       })
     );
 
+    // A worker on the default account so "all accounts limited" can pause (D7)
+    await createTestWorker('chain-normalisation-worker');
     // Report the limit under the chain entry's normalised (resolved-path)
     // spelling — it is still recognised as the chain entry's account.
     const resolvedClaude = normalizeExecutableKey('claude');
     chainDaemon.handleRateLimitDetected(resolvedClaude, new Date(Date.now() + 60_000));
 
-    let status = chainDaemon.getRateLimitStatus();
+    let status = await chainDaemon.getRateLimitStatus();
     // All chain entries should be marked as limited (plan-level rate limit)
     expect(status.isPaused).toBe(true);
     expect(status.limits.length).toBeGreaterThanOrEqual(2);
@@ -4633,7 +4952,7 @@ describe('runPollCycle - allLimited with empty fallback chain', () => {
     );
     wrapperDaemon.handleRateLimitDetected('/opt/wrappers/claude-glm', new Date(Date.now() + 60_000));
 
-    status = wrapperDaemon.getRateLimitStatus();
+    status = await wrapperDaemon.getRateLimitStatus();
     expect(status.limits).toHaveLength(1);
     expect(status.limits[0].executable).toBe('/opt/wrappers/claude-glm');
     expect(status.isPaused).toBe(false);
@@ -4710,13 +5029,13 @@ describe('handleRateLimitDetected - minimum floor', () => {
     }
   });
 
-  test('clamps reset time to minimum floor when too short', () => {
+  test('clamps reset time to minimum floor when too short', async () => {
     const now = Date.now();
     // Reset time 1 minute from now — way below the 15-minute floor
     const tooSoon = new Date(now + 60_000);
     daemon.handleRateLimitDetected('claude', tooSoon);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     // Plan-level: marking 'claude' (in chain) marks all chain entries
     expect(status.limits).toHaveLength(2);
 
@@ -4728,13 +5047,13 @@ describe('handleRateLimitDetected - minimum floor', () => {
     }
   });
 
-  test('preserves reset time when already above the floor', () => {
+  test('preserves reset time when already above the floor', async () => {
     const now = Date.now();
     // Reset time 30 minutes from now — above the 15-minute floor
     const farEnough = new Date(now + 30 * 60 * 1000);
     daemon.handleRateLimitDetected('claude', farEnough);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     // Plan-level: marking 'claude' (in chain) marks all chain entries
     expect(status.limits).toHaveLength(2);
     for (const limit of status.limits) {
@@ -4742,13 +5061,13 @@ describe('handleRateLimitDetected - minimum floor', () => {
     }
   });
 
-  test('clamps reset time in the past to minimum floor', () => {
+  test('clamps reset time in the past to minimum floor', async () => {
     const now = Date.now();
     // Reset time already in the past
     const pastTime = new Date(now - 60_000);
     daemon.handleRateLimitDetected('claude', pastTime);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     // Plan-level: marking 'claude' (in chain) marks all chain entries
     expect(status.limits).toHaveLength(2);
 
@@ -4759,13 +5078,13 @@ describe('handleRateLimitDetected - minimum floor', () => {
     }
   });
 
-  test('clamps reset time exactly at the floor boundary', () => {
+  test('clamps reset time exactly at the floor boundary', async () => {
     const now = Date.now();
     // Exactly at the floor — should NOT be clamped (it equals the floor)
     const exactlyAtFloor = new Date(now + RATE_LIMIT_MINIMUM_FLOOR_MS);
     daemon.handleRateLimitDetected('claude', exactlyAtFloor);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     // Plan-level: marking 'claude' (in chain) marks all chain entries
     expect(status.limits).toHaveLength(2);
 
@@ -4843,13 +5162,13 @@ describe('handleRateLimitDetected - maximum cap', () => {
     }
   });
 
-  test('clamps reset time to maximum cap when too far in the future (1 year out)', () => {
+  test('clamps reset time to maximum cap when too far in the future (1 year out)', async () => {
     const now = Date.now();
     // Reset time ~1 year from now — far beyond the 24-hour cap
     const oneYearOut = new Date(now + 365 * 24 * 60 * 60 * 1000);
     daemon.handleRateLimitDetected('claude', oneYearOut);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     // Plan-level: marking 'claude' (in chain) marks all chain entries
     expect(status.limits).toHaveLength(2);
 
@@ -4863,26 +5182,26 @@ describe('handleRateLimitDetected - maximum cap', () => {
     }
   });
 
-  test('preserves reset time when below the maximum cap', () => {
+  test('preserves reset time when below the maximum cap', async () => {
     const now = Date.now();
     // Reset time 1 hour from now — well below the 24-hour cap
     const oneHour = new Date(now + 60 * 60 * 1000);
     daemon.handleRateLimitDetected('claude', oneHour);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     expect(status.limits).toHaveLength(2);
     for (const limit of status.limits) {
       expect(limit.resetsAt).toBe(oneHour.toISOString());
     }
   });
 
-  test('clamps reset time exactly at the cap boundary', () => {
+  test('clamps reset time exactly at the cap boundary', async () => {
     const now = Date.now();
     // Exactly at the cap — should NOT be clamped
     const exactlyAtCap = new Date(now + RATE_LIMIT_MAXIMUM_CAP_MS);
     daemon.handleRateLimitDetected('claude', exactlyAtCap);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     expect(status.limits).toHaveLength(2);
 
     for (const limit of status.limits) {
@@ -4892,13 +5211,13 @@ describe('handleRateLimitDetected - maximum cap', () => {
     }
   });
 
-  test('clamps reset time just above the cap', () => {
+  test('clamps reset time just above the cap', async () => {
     const now = Date.now();
     // 25 hours from now — just above the 24-hour cap
     const justAboveCap = new Date(now + 25 * 60 * 60 * 1000);
     daemon.handleRateLimitDetected('claude', justAboveCap);
 
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     expect(status.limits).toHaveLength(2);
 
     for (const limit of status.limits) {
@@ -5119,7 +5438,7 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
     });
 
     // No rate limits before recovery
-    let status = daemon.getRateLimitStatus();
+    let status = await daemon.getRateLimitStatus();
     expect(status.limits).toHaveLength(0);
 
     // Trigger orphan recovery
@@ -5133,7 +5452,7 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
     await new Promise(resolve => setTimeout(resolve, 50));
 
     // Rate limits should be applied to all executables in the fallback chain
-    status = daemon.getRateLimitStatus();
+    status = await daemon.getRateLimitStatus();
     expect(status.limits.length).toBeGreaterThanOrEqual(1);
     expect(status.isPaused).toBe(true);
   });
@@ -5263,7 +5582,7 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
     });
 
     // No rate limits before recovery
-    let status = daemon.getRateLimitStatus();
+    let status = await daemon.getRateLimitStatus();
     expect(status.limits).toHaveLength(0);
 
     // Trigger orphan recovery
@@ -5278,7 +5597,7 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
     await new Promise(resolve => setTimeout(resolve, 50));
 
     // Rate limits should be applied to all executables in the fallback chain
-    status = daemon.getRateLimitStatus();
+    status = await daemon.getRateLimitStatus();
     expect(status.limits.length).toBeGreaterThanOrEqual(1);
     expect(status.isPaused).toBe(true);
   });
@@ -5322,7 +5641,7 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
     });
 
     // No rate limits before recovery
-    let status = daemon.getRateLimitStatus();
+    let status = await daemon.getRateLimitStatus();
     expect(status.limits).toHaveLength(0);
 
     // Trigger orphan recovery
@@ -5338,7 +5657,7 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
 
     // Rate limits should be applied — the parsed reset time from the message
     // should differ from the 1-hour fallback (RAPID_EXIT_FALLBACK_RESET_MS)
-    status = daemon.getRateLimitStatus();
+    status = await daemon.getRateLimitStatus();
     expect(status.limits.length).toBeGreaterThanOrEqual(1);
     expect(status.isPaused).toBe(true);
 
@@ -5389,7 +5708,7 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
 
     try {
       // No rate limits before recovery
-      expect(wrapperDaemon.getRateLimitStatus().limits).toHaveLength(0);
+      expect((await wrapperDaemon.getRateLimitStatus()).limits).toHaveLength(0);
 
       // Trigger orphan recovery (fresh spawn on the worker's own executable)
       const result = await wrapperDaemon.recoverOrphanedAssignments();
@@ -5408,7 +5727,7 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
       await new Promise(resolve => setTimeout(resolve, 50));
 
       // Only the wrapper account is limited — 'claude' is NOT marked
-      const status = wrapperDaemon.getRateLimitStatus();
+      const status = await wrapperDaemon.getRateLimitStatus();
       const limitedKeys = status.limits.map(l => l.executable);
       expect(limitedKeys).toEqual([wrapperKey]);
       expect(limitedKeys).not.toContain(normalizeExecutableKey('claude'));
@@ -5929,7 +6248,7 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     await createTaskWithRateLimitPattern('Rate limited task - tracker test', workerId);
 
     // Verify no rate limits are recorded before recovery runs
-    const beforeStatus = daemon.getRateLimitStatus();
+    const beforeStatus = await daemon.getRateLimitStatus();
     expect(beforeStatus.isPaused).toBe(false);
     expect(beforeStatus.limits).toHaveLength(0);
 
@@ -5941,7 +6260,7 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     expect(sessionManager.startSession).not.toHaveBeenCalled();
 
     // Rate limit SHOULD be recorded in the tracker
-    const afterStatus = daemon.getRateLimitStatus();
+    const afterStatus = await daemon.getRateLimitStatus();
     expect(afterStatus.isPaused).toBe(true);
     expect(afterStatus.limits.length).toBeGreaterThanOrEqual(1);
     expect(afterStatus.limits[0].executable).toBe('claude');
@@ -5971,7 +6290,7 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     expect(sessionManager.startSession).not.toHaveBeenCalled();
 
     // Only the account the rapid-exit sessions ran on is limited
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     const limitedKeys = status.limits.map(l => l.executable);
     expect(limitedKeys).toEqual(['claude-glm']);
     expect(limitedKeys).not.toContain('claude');
@@ -5998,7 +6317,7 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     expect(result.processed).toBe(0);
 
     // The assignee's account (claude-glm) is limited via the fallback
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     expect(status.limits.map(l => l.executable)).toEqual(['claude-glm']);
   });
 
@@ -6015,7 +6334,7 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     expect(result1.processed).toBe(0);
 
     // After recording rate limit, daemon should be paused
-    const status = daemon.getRateLimitStatus();
+    const status = await daemon.getRateLimitStatus();
     expect(status.isPaused).toBe(true);
 
     // Second cycle: since daemon is paused, the task should be skipped

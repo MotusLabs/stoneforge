@@ -525,12 +525,16 @@ export interface DispatchDaemon {
 
   /**
    * Returns the current rate limit status for the daemon.
+   *
+   * `isPaused` is true only when every enabled ephemeral worker's account
+   * key is currently limited (design D7). `limits` lists the limited
+   * account keys with their reset times, whether or not dispatch is paused.
    */
-  getRateLimitStatus(): {
+  getRateLimitStatus(): Promise<{
     isPaused: boolean;
     limits: Array<{ executable: string; resetsAt: string }>;
     soonestReset?: string;
-  };
+  }>;
 
   /**
    * Manually put the daemon to sleep until the specified time.
@@ -849,27 +853,50 @@ export class DispatchDaemonImpl implements DispatchDaemon {
 
   /**
    * Returns whether dispatch is paused due to rate limiting.
-   * When a fallback chain is configured, dispatch is paused only when all
-   * executables in the chain are limited. Otherwise, dispatch is paused when
-   * any tracked executable is limited (i.e. there are active limits).
+   *
+   * Design D7 (worker dispatch tiers): dispatch is paused only when **every**
+   * enabled ephemeral worker's account key (`resolveAccountKey`) is currently
+   * limited. A partial limit — some accounts limited while at least one
+   * eligible worker's account is not — does not pause dispatch: the daemon
+   * falls through to the workers on unlimited accounts.
+   *
+   * Busy/idle state is ignored: a busy worker on an unlimited account still
+   * counts as an account that is not limited. Disabled workers are excluded.
+   * With no enabled ephemeral workers there is nothing to dispatch, so
+   * dispatch is not reported as paused.
    *
    * This is the single source of truth used by both `getRateLimitStatus()`
    * and `runPollCycle()`.
    */
-  private isDispatchPaused(): boolean {
-    const fallbackChain = this.settingsService?.getAgentDefaults().fallbackChain ?? [];
-    return fallbackChain.length > 0
-      ? this.rateLimitTracker.isAllLimited(fallbackChain)
-      : this.rateLimitTracker.getAllLimits().length > 0;
+  private async isDispatchPaused(): Promise<boolean> {
+    const workers = await this.agentRegistry.listAgents({
+      role: 'worker',
+      workerMode: 'ephemeral',
+    });
+
+    let sawEnabledWorker = false;
+    for (const worker of workers) {
+      if (isAgentDisabled(worker)) continue;
+      sawEnabledWorker = true;
+
+      const accountKey = resolveAccountKey(worker, this.settingsService);
+      if (!this.rateLimitTracker.isLimited(accountKey)) {
+        // At least one eligible worker has an unlimited account — dispatch
+        // can fall through to it, so we are not paused.
+        return false;
+      }
+    }
+
+    return sawEnabledWorker;
   }
 
-  getRateLimitStatus(): {
+  async getRateLimitStatus(): Promise<{
     isPaused: boolean;
     limits: Array<{ executable: string; resetsAt: string }>;
     soonestReset?: string;
-  } {
+  }> {
     const allLimits = this.rateLimitTracker.getAllLimits();
-    const isPaused = this.isDispatchPaused();
+    const isPaused = await this.isDispatchPaused();
     const soonestReset = this.rateLimitTracker.getSoonestResetTime();
 
     return {
@@ -2119,7 +2146,9 @@ export class DispatchDaemonImpl implements DispatchDaemon {
     try {
       // Check if dispatch is paused due to rate limiting.
       // When paused, skip dispatch-related polls but still run non-dispatch work.
-      const allLimited = this.isDispatchPaused();
+      // Paused means every enabled ephemeral worker's account is limited (D7) —
+      // a single limited tier must not stop the whole poll.
+      const allLimited = await this.isDispatchPaused();
 
       if (allLimited) {
         // Schedule a wake-up timer so we re-check when the soonest limit expires

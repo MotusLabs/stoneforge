@@ -4,12 +4,53 @@
  * Displays a warning banner between the header and main content area when the daemon
  * is sleeping due to rate limits. Shows the wake-up time, a "Wake Now" button, and
  * a dismiss (X) button. Automatically reappears if a new rate limit event occurs.
+ *
+ * Visibility follows the daemon's paused definition (worker dispatch tiers,
+ * design D7): the banner is shown only when the status reports `isPaused`,
+ * which is true only when every enabled ephemeral worker's account is
+ * limited. A partial limit (some accounts limited, at least one still
+ * available) leaves the banner hidden.
  */
 
-import { useState, useMemo } from 'react';
+import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Clock, X, Loader2, Settings } from 'lucide-react';
 import { useDaemonStatus, useWakeDaemon } from '../../api/hooks';
+
+/**
+ * Shape of the daemon-status payload the banner cares about.
+ * Matches `DaemonStatusResponse['rateLimit']` from `api/hooks/useDaemon`.
+ */
+export interface RateLimitBannerStatus {
+  rateLimit?: {
+    isPaused?: boolean;
+    limits?: Array<{ executable: string; resetsAt: string }>;
+    soonestReset?: string;
+  };
+}
+
+/**
+ * Decides whether the rate-limit banner should be visible for a given
+ * daemon-status payload and dismiss state.
+ *
+ * Hidden when the status is missing, when `isPaused` is false (partial
+ * limit — at least one eligible worker's account is still unlimited), or
+ * when the user dismissed the banner for the current `soonestReset` value.
+ * A later rate-limit event changes `soonestReset`, which re-shows the banner.
+ */
+export function shouldShowRateLimitBanner(
+  status: RateLimitBannerStatus | undefined | null,
+  dismissedUntil: string | null
+): boolean {
+  if (status?.rateLimit?.isPaused !== true) {
+    return false;
+  }
+  const soonestReset = status.rateLimit.soonestReset;
+  if (dismissedUntil && soonestReset && dismissedUntil === soonestReset) {
+    return false;
+  }
+  return true;
+}
 
 /**
  * Formats an ISO date string into a human-readable time string.
@@ -46,18 +87,12 @@ export function RateLimitBanner() {
   // When soonestReset changes (new rate limit event), the banner reappears.
   const [dismissedUntil, setDismissedUntil] = useState<string | null>(null);
 
-  const isPaused = status?.rateLimit?.isPaused === true;
   const soonestReset = status?.rateLimit?.soonestReset;
   const limits = status?.rateLimit?.limits ?? [];
 
-  // Determine if the banner was dismissed for the current sleep session
-  const isDismissed = useMemo(() => {
-    if (!dismissedUntil || !soonestReset) return false;
-    return dismissedUntil === soonestReset;
-  }, [dismissedUntil, soonestReset]);
-
-  // Don't render anything if not rate-limited or dismissed
-  if (!isPaused || isDismissed) {
+  // Don't render anything if not paused (partial limit) or dismissed
+  const isVisible = shouldShowRateLimitBanner(status, dismissedUntil);
+  if (!isVisible) {
     return null;
   }
 

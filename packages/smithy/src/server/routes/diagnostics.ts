@@ -132,12 +132,12 @@ async function collectDiagnostics(services: Services): Promise<DiagnosticsRespon
 // Rate Limit Diagnostics
 // ============================================================================
 
-function collectRateLimits(services: Services): DiagnosticsResponse['rateLimits'] {
+async function collectRateLimits(services: Services): Promise<DiagnosticsResponse['rateLimits']> {
   if (!services.dispatchDaemon) {
     return { isPaused: false, limits: [] };
   }
 
-  const status = services.dispatchDaemon.getRateLimitStatus();
+  const status = await services.dispatchDaemon.getRateLimitStatus();
   return {
     isPaused: status.isPaused,
     limits: status.limits.map((l) => ({

@@ -29,7 +29,7 @@ export function createDaemonRoutes(services: Services) {
   const app = new Hono();
 
   // GET /api/daemon/status
-  app.get('/api/daemon/status', (c) => {
+  app.get('/api/daemon/status', async (c) => {
     if (!dispatchDaemon) {
       return c.json({
         isRunning: false,
@@ -40,7 +40,7 @@ export function createDaemonRoutes(services: Services) {
     }
 
     const config = dispatchDaemon.getConfig();
-    const rateLimitStatus = dispatchDaemon.getRateLimitStatus();
+    const rateLimitStatus = await dispatchDaemon.getRateLimitStatus();
     return c.json({
       isRunning: dispatchDaemon.isRunning(),
       available: true,

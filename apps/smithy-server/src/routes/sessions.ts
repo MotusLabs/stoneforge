@@ -246,7 +246,7 @@ export function createSessionRoutes(
       // Rate limit guard: reject when all executables are rate-limited.
       // Returns 429 with Retry-After header set to the soonest reset time.
       if (dispatchDaemon) {
-        const rateLimitStatus = dispatchDaemon.getRateLimitStatus();
+        const rateLimitStatus = await dispatchDaemon.getRateLimitStatus();
         if (rateLimitStatus.isPaused) {
           const retryAfterSeconds = rateLimitStatus.soonestReset
             ? Math.max(1, Math.ceil((new Date(rateLimitStatus.soonestReset).getTime() - Date.now()) / 1000))
@@ -566,7 +566,7 @@ Please begin working on this task. Use \`sf task get ${taskResult.id}\` to see f
       // Rate limit guard: reject when all executables are rate-limited.
       // Returns 429 with Retry-After header set to the soonest reset time.
       if (dispatchDaemon) {
-        const rateLimitStatus = dispatchDaemon.getRateLimitStatus();
+        const rateLimitStatus = await dispatchDaemon.getRateLimitStatus();
         if (rateLimitStatus.isPaused) {
           const retryAfterSeconds = rateLimitStatus.soonestReset
             ? Math.max(1, Math.ceil((new Date(rateLimitStatus.soonestReset).getTime() - Date.now()) / 1000))
