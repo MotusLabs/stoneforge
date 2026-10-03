@@ -76,6 +76,11 @@ export interface SessionRecord {
   readonly endedAt?: Timestamp;
   /** Reason for termination (if applicable) */
   readonly terminationReason?: string;
+  /**
+   * Terminal provider error reported by the provider (e.g. an API
+   * authentication failure), if the session ended because of one.
+   */
+  readonly lastError?: string;
 }
 
 /**
@@ -195,6 +200,13 @@ export interface SessionHistoryEntry {
   readonly workingDirectory: string;
   /** Worktree path */
   readonly worktree?: string;
+  /**
+   * Terminal provider error that ended this session (e.g. an API
+   * authentication failure reported by the provider), if known. Preserved on
+   * the history entry so the cause of a dead session survives the session
+   * itself — recovery and merge-failure reporting read it back.
+   */
+  readonly lastError?: string;
   /** Session started timestamp */
   readonly startedAt?: Timestamp;
   /** Session ended timestamp */
@@ -1393,11 +1405,13 @@ export class SessionManagerImpl implements SessionManager {
    * Transitions it to 'terminated' and schedules memory cleanup.
    */
   private cleanupDeadSession(session: InternalSessionState): void {
+    const providerError = this.getSessionProviderError(session.id);
     const updated: InternalSessionState = {
       ...session,
       status: 'terminated',
       endedAt: createTimestamp(),
-      terminationReason: 'Process no longer alive (PID check)',
+      terminationReason: providerError ? `Provider error: ${providerError}` : 'Process no longer alive (PID check)',
+      lastError: providerError ?? session.lastError,
       persisted: false,
     };
     this.sessions.set(session.id, updated);
@@ -1406,9 +1420,44 @@ export class SessionManagerImpl implements SessionManager {
     }
     this.addToHistory(session.agentId, updated);
     this.registry.updateAgentSession(session.agentId, undefined, 'idle').catch(() => {});
+    if (providerError) {
+      this.logSessionExitFailure(updated, providerError);
+    }
     this.persistSession(session.id).then(() => {
       this.scheduleTerminatedSessionCleanup(session.id);
     }).catch(() => {});
+  }
+
+  /**
+   * Reads the terminal provider error recorded by the spawner for a session,
+   * if any. Returns undefined once the spawner has discarded the session.
+   */
+  private getSessionProviderError(sessionId: string): string | undefined {
+    try {
+      return this.spawner.getSession(sessionId)?.lastError;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Persists a session exit failure to the operation log so deaths that the
+   * poll loops would otherwise only observe as "agent has no active session"
+   * leave a durable, queryable trace (`sf log -c session`).
+   */
+  private logSessionExitFailure(session: InternalSessionState, providerError: string): void {
+    this.operationLog?.write(
+      'error',
+      'session',
+      `Session ${session.id} for agent ${session.agentId} (${session.agentRole ?? 'agent'}) failed: ${providerError}`,
+      {
+        agentId: session.agentId,
+        sessionId: session.id,
+        agentRole: session.agentRole,
+        providerSessionId: session.providerSessionId,
+        error: providerError,
+      }
+    );
   }
 
   private setupSpawnerEventHandlers(): void {
@@ -1485,8 +1534,14 @@ export class SessionManagerImpl implements SessionManager {
       if (currentSession && currentSession.status !== 'terminated' && currentSession.status !== 'suspended') {
         console.log(`[session-manager] Cleaning up ${currentSession.status} session ${session.id} for agent ${session.agentId}`);
 
+        // Capture why the session ended, when the provider said so. Without
+        // this the exit is indistinguishable from any other process death.
+        const providerError = this.getSessionProviderError(session.id);
+
         // Log unexpected session exits (non-zero exit code or signal)
-        if (code !== null && code !== 0) {
+        if (providerError) {
+          this.operationLog?.write('error', 'session', `Session ${session.id} exited with code ${code}${providerError ? `: ${providerError}` : ''}`, { agentId: session.agentId, sessionId: session.id, exitCode: code, error: providerError });
+        } else if (code !== null && code !== 0) {
           this.operationLog?.write('error', 'session', `Session ${session.id} exited with code ${code}`, { agentId: session.agentId, sessionId: session.id, exitCode: code });
         } else if (signal) {
           this.operationLog?.write('warn', 'session', `Session ${session.id} killed by signal ${signal}`, { agentId: session.agentId, sessionId: session.id, signal });
@@ -1496,6 +1551,8 @@ export class SessionManagerImpl implements SessionManager {
           ...currentSession,
           status: 'terminated',
           endedAt: createTimestamp(),
+          terminationReason: providerError ? `Provider error: ${providerError}` : currentSession.terminationReason,
+          lastError: providerError ?? currentSession.lastError,
           persisted: false,
         };
         this.sessions.set(session.id, updatedSession);
@@ -1624,6 +1681,7 @@ export class SessionManagerImpl implements SessionManager {
       lastActivityAt: session.lastActivityAt,
       endedAt: session.endedAt,
       terminationReason: session.terminationReason,
+      lastError: session.lastError,
     };
   }
 
@@ -1637,6 +1695,7 @@ export class SessionManagerImpl implements SessionManager {
       startedAt: session.startedAt,
       endedAt: session.endedAt,
       terminationReason: session.terminationReason,
+      lastError: session.lastError,
     };
 
     const history = this.sessionHistory.get(agentId) ?? [];

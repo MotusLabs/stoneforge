@@ -48,11 +48,13 @@ import { clearExecutableResolutionCache, normalizeExecutableKey } from '../utils
 import { createAgentRegistry, getAgentMetadata, type AgentRegistry, type AgentEntity } from './agent-registry.js';
 import { createTaskAssignmentService, type TaskAssignmentService } from './task-assignment-service.js';
 import { createDispatchService, type DispatchService } from './dispatch-service.js';
-import type { SessionManager, SessionRecord, StartSessionOptions } from '../runtime/session-manager.js';
+import type { SessionManager, SessionRecord, StartSessionOptions, SessionHistoryEntry } from '../runtime/session-manager.js';
 import type { WorktreeManager, CreateWorktreeResult, CreateWorktreeOptions } from '../git/worktree-manager.js';
 import type { StewardScheduler } from './steward-scheduler.js';
 import type { RateLimitTracker } from './rate-limit-tracker.js';
 import { getOrchestratorTaskMeta, updateOrchestratorTaskMeta, appendTaskSessionHistory, type TaskSessionHistoryEntry } from '../types/task-meta.js';
+import { createOperationLogService, type OperationLogService, type OperationLogEntry } from './operation-log-service.js';
+import { getProviderRegistry } from '../providers/registry.js';
 
 // Mock ensureTargetBranchExists to prevent real git remote operations in tests.
 // Injected via DispatchDaemonConfig to avoid mock.module() which leaks globally in Bun.
@@ -970,7 +972,12 @@ describe('recoverOrphanedAssignments - merge steward recovery', () => {
   async function createOrphanedStewardTask(
     title: string,
     stewardId: EntityId,
-    meta?: { sessionId?: string; worktree?: string; stewardRecoveryCount?: number }
+    meta?: {
+      sessionId?: string;
+      worktree?: string;
+      stewardRecoveryCount?: number;
+      sessionHistory?: readonly TaskSessionHistoryEntry[];
+    }
   ): Promise<Task> {
     const task = await createTask({
       title,
@@ -988,10 +995,30 @@ describe('recoverOrphanedAssignments - merge steward recovery', () => {
         worktree: meta?.worktree,
         branch: 'agent/worker/task-branch',
         stewardRecoveryCount: meta?.stewardRecoveryCount,
+        ...(meta?.sessionHistory ? { sessionHistory: meta.sessionHistory } : {}),
       }),
     });
 
     return (await api.get<Task>(saved.id))!;
+  }
+
+  /**
+   * Builds a session-history entry as the task metadata recorder would write it.
+   */
+  function historyEntry(
+    agentId: EntityId,
+    agentName: string,
+    agentRole: 'worker' | 'steward',
+    providerSessionId: string
+  ): TaskSessionHistoryEntry {
+    return {
+      sessionId: `internal-${providerSessionId}`,
+      providerSessionId,
+      agentId,
+      agentName,
+      agentRole,
+      startedAt: createTimestamp(),
+    };
   }
 
   test('recovers orphaned merge steward', async () => {
@@ -1001,6 +1028,8 @@ describe('recoverOrphanedAssignments - merge steward recovery', () => {
     await createOrphanedStewardTask('Orphaned review task', stewardId, {
       sessionId: 'steward-prev-session',
       worktree: '/worktrees/worker/task',
+      // The session must belong to this steward for resume to be attempted
+      sessionHistory: [historyEntry(stewardId, 'orphan-merge-steward', 'steward', 'steward-prev-session')],
     });
 
     const result = await daemon.recoverOrphanedAssignments();
@@ -1041,6 +1070,8 @@ describe('recoverOrphanedAssignments - merge steward recovery', () => {
     const task = await createOrphanedStewardTask('Review task with stale session', stewardId, {
       sessionId: 'stale-steward-session',
       worktree: '/worktrees/worker/task', // Worktree required for spawnMergeStewardForTask fallback
+      // The stale session belongs to this steward, so resume is attempted (and fails)
+      sessionHistory: [historyEntry(stewardId, 'resume-fail-steward', 'steward', 'stale-steward-session')],
     });
 
     // Mock resumeSession to throw
@@ -1164,6 +1195,8 @@ describe('recoverOrphanedAssignments - merge steward recovery', () => {
       sessionId: 'steward-below-session',
       worktree: '/worktrees/worker/task',
       stewardRecoveryCount: 2,
+      // The session belongs to this steward, so normal recovery resumes it
+      sessionHistory: [historyEntry(stewardId, 'below-max-steward', 'steward', 'steward-below-session')],
     });
 
     const result = await daemon.recoverOrphanedAssignments();
@@ -1187,6 +1220,322 @@ describe('recoverOrphanedAssignments - merge steward recovery', () => {
       })
     );
   });
+});
+
+describe('merge steward spawn failures — observability and resume validity', () => {
+  /**
+   * Regression tests for the 2026-10-03 outage: every merge failed from 04:59Z
+   * onwards. The merge steward had been switched to the codex provider, whose
+   * CLI was installed but unauthenticated, so every session started and then
+   * died ~15s later on its first turn (`401 Unauthorized`). Recovery resumed
+   * the dead session until the budget ran out and reported only "Steward
+   * recovery limit reached" — and because the operation log service was never
+   * wired into the daemon, nothing appeared in `sf log` at all.
+   *
+   * These tests pin the fixes: truthful failure reasons that name the provider
+   * error, operation-log coverage for spawn/recovery/merge failure, refusal to
+   * resume a session that belongs to another agent, and a provider readiness
+   * gate so an unauthenticated provider is never spawned into.
+   */
+
+  let api: QuarryAPI;
+  let inboxService: InboxService;
+  let agentRegistry: AgentRegistry;
+  let taskAssignment: TaskAssignmentService;
+  let dispatchService: DispatchService;
+  let sessionManager: SessionManager;
+  let worktreeManager: WorktreeManager;
+  let stewardScheduler: StewardScheduler;
+  let daemon: DispatchDaemon;
+  let operationLog: OperationLogService;
+  let testDbPath: string;
+  let systemEntity: EntityId;
+
+  /** Session-history entries the (mocked) session manager reports for the steward. */
+  let stewardSessionHistory: SessionHistoryEntry[];
+
+  beforeEach(async () => {
+    testDbPath = `/tmp/dispatch-daemon-steward-observability-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const storage = createStorage({ path: testDbPath, create: true });
+    initializeSchema(storage);
+
+    api = createQuarryAPI(storage);
+    inboxService = createInboxService(storage);
+    agentRegistry = createAgentRegistry(api);
+    taskAssignment = createTaskAssignmentService(api);
+    dispatchService = createDispatchService(api, taskAssignment, agentRegistry);
+    operationLog = createOperationLogService(storage);
+    sessionManager = createMockSessionManager();
+    worktreeManager = createMockWorktreeManager();
+    stewardScheduler = createMockStewardScheduler();
+    stewardSessionHistory = [];
+
+    // Report the configured history so the daemon can read back why the last
+    // steward session died (mirrors what SessionManagerImpl persists).
+    (sessionManager.getSessionHistory as ReturnType<typeof mock>).mockImplementation(
+      async () => stewardSessionHistory
+    );
+
+    const { createEntity, EntityTypeValue } = await import('@stoneforge/core');
+    const entity = await createEntity({
+      name: 'test-system',
+      entityType: EntityTypeValue.SYSTEM,
+      createdBy: 'system:test' as EntityId,
+    });
+    const saved = await api.create(entity as unknown as Record<string, unknown> & { createdBy: EntityId });
+    systemEntity = saved.id as unknown as EntityId;
+
+    const config: DispatchDaemonConfig = {
+      ensureTargetBranchExists: mockEnsureTargetBranchExists,
+      pollIntervalMs: 100,
+      workerAvailabilityPollEnabled: false,
+      inboxPollEnabled: false,
+      stewardTriggerPollEnabled: false,
+      workflowTaskPollEnabled: false,
+      orphanRecoveryEnabled: true,
+    };
+
+    daemon = createDispatchDaemon(
+      api,
+      agentRegistry,
+      sessionManager,
+      dispatchService,
+      worktreeManager,
+      taskAssignment,
+      stewardScheduler,
+      inboxService,
+      config,
+      undefined,
+      undefined,
+      operationLog
+    );
+  });
+
+  afterEach(async () => {
+    await daemon.stop();
+    if (fs.existsSync(testDbPath)) {
+      fs.unlinkSync(testDbPath);
+    }
+  });
+
+  async function createTestSteward(name: string): Promise<AgentEntity> {
+    return agentRegistry.registerSteward({
+      name,
+      stewardFocus: 'merge',
+      createdBy: systemEntity,
+      maxConcurrentTasks: 1,
+    });
+  }
+
+  async function createReviewTask(
+    title: string,
+    stewardId: EntityId,
+    meta: {
+      sessionId?: string;
+      stewardRecoveryCount?: number;
+      sessionHistory?: readonly TaskSessionHistoryEntry[];
+    }
+  ): Promise<Task> {
+    const task = await createTask({
+      title,
+      createdBy: systemEntity,
+      status: TaskStatus.REVIEW,
+      assignee: stewardId,
+    });
+    const saved = (await api.create(task as unknown as Record<string, unknown> & { createdBy: EntityId })) as Task;
+
+    await api.update(saved.id, {
+      metadata: updateOrchestratorTaskMeta(undefined, {
+        assignedAgent: stewardId,
+        mergeStatus: 'testing',
+        sessionId: meta.sessionId,
+        worktree: '/worktrees/worker/task',
+        branch: 'agent/worker/task-branch',
+        stewardRecoveryCount: meta.stewardRecoveryCount,
+        ...(meta.sessionHistory ? { sessionHistory: meta.sessionHistory } : {}),
+      }),
+    });
+
+    return (await api.get<Task>(saved.id))!;
+  }
+
+  function logEntries(category?: string): OperationLogEntry[] {
+    return operationLog.query({ limit: 100 }).filter((entry) => !category || entry.category === category);
+  }
+
+  test('reports the provider error in mergeFailureReason when the recovery limit is reached', async () => {
+    const steward = await createTestSteward('dying-steward');
+    const stewardId = steward.id as unknown as EntityId;
+
+    const providerSessionId = 'codex-thread-1';
+    const providerError = 'unexpected status 401 Unauthorized: Missing bearer or basic authentication in header';
+
+    // The session manager reports the steward's last session as having died
+    // with a provider error — what SessionManagerImpl records from the
+    // spawner's `lastError` when a provider rejects the session.
+    stewardSessionHistory = [
+      {
+        id: 'session-died-1',
+        providerSessionId,
+        status: 'terminated',
+        workingDirectory: '/worktrees/worker/task',
+        startedAt: createTimestamp(),
+        endedAt: createTimestamp(),
+        terminationReason: `Provider error: ${providerError}`,
+        lastError: providerError,
+      },
+    ];
+
+    const task = await createReviewTask('Task whose steward dies at spawn', stewardId, {
+      sessionId: providerSessionId,
+      stewardRecoveryCount: 3, // already at the limit
+      sessionHistory: [historyEntryForSteward(stewardId, 'dying-steward', providerSessionId)],
+    });
+
+    const result = await daemon.recoverOrphanedAssignments();
+
+    expect(result.processed).toBe(1);
+
+    const updatedTask = await api.get<Task>(task.id);
+    const meta = getOrchestratorTaskMeta(updatedTask!.metadata as Record<string, unknown>);
+    expect(meta!.mergeStatus).toBe('failed');
+    // The reason must name the actual cause, not just "recovery limit reached"
+    expect(meta!.mergeFailureReason).toContain('Steward recovery limit reached after 3 attempts');
+    expect(meta!.mergeFailureReason).toContain('401 Unauthorized');
+
+    // ... and the terminal failure must be in the operation log
+    const mergeFailures = logEntries('merge').filter((e) => e.level === 'error');
+    expect(mergeFailures.length).toBeGreaterThan(0);
+    expect(mergeFailures[0]!.message).toContain('401 Unauthorized');
+    expect(mergeFailures[0]!.taskId).toBe(task.id);
+  });
+
+  test('writes steward recovery attempts to the operation log (not silent)', async () => {
+    const steward = await createTestSteward('logged-steward');
+    const stewardId = steward.id as unknown as EntityId;
+
+    await createReviewTask('Task with recoverable steward', stewardId, {
+      sessionId: 'steward-own-session',
+      sessionHistory: [historyEntryForSteward(stewardId, 'logged-steward', 'steward-own-session')],
+    });
+
+    await daemon.recoverOrphanedAssignments();
+
+    const recoveryEntries = logEntries('recovery').filter((e) =>
+      e.message.includes('Recovering orphaned steward task')
+    );
+    expect(recoveryEntries.length).toBeGreaterThan(0);
+    expect(recoveryEntries[0]!.agentId).toBe(stewardId);
+    expect(recoveryEntries[0]!.message).toContain('attempt 1/3');
+  });
+
+  test('does not resume a provider session that belongs to the worker, and fresh-spawns instead', async () => {
+    const steward = await createTestSteward('fresh-spawn-steward');
+    const stewardId = steward.id as unknown as EntityId;
+
+    // The task's orchestrator.sessionId is still the WORKER's session (the
+    // steward never got to overwrite it). Resuming it would attach the steward
+    // to the worker's conversation.
+    const workerSessionId = 'worker-session-abc';
+    const task = await createReviewTask('Task with worker session id', stewardId, {
+      sessionId: workerSessionId,
+      sessionHistory: [historyEntryForSteward(systemEntity, 'the-worker', workerSessionId, 'worker')],
+    });
+
+    await daemon.recoverOrphanedAssignments();
+
+    // Must NOT have resumed the worker's session as the steward
+    expect(sessionManager.resumeSession).not.toHaveBeenCalled();
+
+    // Must have fresh-spawned the steward instead
+    expect(sessionManager.startSession).toHaveBeenCalledWith(
+      stewardId,
+      expect.objectContaining({ interactive: false })
+    );
+
+    // ... and cleared the foreign session id on the task
+    const updatedTask = await api.get<Task>(task.id);
+    const meta = getOrchestratorTaskMeta(updatedTask!.metadata as Record<string, unknown>);
+    expect(meta!.sessionId).not.toBe(workerSessionId);
+
+    // The skip is visible in the operation log
+    const skipped = logEntries('recovery').filter((e) => e.message.includes('does not belong'));
+    expect(skipped.length).toBe(1);
+    expect(skipped[0]!.taskId).toBe(task.id);
+  });
+
+  test('refuses to spawn a steward whose provider is not ready, without spending the recovery budget', async () => {
+    // Register a provider that is installed but cannot authenticate — the
+    // exact shape of the codex CLI in the outage.
+    const registry = getProviderRegistry();
+    const providerName = `unready-provider-${Date.now()}`;
+    const readinessIssue = 'Codex CLI is not authenticated: no auth.json and no OPENAI_API_KEY set. Run `codex login`.';
+    registry.register({
+      name: providerName,
+      headless: {} as never,
+      interactive: {} as never,
+      isAvailable: async () => true,
+      getInstallInstructions: () => 'Install it',
+      getReadinessIssue: async () => readinessIssue,
+      listModels: async () => [],
+    });
+
+    const steward = await agentRegistry.registerSteward({
+      name: 'unready-provider-steward',
+      stewardFocus: 'merge',
+      createdBy: systemEntity,
+      maxConcurrentTasks: 1,
+      provider: providerName,
+    });
+    const stewardId = steward.id as unknown as EntityId;
+
+    const task = await createReviewTask('Task waiting on an unready provider', stewardId, {
+      stewardRecoveryCount: 0,
+    });
+
+    const result = await daemon.recoverOrphanedAssignments();
+
+    // No session was spawned into the broken provider...
+    expect(sessionManager.startSession).not.toHaveBeenCalled();
+    expect(sessionManager.resumeSession).not.toHaveBeenCalled();
+
+    // ...the recovery budget was NOT spent (this is an environment problem)...
+    const updatedTask = await api.get<Task>(task.id);
+    const meta = getOrchestratorTaskMeta(updatedTask!.metadata as Record<string, unknown>);
+    expect(meta!.stewardRecoveryCount ?? 0).toBe(0);
+    expect(meta!.mergeStatus).toBe('testing');
+
+    // ...and the refusal is in the operation log with the actionable reason.
+    const refusal = logEntries('steward').filter((e) => e.level === 'error' && e.message.includes('Cannot spawn merge steward'));
+    expect(refusal.length).toBeGreaterThan(0);
+    expect(refusal[0]!.message).toContain('codex login');
+    expect(refusal[0]!.agentId).toBe(stewardId);
+
+    // Polling again does not spam the log: the report is deduplicated.
+    await daemon.recoverOrphanedAssignments();
+    const refusalsAfterSecondPoll = logEntries('steward').filter(
+      (e) => e.level === 'error' && e.message.includes('Cannot spawn merge steward')
+    );
+    expect(refusalsAfterSecondPoll.length).toBe(refusal.length);
+
+    expect(result.processed).toBe(0);
+  });
+
+  function historyEntryForSteward(
+    agentId: EntityId,
+    agentName: string,
+    providerSessionId: string,
+    role: 'worker' | 'steward' = 'steward'
+  ): TaskSessionHistoryEntry {
+    return {
+      sessionId: `internal-${providerSessionId}`,
+      providerSessionId,
+      agentId,
+      agentName,
+      agentRole: role,
+      startedAt: createTimestamp(),
+    };
+  }
 });
 
 describe('reconcileClosedUnmergedTasks', () => {

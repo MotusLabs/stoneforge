@@ -1,0 +1,5 @@
+---
+"@stoneforge/smithy": patch
+---
+
+Wire the operation log into the orchestrator servers so `sf log` actually records events. `createOperationLogService()` was exported but never constructed by any server, so every `operationLog?.write(…)` in the dispatch daemon and session manager was a silent no-op and the `operation_log` table stayed empty — during the 2026-10-03 merge outage, `sf log -c merge|steward|recovery` showed nothing at all. Both `apps/smithy-server` and the package-level server now build the service from the storage backend, pass it to `createDispatchDaemon()` and `createMergeStewardService()`, and inject it into the session manager via `setOperationLog()`. The app server also now constructs and passes the `SettingsService` it was already able to accept (its absence made fallback-chain and rate-limit account-key resolution silently degrade). The dispatch daemon additionally records merge-steward spawns, recovery attempts, resume failures and terminal merge failures to the log.

@@ -28,6 +28,7 @@ import {
   createMergeStewardService,
   createDocsStewardService,
   createSettingsService,
+  createOperationLogService,
   createMetricsService,
   createCostService,
   createRateLimitTracker,
@@ -158,6 +159,12 @@ export async function initializeServices(options: ServicesOptions = {}): Promise
   // Create settings service early so it can be injected into session manager
   const settingsService = createSettingsService(storageBackend);
 
+  // Persistent operation log (`sf log`). Every `operationLog?.write(…)` in the
+  // dispatch daemon and session manager is a silent no-op unless this service
+  // is constructed and injected — an entire class of failures (steward spawns
+  // dying at startup, recovery loops) then leaves no trace anywhere.
+  const operationLog = createOperationLogService(storageBackend);
+
   // Create metrics service for provider usage tracking
   const metricsService = createMetricsService(storageBackend);
 
@@ -165,6 +172,7 @@ export async function initializeServices(options: ServicesOptions = {}): Promise
   const costService = createCostService(storageBackend);
 
   const sessionManager = createSessionManager(spawnerService, api, agentRegistry, settingsService);
+  sessionManager.setOperationLog(operationLog);
   const sessionInitialPrompts = new Map<string, string>();
 
   // Load session state for all agents to restore session history after restart
@@ -219,7 +227,8 @@ export async function initializeServices(options: ServicesOptions = {}): Promise
       requireApproval,
       mergeRequestProvider: requireApproval ? createGitHubMergeProvider() : undefined,
     },
-    worktreeManager
+    worktreeManager,
+    operationLog
   );
 
   const docsStewardService = createDocsStewardService({
@@ -505,7 +514,8 @@ export async function initializeServices(options: ServicesOptions = {}): Promise
       inboxService,
       { pollIntervalMs: 5000, onSessionStarted, ...configOverrides },
       poolService,
-      settingsService
+      settingsService,
+      operationLog
     );
   } else {
     logger.warn('DispatchDaemon disabled - no git repository');

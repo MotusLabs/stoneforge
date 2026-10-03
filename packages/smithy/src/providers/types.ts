@@ -199,6 +199,19 @@ export interface AgentProvider {
    */
   getInstallInstructions(): string;
 
+  /**
+   * Optional readiness probe: a human-readable reason the provider cannot
+   * run sessions even though it is installed (most commonly missing
+   * credentials), or undefined when it is ready to run sessions.
+   *
+   * Unlike `isAvailable()` (which only checks that the binary/SDK exists),
+   * this catches configurations where every session would start and then die
+   * on its first provider request — e.g. an unauthenticated CLI. Callers
+   * should check it before spawning so they can refuse the spawn with an
+   * actionable message instead of burning sessions that can never work.
+   */
+  getReadinessIssue?(): Promise<string | undefined>;
+
   /** List available models for this provider */
   listModels(): Promise<ModelInfo[]>;
 }

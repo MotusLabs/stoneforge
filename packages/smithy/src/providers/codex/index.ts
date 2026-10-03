@@ -11,12 +11,14 @@ import type { AgentProvider, HeadlessProvider, InteractiveProvider, ModelInfo } 
 import { CodexHeadlessProvider } from './headless.js';
 import { CodexInteractiveProvider } from './interactive.js';
 import { serverManager, type CodexModelInfo } from './server-manager.js';
+import { getCodexCredentialIssue } from './credentials.js';
 
 export { CodexHeadlessProvider } from './headless.js';
 export { CodexInteractiveProvider } from './interactive.js';
 export { CodexEventMapper } from './event-mapper.js';
 export type { CodexNotification } from './event-mapper.js';
 export { serverManager as codexServerManager } from './server-manager.js';
+export { getCodexCredentialIssue, codexHome } from './credentials.js';
 
 export interface CodexProviderConfig {
   executablePath?: string;
@@ -39,6 +41,19 @@ export class CodexAgentProvider implements AgentProvider {
     const headlessAvailable = await this.headless.isAvailable();
     const interactiveAvailable = await this.interactive.isAvailable();
     return headlessAvailable || interactiveAvailable;
+  }
+
+  /**
+   * Readiness probe beyond binary presence: the Codex CLI starts and creates
+   * threads even without credentials, then fails every turn with
+   * `401 Unauthorized` (~15s of reconnect attempts per attempt). Refusing the
+   * spawn up front turns that silent failure into an actionable message.
+   */
+  async getReadinessIssue(): Promise<string | undefined> {
+    if (!(await this.isAvailable())) {
+      return `Codex CLI is not installed or not runnable. ${this.getInstallInstructions()}`;
+    }
+    return getCodexCredentialIssue();
   }
 
   getInstallInstructions(): string {

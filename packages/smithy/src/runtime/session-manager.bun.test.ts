@@ -30,6 +30,8 @@ import {
   type StartSessionOptions,
   type ResumeSessionOptions,
 } from './session-manager.js';
+import { createStorage, initializeSchema } from '@stoneforge/storage';
+import { createOperationLogService, type OperationLogService } from '../services/operation-log-service.js';
 
 // ============================================================================
 // Mock Factories
@@ -596,6 +598,52 @@ describe('SessionManager', () => {
 
       const activeSession = sessionManager.getActiveSession(testAgentId);
       expect(activeSession).toBeUndefined();
+    });
+  });
+
+  describe('provider-error exit capture', () => {
+    // Regression for the 2026-10-03 merge outage: steward sessions died on
+    // their first provider request (401 Unauthorized) and were recorded as
+    // anonymous process deaths, so no log or history entry ever said why.
+    let operationLog: OperationLogService;
+
+    beforeEach(async () => {
+      const storage = createStorage({ path: ':memory:', create: true });
+      initializeSchema(storage);
+      operationLog = createOperationLogService(storage);
+      sessionManager.setOperationLog(operationLog);
+    });
+
+    test('records the provider error on the session and in the operation log when a session dies', async () => {
+      const { session } = await sessionManager.startSession(testAgentId);
+
+      // The spawner records the terminal provider error on its session, then
+      // the process exits non-zero — the sequence a rejected API request
+      // produces.
+      const spawnerSession = spawner.getSession(session.id)!;
+      spawner._mockSessions.set(session.id, {
+        ...spawnerSession,
+        status: 'terminated',
+        endedAt: createTimestamp(),
+        lastError: 'unexpected status 401 Unauthorized: Missing bearer or basic authentication in header',
+      });
+      spawner._mockEmitters.get(session.id)!.emit('exit', 1, null);
+
+      // The session is over...
+      expect(sessionManager.getActiveSession(testAgentId)).toBeUndefined();
+
+      // ...and the history entry carries the cause for recovery to read back.
+      const history = await sessionManager.getSessionHistory(testAgentId);
+      expect(history).toHaveLength(1);
+      expect(history[0]!.lastError).toContain('401 Unauthorized');
+      expect(history[0]!.terminationReason).toContain('Provider error');
+
+      // The exit failure is persisted to the operation log (visible via `sf log`).
+      const entries = operationLog.query({ limit: 10 });
+      const failure = entries.find((e) => e.level === 'error' && e.message.includes('401 Unauthorized'));
+      expect(failure).toBeDefined();
+      expect(failure!.category).toBe('session');
+      expect(failure!.agentId).toBe(testAgentId);
     });
   });
 
