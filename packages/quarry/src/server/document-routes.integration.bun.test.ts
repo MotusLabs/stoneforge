@@ -1,9 +1,21 @@
-import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+/**
+ * Integration test for the shared-routes document route factory
+ * (`createDocumentRoutes`) wired to a real QuarryAPI + InboxService.
+ *
+ * This suite lives in @stoneforge/quarry, not @stoneforge/shared-routes,
+ * because shared-routes must not depend on quarry (quarry depends on
+ * shared-routes; the route factories take duck-typed service interfaces
+ * precisely to avoid that cycle). Running it here verifies the real quarry
+ * implementations satisfy those interfaces — and lets `bun test` resolve
+ * @stoneforge/quarry in fresh worktrees without an undeclared dependency.
+ */
+
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { createStorage, initializeSchema } from '@stoneforge/storage';
 import type { StorageBackend } from '@stoneforge/storage';
 import { createQuarryAPI, InboxService } from '@stoneforge/quarry';
 import type { QuarryAPI } from '@stoneforge/quarry';
-import { createDocumentRoutes } from './documents.js';
+import { createDocumentRoutes } from '@stoneforge/shared-routes';
 import {
   createDocument,
   createEntity,
