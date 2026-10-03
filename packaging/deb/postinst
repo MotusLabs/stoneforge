@@ -1,0 +1,12 @@
+#!/bin/sh
+# postinst for stoneforge (MotusLab Ubuntu package)
+#
+# Re-applies the execute bit on node-pty's spawn-helper. Package managers and
+# dpkg extraction can drop it, which breaks PTY spawning. Nothing else.
+set -e
+
+# Cover both hoisted and nested node-pty installs under the deployed app.
+find /opt/stoneforge/app/node_modules -name spawn-helper -type f \
+    -path '*node-pty*' -exec chmod 755 {} + 2>/dev/null || true
+
+exit 0

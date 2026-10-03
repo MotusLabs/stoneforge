@@ -1,0 +1,7 @@
+#!/bin/sh
+# Stoneforge launcher (MotusLab Ubuntu package)
+#
+# Always runs the bundled Node.js runtime, never a system Node on PATH.
+# STONEFORGE_HOME overrides the install root so the package can be tested
+# from an extracted tree without installing it.
+exec "${STONEFORGE_HOME:-/opt/stoneforge}/node/bin/node" "${STONEFORGE_HOME:-/opt/stoneforge}/app/dist/bin/sf.js" "$@"

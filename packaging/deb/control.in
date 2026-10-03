@@ -1,0 +1,17 @@
+Package: stoneforge
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: amd64
+Installed-Size: @INSTALLED_SIZE@
+Maintainer: MotusLabs <motuslabs@users.noreply.github.com>
+Depends: libc6 (>= 2.35), git
+Homepage: https://github.com/MotusLabs/stoneforge
+Description: Stoneforge agent orchestration platform (MotusLab build)
+ Self-contained Stoneforge CLI and orchestrator runtime.
+ Bundles a Node.js runtime, production dependencies including
+ native modules (better-sqlite3, node-pty), and the smithy web UI
+ under /opt/stoneforge. Provides the sf and stoneforge commands.
+ .
+ Part of the MotusLab Ubuntu release. User workspaces (.stoneforge/)
+ are never modified by install, upgrade or removal.

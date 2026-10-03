@@ -9,6 +9,9 @@ dist/
 .astro/
 packages/smithy/web/
 
+# Local deb build artifacts (scripts/build-deb.sh logs and .deb output)
+out/
+
 # Turbo
 .turbo/
 
