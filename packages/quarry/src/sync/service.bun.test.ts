@@ -131,6 +131,33 @@ function softDeleteElement(backend: StorageBackend, element: Element, deletedAt:
   backend.markDirty(id);
 }
 
+/**
+ * Update an element's type-specific payload the way QuarryAPI mutations do:
+ * patch the `data` payload, bump `updated_at`, and mark the element dirty.
+ */
+function updateElementPayload(
+  backend: StorageBackend,
+  id: string,
+  patch: Record<string, unknown>
+): void {
+  const row = backend.queryOne<{ data: string }>('SELECT data FROM elements WHERE id = ?', [id]);
+  const data = JSON.parse(row?.data ?? '{}');
+  backend.run('UPDATE elements SET data = ?, updated_at = ? WHERE id = ?', [
+    JSON.stringify({ ...data, ...patch }),
+    createTimestamp(),
+    id,
+  ]);
+  backend.markDirty(id);
+}
+
+/** Read the parsed elements of an exported elements.jsonl, keyed by id. */
+function readExportedElements(path: string): Map<string, Record<string, unknown>> {
+  const { elements } = parseElements(readFileSync(path, 'utf-8'));
+  return new Map(
+    elements.map((el) => [el.id as string, el as unknown as Record<string, unknown>])
+  );
+}
+
 function getElementCount(backend: StorageBackend): number {
   const row = backend.queryOne<{ count: number }>('SELECT COUNT(*) as count FROM elements');
   return row?.count ?? 0;
@@ -528,6 +555,289 @@ describe('SyncService', () => {
 
       expect(result.fallbackToFull).toBe(true);
       expect(result.elementsExported).toBe(1);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Dirty Tracking Across Export Writes
+  //
+  // The export path reads the dirty set, awaits its file writes, and only then
+  // acknowledges the dirty marks. Anything mutated while those writes are in
+  // flight (other agents, the dispatch daemon) must keep its dirty mark and go
+  // out in the next incremental export.
+  // --------------------------------------------------------------------------
+
+  describe('dirty tracking across export writes', () => {
+    test('mutations landing during the awaited writes stay dirty and export next time', async () => {
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      const task3 = createTestElement({ id: 'el-task3' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+      insertElement(backend, task3);
+
+      const outputDir = join(tempDir, 'export');
+      await service.export({ outputDir, full: true });
+
+      // task1 changes (and becomes dirty) before the export starts
+      updateElementPayload(backend, 'el-task1', { title: 'task1 v2' });
+
+      // Stub the atomic write so a concurrent writer mutates the DB between
+      // the export's reads and its dirty-clear
+      const serviceAny = service as unknown as {
+        writeAtomic: (filePath: string, content: string) => Promise<void>;
+      };
+      const originalWriteAtomic = serviceAny.writeAtomic.bind(service);
+      let concurrentWritesDone = false;
+      serviceAny.writeAtomic = async (filePath: string, content: string) => {
+        if (!concurrentWritesDone) {
+          concurrentWritesDone = true;
+          // Another writer re-marks an already-dirty element — possibly in the
+          // same millisecond as the pre-export mark
+          updateElementPayload(backend, 'el-task1', { title: 'task1 v3' });
+          // ... and marks a previously clean element
+          updateElementPayload(backend, 'el-task2', { title: 'task2 concurrent' });
+        }
+        return originalWriteAtomic(filePath, content);
+      };
+
+      try {
+        const result = await service.export({ outputDir, full: false });
+        expect(result.incremental).toBe(true);
+      } finally {
+        serviceAny.writeAtomic = originalWriteAtomic;
+      }
+
+      // Both concurrent mutations stay dirty; el-task3 was never dirty
+      const dirtyIds = backend
+        .getDirtyElements()
+        .map((d) => d.elementId as string)
+        .sort();
+      expect(dirtyIds).toEqual(['el-task1', 'el-task2']);
+
+      // The file holds the content read *before* the writes — the concurrent
+      // changes are not in it yet
+      let byId = readExportedElements(join(outputDir, 'elements.jsonl'));
+      expect(byId.get('el-task1')?.title).toBe('task1 v2');
+      expect(byId.get('el-task2')?.title).toBe('Test Task');
+      expect(byId.get('el-task3')?.title).toBe('Test Task');
+
+      // The next incremental export ships both concurrent mutations
+      const second = await service.export({ outputDir, full: false });
+      expect(second.incremental).toBe(true);
+      byId = readExportedElements(second.elementsFile);
+      expect(byId.get('el-task1')?.title).toBe('task1 v3');
+      expect(byId.get('el-task2')?.title).toBe('task2 concurrent');
+      expect(backend.getDirtyElements()).toHaveLength(0);
+    });
+
+    test('mutations landing during a fallback-to-full export stay dirty', async () => {
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+
+      const outputDir = join(tempDir, 'export');
+      // No prior export — the incremental export below falls back to full
+
+      backend.markDirty('el-task1');
+
+      const serviceAny = service as unknown as {
+        writeAtomic: (filePath: string, content: string) => Promise<void>;
+      };
+      const originalWriteAtomic = serviceAny.writeAtomic.bind(service);
+      let concurrentWritesDone = false;
+      serviceAny.writeAtomic = async (filePath: string, content: string) => {
+        if (!concurrentWritesDone) {
+          concurrentWritesDone = true;
+          updateElementPayload(backend, 'el-task2', { title: 'task2 concurrent' });
+        }
+        return originalWriteAtomic(filePath, content);
+      };
+
+      try {
+        const result = await service.export({ outputDir, full: false });
+        expect(result.fallbackToFull).toBe(true);
+      } finally {
+        serviceAny.writeAtomic = originalWriteAtomic;
+      }
+
+      // The mark made during the write survived the fallback export
+      const dirtyIds = backend
+        .getDirtyElements()
+        .map((d) => d.elementId as string)
+        .sort();
+      expect(dirtyIds).toEqual(['el-task2']);
+
+      const second = await service.export({ outputDir, full: false });
+      const byId = readExportedElements(second.elementsFile);
+      expect(byId.get('el-task2')?.title).toBe('task2 concurrent');
+      expect(backend.getDirtyElements()).toHaveLength(0);
+    });
+
+    test('elements skipped during serialization stay dirty and are retried', async () => {
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+
+      const outputDir = join(tempDir, 'export');
+      await service.export({ outputDir, full: true });
+
+      // task1 exports normally; task2 fails validation (bad updated_at) and
+      // must keep its dirty mark so it is retried
+      updateElementPayload(backend, 'el-task1', { title: 'task1 v2' });
+      backend.run("UPDATE elements SET updated_at = 'not-a-timestamp' WHERE id = ?", [
+        'el-task2',
+      ]);
+      backend.markDirty('el-task2');
+
+      const result = await service.export({ outputDir, full: false });
+      expect(result.incremental).toBe(true);
+
+      const dirtyIds = backend
+        .getDirtyElements()
+        .map((d) => d.elementId as string)
+        .sort();
+      expect(dirtyIds).toEqual(['el-task2']);
+
+      // task1's change went out and its line was updated; task2's existing
+      // line survives untouched
+      const byId = readExportedElements(result.elementsFile);
+      expect(byId.get('el-task1')?.title).toBe('task1 v2');
+      expect(byId.get('el-task2')?.title).toBe('Test Task');
+
+      // Repairing the element lets the next export ship it and clear its mark
+      backend.run('UPDATE elements SET updated_at = ? WHERE id = ?', [
+        createTimestamp(),
+        'el-task2',
+      ]);
+      const second = await service.export({ outputDir, full: false });
+      const byId2 = readExportedElements(second.elementsFile);
+      expect(byId2.get('el-task2')?.title).toBe('Test Task');
+      expect(backend.getDirtyElements()).toHaveLength(0);
+    });
+
+    test('full export does not acknowledge dirty tracking', async () => {
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      insertElement(backend, task1);
+
+      const outputDir = join(tempDir, 'export');
+      await service.export({ outputDir, full: true });
+
+      backend.markDirty('el-task1');
+      await service.export({ outputDir, full: true });
+
+      // Only incremental (and fallback) exports clear dirty marks
+      expect(backend.getDirtyElements()).toHaveLength(1);
+
+      // ...and the incremental export afterwards clears it
+      await service.export({ outputDir, full: false });
+      expect(backend.getDirtyElements()).toHaveLength(0);
+    });
+
+    test('incremental exportSync clears dirty marks for the elements it exported', () => {
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+
+      const outputDir = join(tempDir, 'export');
+      service.exportSync({ outputDir, full: true });
+
+      backend.markDirty('el-task1');
+      backend.markDirty('el-task2');
+      service.exportSync({ outputDir, full: false });
+
+      expect(backend.getDirtyElements()).toHaveLength(0);
+    });
+
+    test('a mark created after exportSync finished stays dirty for the next export', () => {
+      // Simulates another process mutating between this export's reads and
+      // its clear: the mark is not part of the snapshot it acknowledged
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      insertElement(backend, task1);
+
+      const outputDir = join(tempDir, 'export');
+      service.exportSync({ outputDir, full: true });
+
+      backend.markDirty('el-task1');
+      service.exportSync({ outputDir, full: false });
+      expect(backend.getDirtyElements()).toHaveLength(0);
+
+      // A mark that appears after the export completes must survive a later
+      // export's snapshot clear only if it was re-marked — here it simply is
+      // not in the next snapshot until it is exported
+      backend.markDirty('el-task1');
+      const snapshot = backend.getDirtyElements();
+
+      // Re-mark before the "export" acknowledges — the older mark is cleared,
+      // the newer one survives
+      backend.markDirty('el-task1');
+      backend.clearDirtySnapshot(snapshot);
+
+      const dirty = backend.getDirtyElements();
+      expect(dirty).toHaveLength(1);
+      expect(dirty[0].elementId).toBe('el-task1');
+    });
+
+    test('overlapping exports: a stale snapshot never acknowledges a re-created mark', async () => {
+      // The overlapping-export hazard the token floor closes: export 1 is in
+      // flight holding snapshot token T1; while its writes are awaited, the
+      // element is re-marked (T2), a second export runs to completion and
+      // clears T2, and the element is marked again — at the same frozen
+      // millisecond, so a wall-clock-only token would regenerate exactly T1.
+      // Export 1's clear must then match nothing and the newest mark must
+      // survive to be exported next time.
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      insertElement(backend, task1);
+
+      const outputDir = join(tempDir, 'export');
+      await service.export({ outputDir, full: true });
+
+      const originalNow = Date.now;
+      Date.now = () => 1_700_000_000_000;
+
+      const serviceAny = service as unknown as {
+        writeAtomic: (filePath: string, content: string) => Promise<void>;
+      };
+      const originalWriteAtomic = serviceAny.writeAtomic.bind(service);
+      let injected = false;
+      serviceAny.writeAtomic = async (filePath: string, content: string) => {
+        if (!injected) {
+          injected = true;
+          // Re-mark while export 1 is writing (token T2)
+          updateElementPayload(backend, 'el-task1', { title: 'task1 v3' });
+          // A complete second export runs, snapshots T2 and clears it —
+          // the dirty row is deleted
+          await service.export({ outputDir, full: false });
+          expect(backend.getDirtyElements()).toHaveLength(0);
+          // The element changes again in the same frozen millisecond: the
+          // re-created row must not receive a token export 1 still holds
+          updateElementPayload(backend, 'el-task1', { title: 'task1 v4' });
+        }
+        return originalWriteAtomic(filePath, content);
+      };
+
+      try {
+        updateElementPayload(backend, 'el-task1', { title: 'task1 v2' });
+        const first = await service.export({ outputDir, full: false });
+        expect(first.incremental).toBe(true);
+      } finally {
+        serviceAny.writeAtomic = originalWriteAtomic;
+        Date.now = originalNow;
+      }
+
+      // The newest mark survived export 1's stale snapshot clear
+      const dirty = backend.getDirtyElements();
+      expect(dirty).toHaveLength(1);
+      expect(dirty[0].elementId).toBe('el-task1');
+
+      // ...and the next incremental export ships the newest content
+      const third = await service.export({ outputDir, full: false });
+      const byId = readExportedElements(third.elementsFile);
+      expect(byId.get('el-task1')?.title).toBe('task1 v4');
+      expect(backend.getDirtyElements()).toHaveLength(0);
     });
   });
 

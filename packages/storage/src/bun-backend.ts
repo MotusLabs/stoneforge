@@ -26,6 +26,7 @@ import type {
   SqlitePragmas,
 } from './types.js';
 import { DEFAULT_PRAGMAS } from './types.js';
+import { DIRTY_TRACKING_SCHEMA_SQL, MARK_DIRTY_SQL } from './dirty.js';
 import { connectionError, mapStorageError, migrationError } from './errors.js';
 
 // Type alias for SQLite parameter bindings
@@ -166,12 +167,7 @@ export class BunStorageBackend implements StorageBackend {
   private initDirtyTable(): void {
     if (!this.db) return;
 
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS dirty_elements (
-        element_id TEXT PRIMARY KEY,
-        marked_at TEXT NOT NULL
-      )
-    `);
+    this.db.exec(DIRTY_TRACKING_SCHEMA_SQL);
   }
 
   // --------------------------------------------------------------------------
@@ -369,10 +365,15 @@ export class BunStorageBackend implements StorageBackend {
   markDirty(elementId: string): void {
     try {
       const db = this.ensureOpen();
-      const now = new Date().toISOString();
-      db.prepare(
-        'INSERT OR REPLACE INTO dirty_elements (element_id, marked_at) VALUES (?, ?)'
-      ).run(elementId, now);
+      // A single atomic UPSERT: the token is computed inside SQLite (from the
+      // stored row and the global token floor) so two connections can never
+      // read the same old token and issue the same new one, and a cleared
+      // row cannot regenerate a token an in-flight export snapshot holds.
+      // See packages/storage/src/dirty.ts for the full semantics.
+      // new Date(Date.now()) rather than new Date(): reads the clock through
+      // the (overridable) Date.now so tests can pin the wall clock
+      const now = new Date(Date.now()).toISOString();
+      db.prepare(MARK_DIRTY_SQL).run(elementId, now, now, now, now, now);
     } catch (error) {
       throw mapStorageError(error, { operation: 'markDirty', elementId });
     }
@@ -413,6 +414,32 @@ export class BunStorageBackend implements StorageBackend {
       ).run(...elementIds);
     } catch (error) {
       throw mapStorageError(error, { operation: 'clearDirtyElements' });
+    }
+  }
+
+  clearDirtySnapshot(snapshot: DirtyElement[]): number {
+    if (snapshot.length === 0) return 0;
+
+    try {
+      const db = this.ensureOpen();
+      const stmt = db.prepare(
+        'DELETE FROM dirty_elements WHERE element_id = ? AND marked_at = ?'
+      );
+      let cleared = 0;
+      const deleteRows = (): void => {
+        for (const entry of snapshot) {
+          const result = stmt.run(entry.elementId, entry.markedAt);
+          cleared += result.changes;
+        }
+      };
+      if (this.inTransaction) {
+        deleteRows();
+      } else {
+        this.transaction(deleteRows);
+      }
+      return cleared;
+    } catch (error) {
+      throw mapStorageError(error, { operation: 'clearDirtySnapshot' });
     }
   }
 

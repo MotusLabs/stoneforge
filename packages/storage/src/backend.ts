@@ -163,6 +163,12 @@ export interface StorageBackend {
   /**
    * Mark an element as dirty (modified since last export)
    *
+   * A single atomic statement (see `packages/storage/src/dirty.ts`): the new
+   * `markedAt` token is computed inside SQLite, so it is safe under
+   * concurrent connections and inside an open transaction. Tokens are
+   * strictly monotonic per element and never reused — even after the row is
+   * cleared.
+   *
    * @param elementId - The element ID to mark dirty
    */
   markDirty(elementId: string): void;
@@ -183,9 +189,36 @@ export interface StorageBackend {
   /**
    * Clear dirty status for specific elements
    *
+   * **Unsafe on the export path** — it clears the row even when the element
+   * was re-marked after the caller read it. Use clearDirtySnapshot() wherever
+   * the clear happens after an await or after other storage reads.
+   *
    * @param elementIds - Element IDs to clear dirty status for
    */
   clearDirtyElements(elementIds: string[]): void;
+
+  /**
+   * Clear dirty rows captured in a snapshot taken earlier, leaving any row
+   * that was re-marked since the snapshot dirty.
+   *
+   * A dirty row is cleared only when it still carries exactly the `markedAt`
+   * value recorded in the snapshot. `markDirty()` is atomic, strictly
+   * monotonic per element (a re-mark always records a strictly greater
+   * `markedAt`, even within the same millisecond) and never reuses a token —
+   * including across clears, via a global token floor — so a mutation that
+   * happened after the snapshot was taken (or after the row was cleared and
+   * re-marked) is always distinguishable and its dirty row survives to be
+   * exported next time. Snapshot entries whose dirty row no longer exists
+   * are skipped.
+   *
+   * This is the safe replacement for `clearDirty()`/`clearDirtyElements()`
+   * when acknowledging an export: it guarantees that after an export only the
+   * elements that were actually exported are marked clean.
+   *
+   * @param snapshot - Dirty records captured before the export writes began
+   * @returns Number of dirty rows actually cleared
+   */
+  clearDirtySnapshot(snapshot: DirtyElement[]): number;
 
   // --------------------------------------------------------------------------
   // Hierarchical ID Support

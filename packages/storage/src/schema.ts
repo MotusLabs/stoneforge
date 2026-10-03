@@ -697,6 +697,7 @@ export const EXPECTED_TABLES = [
   'tags',
   'events',
   'dirty_elements', // Created by backend initialization
+  'dirty_token_floor', // Created by backend initialization (token high-water mark)
   'child_counters',
   'blocked_cache',
   'inbox_items',

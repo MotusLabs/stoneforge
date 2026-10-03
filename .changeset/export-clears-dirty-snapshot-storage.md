@@ -1,0 +1,14 @@
+---
+"@stoneforge/storage": patch
+---
+
+Snapshot-aware dirty tracking clear with atomic, never-reused change tokens: `clearDirtySnapshot()` + single-statement `markDirty()`.
+
+The JSONL export path used to acknowledge an export with `clearDirty()`, which wipes **all** dirty rows — including rows for elements that were mutated while the export was awaiting its file writes. Those changes never reached `elements.jsonl` (the git-tracked source of truth) and were silently lost.
+
+Two additions make a safe clear possible:
+
+- `markDirty(id)` is a **single atomic UPSERT** whose new `marked_at` token is computed inside SQLite, giving three guarantees the old SELECT-then-INSERT OR REPLACE implementation could not: (1) two connections can never read the same old token and issue the same new one (SQLite serializes write statements); (2) the stored token is **strictly monotonic per element** — a re-mark always records a strictly greater value, even when both marks land in the same millisecond; (3) **tokens are never reused, even after the row is cleared** — every issued token advances a global high-water mark (`dirty_token_floor`, maintained by triggers that run atomically within the marking statement), and a fresh or re-created row takes max(wall clock, floor + 1ms). Without (3), a row cleared by one export and re-marked in the same millisecond could regenerate the exact token an older, still-in-flight export snapshot holds, and that export's clear would erase the newer change. Unparseable legacy values are overwritten with a fresh token and never poison the floor. The shared SQL lives in `packages/storage/src/dirty.ts`; all three backends (Bun, Node, Browser) execute it, and the tables/triggers are created idempotently on connection open (no schema migration).
+- New `StorageBackend.clearDirtySnapshot(snapshot)` clears a dirty row only when it still carries exactly the `marked_at` value from a snapshot taken earlier. Rows re-marked after the snapshot (a newer, not-yet-exported change) are left dirty; rows that no longer exist are skipped. Implemented in every backend, batched in a transaction when one is not already open. Returns the number of rows actually cleared.
+
+`clearDirtyElements()` still exists but is documented as unsafe on the export path — it clears the row even when the element was re-marked after the caller read it. Tests in `packages/storage/src/dirty-tracking.bun.test.ts` cover the monotonicity guarantee, the same-millisecond re-mark case, the two-connection token race (deterministically, by injecting a concurrent mark between statement construction and execution), the same-millisecond token-reuse-after-clear case, and the snapshot clear semantics — on the Bun backend (two real connections) and the Browser backend (sql.js); the Node backend runs the identical shared SQL through better-sqlite3, which cannot be loaded under the Bun test runner.

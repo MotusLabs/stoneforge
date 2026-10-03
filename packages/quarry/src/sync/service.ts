@@ -20,7 +20,7 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import type { StorageBackend } from '@stoneforge/storage';
+import type { StorageBackend, DirtyElement } from '@stoneforge/storage';
 import type { Element, ElementId, Timestamp, EntityId, Dependency, DependencyType } from '@stoneforge/core';
 import { createTimestamp } from '@stoneforge/core';
 import type {
@@ -83,6 +83,19 @@ interface ExportPlan {
   dependenciesContent: string;
   /** Number of dependency lines that will be written */
   dependencyCount: number;
+  /**
+   * Dirty records captured before any element data was read. After the file
+   * writes succeed, each entry is cleared only if it was not re-marked since
+   * the snapshot — mutations that happen while the writes are awaited keep
+   * their dirty mark and go out in the next export. Empty for a full export,
+   * which does not acknowledge dirty tracking.
+   */
+  dirtySnapshot: DirtyElement[];
+  /**
+   * Element IDs skipped because they failed serialization. Their dirty marks
+   * survive the export so they are retried next time.
+   */
+  skippedDirtyIds: string[];
 }
 
 interface TagRow {
@@ -159,9 +172,10 @@ export class SyncService {
     await this.writeAtomic(plan.elementsPath, plan.elementsContent);
     await this.writeAtomic(plan.dependenciesPath, plan.dependenciesContent);
 
-    // Clear dirty tracking after successful export
+    // Clear dirty tracking for exactly what was written. Elements re-marked
+    // while the writes above were awaited stay dirty for the next export.
     if (!options.full) {
-      this.backend.clearDirty();
+      this.clearExportedDirty(plan);
     }
 
     return {
@@ -196,9 +210,11 @@ export class SyncService {
     this.writeAtomicSync(plan.elementsPath, plan.elementsContent);
     this.writeAtomicSync(plan.dependenciesPath, plan.dependenciesContent);
 
-    // Clear dirty tracking after successful export
+    // Clear dirty tracking for exactly what was written. The snapshot clear
+    // also protects this path: another process sharing the database can
+    // mutate elements between this export's reads and the clear.
     if (!options.full) {
-      this.backend.clearDirty();
+      this.clearExportedDirty(plan);
     }
 
     return {
@@ -249,6 +265,15 @@ export class SyncService {
    * the existing elements file and merges only the dirty elements into it
    * (replacing entries by id, appending new ones), so elements that are still
    * clean — including previously exported tombstones — survive in the file.
+   *
+   * For every non-full export the dirty set is snapshotted (element id +
+   * marked_at) **before** any element data is read. After the file writes
+   * succeed, only snapshot entries that were not re-marked in the meantime are
+   * cleared — a mutation landing while the (async) writes are awaited keeps
+   * its dirty mark and is exported next time. Snapshotting before the data
+   * read is what makes this sound: a mark that lands after the snapshot either
+   * carries a strictly newer marked_at (kept dirty, re-exported) or, if the
+   * data read happened after it, is already covered by the exported content.
    */
   private prepareExport(options: SyncExportOptions): ExportPlan {
     // Build file paths
@@ -275,8 +300,16 @@ export class SyncService {
         skippedCount: serialized.skipped,
         dependenciesContent,
         dependencyCount: dependencies.length,
+        // A full export never acknowledges dirty tracking
+        dirtySnapshot: [],
+        skippedDirtyIds: [],
       };
     }
+
+    // Snapshot the dirty set before reading any element data. Both the
+    // incremental path and the fallback-to-full path below clear this
+    // snapshot after their writes succeed.
+    const dirtySnapshot = this.backend.getDirtyElements();
 
     // Incremental export — merge dirty elements into the existing file.
     const existing = this.readElementsFile(elementsPath);
@@ -298,13 +331,15 @@ export class SyncService {
         skippedCount: serialized.skipped,
         dependenciesContent,
         dependencyCount: dependencies.length,
+        dirtySnapshot,
+        skippedDirtyIds: serialized.skippedIds,
       };
     }
 
     // Dirty elements, with ephemeral ones excluded exactly like a full export
     // would exclude them (otherwise they would creep into the file and only
     // disappear again on the next full export).
-    let dirty = this.getDirtyElementsData();
+    let dirty = this.getDirtyElementsData(dirtySnapshot);
     if (!options.includeEphemeral) {
       dirty = this.filterOutEphemeral(dirty);
     }
@@ -313,6 +348,7 @@ export class SyncService {
     // their existing line (if any) is left untouched in the file.
     const updates = new Map<string, string>();
     let skipped = 0;
+    const skippedDirtyIds: string[] = [];
     for (const element of dirty) {
       try {
         updates.set(element.id, serializeElement(element));
@@ -321,6 +357,7 @@ export class SyncService {
           `[sync] Skipping invalid element ${element.id} (type=${element.type})`
         );
         skipped++;
+        skippedDirtyIds.push(element.id);
       }
     }
 
@@ -336,6 +373,11 @@ export class SyncService {
       skippedCount: skipped,
       dependenciesContent,
       dependencyCount: dependencies.length,
+      // Ephemeral elements filtered out above stay in the snapshot: they are
+      // never exportable, so keeping them dirty would only leave a permanent
+      // phantom backlog. The skipped IDs are excluded so they are retried.
+      dirtySnapshot,
+      skippedDirtyIds,
     };
   }
 
@@ -346,11 +388,12 @@ export class SyncService {
     content: string;
     count: number;
     skipped: number;
+    skippedIds: string[];
   } {
     const elements = this.getAllElements(includeEphemeral);
     const sortedElements = sortElementsForExport(elements);
-    const { content, skipped } = this.serializeElementsSafe(sortedElements);
-    return { content, count: sortedElements.length - skipped, skipped };
+    const { content, skipped, skippedIds } = this.serializeElementsSafe(sortedElements);
+    return { content, count: sortedElements.length - skipped, skipped, skippedIds };
   }
 
   /**
@@ -375,6 +418,30 @@ export class SyncService {
   private tempPath(filePath: string): string {
     const rand = Math.random().toString(36).slice(2, 10);
     return `${filePath}.tmp-${process.pid}-${Date.now()}-${rand}`;
+  }
+
+  /**
+   * Clear the dirty marks acknowledged by a completed export.
+   *
+   * Only snapshot entries whose dirty row was not re-marked since the
+   * snapshot are cleared (see StorageBackend.clearDirtySnapshot). Elements
+   * that failed serialization are excluded so they are retried on the next
+   * export. Elements marked dirty while the export was writing its files are
+   * not in the snapshot at all, or carry a strictly newer marked_at, and stay
+   * dirty — their changes go out in the next incremental export.
+   */
+  private clearExportedDirty(plan: ExportPlan): void {
+    if (plan.dirtySnapshot.length === 0) {
+      return;
+    }
+    const skipped = new Set(plan.skippedDirtyIds);
+    const toClear = skipped.size === 0
+      ? plan.dirtySnapshot
+      : plan.dirtySnapshot.filter((entry) => !skipped.has(entry.elementId));
+    if (toClear.length === 0) {
+      return;
+    }
+    this.backend.clearDirtySnapshot(toClear);
   }
 
   /**
@@ -747,9 +814,11 @@ export class SyncService {
 
   /**
    * Get dirty elements data (for incremental export)
+   *
+   * Accepts the dirty records snapshotted by prepareExport so the element rows
+   * are read for exactly that snapshot.
    */
-  private getDirtyElementsData(): Element[] {
-    const dirtyRecords = this.backend.getDirtyElements();
+  private getDirtyElementsData(dirtyRecords: DirtyElement[]): Element[] {
     const elements: Element[] = [];
 
     for (const record of dirtyRecords) {
@@ -821,18 +890,22 @@ export class SyncService {
   /**
    * Serialize elements to JSONL, skipping any that fail validation.
    */
-  private serializeElementsSafe(elements: Element[]): { content: string; skipped: number } {
+  private serializeElementsSafe(elements: Element[]): {
+    content: string;
+    skipped: number;
+    skippedIds: string[];
+  } {
     const lines: string[] = [];
-    let skipped = 0;
+    const skippedIds: string[] = [];
     for (const el of elements) {
       try {
         lines.push(serializeElement(el));
       } catch {
         console.warn(`[sync] Skipping invalid element ${el.id} (type=${el.type})`);
-        skipped++;
+        skippedIds.push(el.id);
       }
     }
-    return { content: lines.join('\n'), skipped };
+    return { content: lines.join('\n'), skipped: skippedIds.length, skippedIds };
   }
 
   /**
