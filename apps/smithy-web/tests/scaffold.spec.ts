@@ -1,6 +1,19 @@
 import { test, expect } from '@playwright/test';
 
 test.describe('TB-O15: Orchestrator Web Scaffold', () => {
+  // AppShell uses viewport width minus the director panel for breakpoints.
+  // Keep enough room for the expanded desktop sidebar and director panel.
+  test.use({ viewport: { width: 1920, height: 1080 } });
+
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('orchestrator-sidebar-collapsed', 'false');
+      localStorage.setItem('orchestrator-director-collapsed', 'true');
+      localStorage.setItem('orchestrator-director-maximized', 'false');
+      localStorage.setItem('orchestrator-director-panel-width', '400');
+    });
+  });
+
   test.describe('Three-column layout', () => {
     test('displays sidebar, main content, and director panel', async ({ page }) => {
       await page.goto('/');
@@ -21,8 +34,11 @@ test.describe('TB-O15: Orchestrator Web Scaffold', () => {
     test('can expand and collapse director panel', async ({ page }) => {
       await page.goto('/');
 
-      // Click expand button on director panel
-      await page.getByTestId('director-panel-expand').click();
+      await expect(page.getByTestId('director-panel-collapsed')).toBeVisible();
+
+      // The collapsed panel shows director icons (or Create Director), rather
+      // than a generic expand button. Use the panel's keyboard shortcut.
+      await page.keyboard.press('Meta+d');
 
       // Director panel should now be expanded
       await expect(page.getByTestId('director-panel')).toBeVisible();
@@ -37,7 +53,7 @@ test.describe('TB-O15: Orchestrator Web Scaffold', () => {
     test('can toggle sidebar collapse', async ({ page }) => {
       await page.goto('/');
 
-      // Sidebar should be expanded by default on desktop
+      // Sidebar is explicitly initialized as expanded on desktop
       await expect(page.getByTestId('sidebar')).toBeVisible();
 
       // Click collapse button
@@ -45,6 +61,10 @@ test.describe('TB-O15: Orchestrator Web Scaffold', () => {
 
       // After collapse, expand button should appear
       await expect(page.getByTestId('sidebar-expand-button')).toBeVisible();
+
+      await page.getByTestId('sidebar-expand-button').click();
+      await expect(page.getByTestId('sidebar-toggle')).toBeVisible();
+      await expect(page.getByTestId('nav-section-work')).toBeVisible();
     });
   });
 
@@ -137,22 +157,27 @@ test.describe('TB-O15: Orchestrator Web Scaffold', () => {
       await expect(page.getByTestId('nav-section-overview')).toBeVisible();
       await expect(page.getByTestId('nav-section-work')).toBeVisible();
       await expect(page.getByTestId('nav-section-orchestration')).toBeVisible();
+      await expect(page.getByTestId('nav-section-collaborate')).toBeVisible();
       await expect(page.getByTestId('nav-section-analytics')).toBeVisible();
     });
 
     test('can collapse and expand navigation sections', async ({ page }) => {
       await page.goto('/');
 
+      const workItems = page.getByTestId('nav-tasks').locator('..');
+      await expect(workItems).toHaveClass(/max-h-96/);
+
       // Click to collapse the work section
       await page.getByTestId('section-toggle-work').click();
 
-      // Wait for collapse animation and check the section is collapsed
-      // The items become hidden via max-h-0 opacity-0 transition
-      await page.waitForTimeout(300); // Wait for animation
+      // Check the collapsed container rather than sleeping for its transition.
+      await expect(workItems).toHaveClass(/max-h-0/);
+      await expect(workItems).toHaveCSS('max-height', '0px');
 
       // Click to expand the work section
       await page.getByTestId('section-toggle-work').click();
 
+      await expect(workItems).toHaveClass(/max-h-96/);
       // Tasks nav item should be visible again after expanding
       await expect(page.getByTestId('nav-tasks')).toBeVisible();
     });
