@@ -7,8 +7,9 @@
  * @module
  */
 
+import { tmpdir } from 'node:os';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import type { ModelInfo as SDKModelInfo } from '@anthropic-ai/claude-agent-sdk';
+import type { ModelInfo as SDKModelInfo, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { ProviderError, type AgentProvider, type HeadlessProvider, type InteractiveProvider, type ModelInfo } from '../types.js';
 import { ClaudeHeadlessProvider } from './headless.js';
 import { ClaudeInteractiveProvider } from './interactive.js';
@@ -40,14 +41,40 @@ export class ClaudeAgentProvider implements AgentProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    // Create a temporary query instance to access supportedModels().
-    // We use a minimal prompt and immediately close the query to avoid
-    // actually running a session - we just need the query object's methods.
-    let queryInstance;
+    // Probe the SDK for its model catalog WITHOUT starting an agent turn.
+    //
+    // `supportedModels()` only needs the CLI initialize handshake, which
+    // reports the available models. A string `prompt` — even the empty
+    // string — is delivered as a real user turn, so the agent starts working
+    // in `options.cwd` (historically the caller's cwd, i.e. a worker
+    // worktree). Those phantom sessions look like a second worker spawn and
+    // can run for minutes if `close()` loses the race with the first turn.
+    //
+    // Defences, in order:
+    // 1. Streaming input that never yields a user message → no turn starts.
+    // 2. AbortController aborted in `finally` → the CLI process is killed
+    //    even if a turn somehow began.
+    // 3. Neutral `cwd` (os.tmpdir()) → a leaked session cannot impersonate
+    //    a worker by sitting inside that worker's worktree.
+    const abortController = new AbortController();
+    let releaseProbeInput!: () => void;
+    const probeInputSettled = new Promise<void>((resolve) => {
+      releaseProbeInput = resolve;
+    });
+
+    async function* probeInput(): AsyncGenerator<SDKUserMessage> {
+      // Yield nothing. Keep the input stream open until the probe is done so
+      // the query stays in "awaiting user input" after initialization.
+      await probeInputSettled;
+    }
+
+    let queryInstance: ReturnType<typeof sdkQuery>;
     try {
       queryInstance = sdkQuery({
-        prompt: '',
+        prompt: probeInput(),
         options: {
+          abortController,
+          cwd: tmpdir(),
           env: buildClaudeSpawnEnv(process.env),
           // Use bypassPermissions to avoid permission prompts
           permissionMode: 'bypassPermissions',
@@ -56,6 +83,8 @@ export class ClaudeAgentProvider implements AgentProvider {
       });
     } catch (error) {
       // SDK query creation failed (e.g., missing executable, spawn error)
+      abortController.abort();
+      releaseProbeInput();
       throw new ProviderError(
         `Failed to initialize Claude SDK query: ${error instanceof Error ? error.message : String(error)}`,
         'claude-code'
@@ -88,8 +117,11 @@ export class ClaudeAgentProvider implements AgentProvider {
         'claude-code'
       );
     } finally {
-      // Always close the query to clean up resources
+      // Always tear down: close the query, kill the CLI process, and let the
+      // probe input generator finish so it cannot hold the event loop open.
       queryInstance.close();
+      abortController.abort();
+      releaseProbeInput();
     }
   }
 }
