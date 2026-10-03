@@ -35,8 +35,27 @@ Arguments pass through to Playwright, for example:
 bun run --cwd apps/smithy-web test:e2e scaffold.spec.ts --workers=1
 ```
 
-Smithy uses API/web ports 3458/5175; Quarry uses 3459/5176. Each suite uses
-`.stoneforge-test/` in the repository root, so run the suites sequentially.
+Both apps derive default ports from a stable SHA-256 hash of the absolute
+repository root: `20000 + (hashUInt32 % 10000) * 4`. Smithy uses offsets 0/1
+for API/web; Quarry uses offsets 2/3. Different worktrees normally get different
+ports, so browser suites in separate worktrees can run concurrently. Hash
+collisions or occupied ports fail visibly; Vite uses `--strictPort`.
+
+- `E2E_API_PORT` overrides the API port (integer 1–65535).
+- `E2E_WEB_PORT` overrides the web port (integer 1–65535, different from API).
+- `E2E_REUSE_SERVER=1` explicitly allows reusing existing servers. By default,
+  Playwright starts its own servers and refuses occupied ports, including outside CI.
+  With reuse enabled, you are responsible for ensuring both servers belong to
+  this worktree and that Vite proxies to the selected API port.
+
+The Vite server receives `VITE_API_PORT` from the selected API port automatically.
+Each suite uses `.stoneforge-test/` in its repository root, so run the two apps
+sequentially within one worktree (their databases are shared). Use separate
+worktrees for concurrent runs. For explicit ports:
+
+```bash
+E2E_API_PORT=41000 E2E_WEB_PORT=41001 bun run --cwd apps/smithy-web test:e2e scaffold.spec.ts --workers=1
+```
 `test:ui` opens the Playwright UI after the full Chromium setup. `test:unit` in
 Smithy runs Vitest and does not need Chromium.
 
@@ -47,6 +66,6 @@ pnpm install --frozen-lockfile
 CI=1 bun run --cwd apps/smithy-web test:e2e scaffold.spec.ts --workers=1
 ```
 
-`CI=1` forces Playwright to start its own API and Vite servers rather than reuse
-servers already running on the test ports. To verify the browser download too,
+Playwright starts its own API and Vite servers by default. `CI=1` also enables
+CI retries and a single worker. To verify the browser download too,
 set `PLAYWRIGHT_BROWSERS_PATH` to an empty directory for the test command.
