@@ -9,8 +9,10 @@
 
 import { describe, it, expect, beforeAll, afterAll, setDefaultTimeout } from 'bun:test';
 import { spawn, type Subprocess } from 'bun';
-import { resolve, dirname } from 'node:path';
-import { unlinkSync, existsSync } from 'node:fs';
+import { resolve, dirname, join } from 'node:path';
+import { unlinkSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { execSync } from 'node:child_process';
 
 // Integration tests spawn an orchestrator server which can take time to start.
 // The default 5000ms test timeout is too short for beforeAll server startup.
@@ -29,16 +31,41 @@ const STARTUP_TIMEOUT_MS = Number(process.env.ORCHESTRATOR_TEST_STARTUP_TIMEOUT_
 // Server process
 let serverProcess: Subprocess<'ignore', 'pipe', 'pipe'> | null = null;
 
+// Isolated workspace directory used as the spawned server's cwd.
+// The server resolves PROJECT_ROOT from process.cwd(), so without this it
+// treats apps/smithy-server as the workspace root and writes local runtime
+// data (apps/smithy-server/.stoneforge/sync/*.jsonl) into the source tree.
+let testWorkspaceDir: string | null = null;
+
 // ============================================================================
 // Server Lifecycle
 // ============================================================================
 
+function createTestWorkspace(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'stoneforge-plugin-api-test-'));
+  // The server's worktree manager requires a git repository at the workspace
+  // root (initWorkspace() runs `git rev-parse --git-dir`), and the
+  // cleanup-stale-worktrees plugin runs `git worktree prune`.
+  execSync('git init --quiet', { cwd: dir });
+  return dir;
+}
+
+function cleanupTestWorkspace(): void {
+  if (testWorkspaceDir) {
+    rmSync(testWorkspaceDir, { recursive: true, force: true });
+    testWorkspaceDir = null;
+  }
+}
+
 async function startServer(): Promise<void> {
   const serverPath = resolve(dirname(import.meta.path), 'index.ts');
+  testWorkspaceDir = createTestWorkspace();
 
-  // Start the server
+  // Start the server from the isolated workspace so all runtime data it
+  // creates (<cwd>/.stoneforge/...) stays in the temp directory.
   serverProcess = spawn({
     cmd: ['bun', 'run', serverPath],
+    cwd: testWorkspaceDir,
     env: {
       ...process.env,
       PORT: String(TEST_PORT),
@@ -139,6 +166,7 @@ describe('Plugin API Integration Tests', () => {
   afterAll(async () => {
     await stopServer();
     cleanupTestDb();
+    cleanupTestWorkspace();
   });
 
   describe('GET /api/plugins/builtin', () => {

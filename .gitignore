@@ -53,6 +53,11 @@ OPENCODE_CONFIG_CONTENT
 /.stoneforge/.worktrees/
 /.stoneforge/.dashboard-opened
 
+# App-level .stoneforge/ dirs created when a test/server runs with cwd inside
+# apps/<app> (the smithy server resolves PROJECT_ROOT from cwd). Local test-run
+# data (sync/*.jsonl, *.db, daemon-state.json) — never commit these.
+apps/*/.stoneforge/
+
 # SEO tools
 tools/seo/.env
 tools/seo/output/*.json
