@@ -103,6 +103,34 @@ function insertDependency(backend: StorageBackend, dep: Dependency): void {
   );
 }
 
+/**
+ * Soft-delete an element the way QuarryAPI.deleteElement() does: the
+ * tombstone fields (`status: 'tombstone'`, `deletedAt`, `deleteReason`) are
+ * written into the `data` payload and the `deleted_at` column is set. Also
+ * marks the element dirty for the incremental export path.
+ */
+function softDeleteElement(backend: StorageBackend, element: Element, deletedAt: string): void {
+  const {
+    id,
+    type: _type,
+    createdAt: _createdAt,
+    updatedAt: _updatedAt,
+    createdBy: _createdBy,
+    tags: _tags,
+    ...data
+  } = element;
+  backend.run(
+    'UPDATE elements SET data = ?, deleted_at = ?, updated_at = ? WHERE id = ?',
+    [
+      JSON.stringify({ ...data, status: 'tombstone', deletedAt, deleteReason: 'test' }),
+      deletedAt,
+      deletedAt,
+      id,
+    ]
+  );
+  backend.markDirty(id);
+}
+
 function getElementCount(backend: StorageBackend): number {
   const row = backend.queryOne<{ count: number }>('SELECT COUNT(*) as count FROM elements');
   return row?.count ?? 0;
@@ -527,6 +555,193 @@ describe('SyncService', () => {
 
       expect(result.dependencies).toContain('el-task1');
       expect(result.dependencies).toContain('el-task2');
+    });
+
+    test('includes tombstones for soft-deleted elements', () => {
+      // exportToString backs the HTTP sync pull/push/exchange endpoints and
+      // QuarryAPI.export() — other replicas rely on it to learn about
+      // deletions, so it must not drop tombstones either
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+
+      const deletedAt = createTimestamp();
+      softDeleteElement(backend, task1, deletedAt);
+
+      const result = service.exportToString();
+
+      const { elements } = parseElements(result.elements);
+      expect(elements).toHaveLength(2);
+
+      const tombstone = elements.find((el) => el.id === 'el-task1') as unknown as {
+        deletedAt?: string;
+        status?: string;
+      };
+      expect(tombstone).toBeDefined();
+      expect(tombstone.deletedAt).toBe(deletedAt);
+      expect(tombstone.status).toBe('tombstone');
+
+      expect(elements.find((el) => el.id === 'el-task2')).toBeDefined();
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Tombstone Export Tests
+  // --------------------------------------------------------------------------
+
+  describe('tombstone export', () => {
+    test('full export after a delete still contains the tombstone', async () => {
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+
+      const outputDir = join(tempDir, 'export');
+
+      // Baseline export while both elements are live
+      await service.export({ outputDir, full: true });
+
+      // Soft delete task1 (tombstone), mirroring QuarryAPI.deleteElement()
+      const deletedAt = createTimestamp();
+      softDeleteElement(backend, task1, deletedAt);
+
+      // A full export rewrites the file from the complete element set — it
+      // must keep the tombstone instead of erasing the deletion
+      const result = await service.export({ outputDir, full: true });
+
+      expect(result.elementsExported).toBe(2);
+
+      const { elements } = parseElements(readFileSync(result.elementsFile, 'utf-8'));
+      expect(elements).toHaveLength(2);
+
+      const tombstone = elements.find((el) => el.id === 'el-task1') as unknown as {
+        deletedAt?: string;
+        status?: string;
+      };
+      expect(tombstone).toBeDefined();
+      expect(tombstone.deletedAt).toBe(deletedAt);
+      expect(tombstone.status).toBe('tombstone');
+
+      // The live element is still exported normally
+      expect(elements.find((el) => el.id === 'el-task2')).toBeDefined();
+    });
+
+    test('importing a full export with a tombstone into a fresh DB keeps the element deleted', async () => {
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+
+      const exportDir = join(tempDir, 'export');
+      await service.export({ outputDir: exportDir, full: true });
+
+      const deletedAt = createTimestamp();
+      softDeleteElement(backend, task1, deletedAt);
+
+      // The exported file now carries the tombstone
+      await service.export({ outputDir: exportDir, full: true });
+
+      // Import into a fresh database (a new clone pulling the source of truth)
+      const freshBackend = createTestBackend(join(tempDir, 'fresh.db'));
+      const freshService = createSyncService(freshBackend);
+
+      const importResult = await freshService.import({ inputDir: exportDir });
+
+      expect(importResult.errors).toHaveLength(0);
+      expect(importResult.elementsImported).toBe(2);
+
+      // The deleted element stays deleted: row present, deleted_at set
+      const deletedRow = freshBackend.queryOne<{ deleted_at: string | null; data: string }>(
+        'SELECT deleted_at, data FROM elements WHERE id = ?',
+        ['el-task1']
+      );
+      expect(deletedRow).toBeDefined();
+      expect(deletedRow?.deleted_at).toBe(deletedAt);
+      expect(JSON.parse(deletedRow?.data ?? '{}').status).toBe('tombstone');
+
+      // The live element is imported live
+      const liveRow = freshBackend.queryOne<{ deleted_at: string | null }>(
+        'SELECT deleted_at FROM elements WHERE id = ?',
+        ['el-task2']
+      );
+      expect(liveRow?.deleted_at).toBeNull();
+
+      freshBackend.close();
+    });
+
+    test('importing a tombstone over a live local element keeps it deleted', async () => {
+      // Local clone still has the element live
+      const task1 = createTestElement({ id: 'el-task1' as ElementId, title: 'Shared Task' });
+      insertElement(backend, task1);
+
+      // Remote clone deleted it and exported the tombstone
+      const remoteBackend = createTestBackend(join(tempDir, 'remote.db'));
+      const remoteTask = createTestElement({ id: 'el-task1' as ElementId, title: 'Shared Task' });
+      insertElement(remoteBackend, remoteTask);
+      const deletedAt = createTimestamp();
+      softDeleteElement(remoteBackend, remoteTask, deletedAt);
+
+      const exportDir = join(tempDir, 'remote-export');
+      createSyncService(remoteBackend).exportSync({ outputDir: exportDir, full: true });
+      remoteBackend.close();
+
+      const result = await service.import({ inputDir: exportDir });
+
+      expect(result.elementsImported).toBe(1);
+
+      // Fresh tombstone wins on merge — the element must stay deleted locally
+      const row = backend.queryOne<{ deleted_at: string | null; data: string }>(
+        'SELECT deleted_at, data FROM elements WHERE id = ?',
+        ['el-task1']
+      );
+      expect(row?.deleted_at).toBe(deletedAt);
+      expect(JSON.parse(row?.data ?? '{}').status).toBe('tombstone');
+    });
+
+    test('full and incremental exports produce consistent tombstones', async () => {
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
+
+      const outputDir = join(tempDir, 'export');
+
+      // Baseline full export while both elements are live
+      await service.export({ outputDir, full: true });
+
+      const deletedAt = createTimestamp();
+      softDeleteElement(backend, task1, deletedAt);
+
+      // Incremental export carries the dirty tombstone into the file
+      const incremental = await service.export({ outputDir, full: false });
+      expect(incremental.incremental).toBe(true);
+      expect(incremental.elementsExported).toBe(2);
+      const incrementalContent = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+
+      // A full export of the same state must produce the same file — the two
+      // paths serialize tombstones identically, so the tombstone recorded by
+      // the incremental export survives a full re-export byte-for-byte
+      const full = await service.export({ outputDir, full: true });
+      expect(full.elementsExported).toBe(2);
+      const fullContent = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+
+      expect(fullContent).toBe(incrementalContent);
+
+      // An incremental export with nothing dirty must not change the file
+      const idle = await service.export({ outputDir, full: false });
+      expect(idle.incremental).toBe(true);
+      expect(idle.elementsExported).toBe(2);
+      expect(readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8')).toBe(fullContent);
+
+      // The tombstone is present and correct in the final file
+      const { elements } = parseElements(fullContent);
+      expect(elements).toHaveLength(2);
+      const tombstone = elements.find((el) => el.id === 'el-task1') as unknown as {
+        deletedAt?: string;
+      };
+      expect(tombstone?.deletedAt).toBe(deletedAt);
+      expect(elements.find((el) => el.id === 'el-task2')).toBeDefined();
     });
   });
 

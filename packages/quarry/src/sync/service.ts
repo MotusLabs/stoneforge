@@ -243,10 +243,12 @@ export class SyncService {
   /**
    * Read everything needed for an export and decide what to write.
    *
-   * A full export serializes the complete element set. An incremental export
-   * reads the existing elements file and merges only the dirty elements into
-   * it (replacing entries by id, appending new ones), so elements that are
-   * still clean survive in the file.
+   * A full export serializes the complete element set, **including
+   * soft-deleted elements as tombstones** — deletions are part of the source
+   * of truth and must survive a full re-export. An incremental export reads
+   * the existing elements file and merges only the dirty elements into it
+   * (replacing entries by id, appending new ones), so elements that are still
+   * clean — including previously exported tombstones — survive in the file.
    */
   private prepareExport(options: SyncExportOptions): ExportPlan {
     // Build file paths
@@ -647,14 +649,26 @@ export class SyncService {
   // --------------------------------------------------------------------------
 
   /**
-   * Get all elements from storage
+   * Get all elements from storage, including soft-deleted ones (tombstones)
+   *
+   * Tombstones are deliberately included: the JSONL files are the git-tracked
+   * source of truth, so a full export that omitted soft-deleted rows would
+   * erase tombstones that earlier (incremental) exports recorded. Clones that
+   * import such a file would never see those deletions and the deleted
+   * elements could come back. Tombstones are serialized in the same form the
+   * incremental path writes and the importer understands: the `deletedAt` /
+   * `status: 'tombstone'` fields live in the element's `data` payload.
    */
   private getAllElements(includeEphemeral: boolean): Element[] {
-    // Query all elements
-    let sql = 'SELECT * FROM elements WHERE deleted_at IS NULL';
+    // Query all elements (live and soft-deleted)
+    const conditions: string[] = [];
     if (!includeEphemeral) {
       // Exclude ephemeral workflows (with ephemeral: true)
-      sql += " AND JSON_EXTRACT(data, '$.ephemeral') IS NOT true";
+      conditions.push("JSON_EXTRACT(data, '$.ephemeral') IS NOT true");
+    }
+    let sql = 'SELECT * FROM elements';
+    if (conditions.length > 0) {
+      sql += ` WHERE ${conditions.join(' AND ')}`;
     }
     sql += ' ORDER BY created_at';
 

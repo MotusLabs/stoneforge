@@ -159,6 +159,9 @@ always contains the complete element set. If elements.jsonl does not exist yet,
 a full export is performed instead. Use --full to rewrite the file from
 scratch.
 
+Soft-deleted elements are exported as tombstones (with deletedAt) in both
+modes, so deletions propagate to clones that import the files.
+
 Options:
   -o, --output <dir>       Output directory (default: .stoneforge/sync)
   -f, --full               Full export (ignore dirty tracking)
