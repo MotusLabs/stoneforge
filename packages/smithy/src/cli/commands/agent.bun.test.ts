@@ -23,6 +23,7 @@ import {
   agentStreamCommand,
   agentDisableCommand,
   agentEnableCommand,
+  agentSetTierCommand,
 } from './agent.js';
 
 describe('Agent Command Structure', () => {
@@ -42,6 +43,7 @@ describe('Agent Command Structure', () => {
       expect(agentCommand.subcommands!.stream).toBe(agentStreamCommand);
       expect(agentCommand.subcommands!.disable).toBe(agentDisableCommand);
       expect(agentCommand.subcommands!.enable).toBe(agentEnableCommand);
+      expect(agentCommand.subcommands!['set-tier']).toBe(agentSetTierCommand);
     });
 
     it('should default to list handler', () => {
@@ -88,7 +90,7 @@ describe('Agent Command Structure', () => {
 
     it('should have all registration options', () => {
       expect(agentRegisterCommand.options).toBeDefined();
-      expect(agentRegisterCommand.options!.length).toBe(11);
+      expect(agentRegisterCommand.options!.length).toBe(12);
 
       // Required role option
       const roleOption = agentRegisterCommand.options![0];
@@ -144,6 +146,28 @@ describe('Agent Command Structure', () => {
       const targetBranchOption = agentRegisterCommand.options![10];
       expect(targetBranchOption.name).toBe('targetBranch');
       expect(targetBranchOption.hasValue).toBe(true);
+
+      // Dispatch tier option
+      const tierOption = agentRegisterCommand.options![11];
+      expect(tierOption.name).toBe('tier');
+      expect(tierOption.hasValue).toBe(true);
+    });
+
+    it('should have --tier option with correct properties', () => {
+      const tierOption = agentRegisterCommand.options!.find(opt => opt.name === 'tier');
+      expect(tierOption).toBeDefined();
+      expect(tierOption!.hasValue).toBe(true);
+      expect(tierOption!.description).toContain('Dispatch tier');
+    });
+
+    it('should accept --tier flag via parser', async () => {
+      const { parseArgs } = await import('@stoneforge/quarry/cli');
+      const result = parseArgs(
+        ['agent', 'register', 'CheapWorker', '--role', 'worker', '--tier', '2'],
+        agentRegisterCommand.options!,
+        { strict: false }
+      );
+      expect(result.commandOptions.tier).toBe('2');
     });
 
     it('should have --model option with correct properties', () => {
@@ -248,6 +272,15 @@ describe('Agent Command Structure', () => {
       expect(typeof agentEnableCommand.handler).toBe('function');
     });
   });
+
+  describe('agentSetTierCommand', () => {
+    it('should have correct structure', () => {
+      expect(agentSetTierCommand.name).toBe('set-tier');
+      expect(agentSetTierCommand.description).toBe('Set or clear a worker dispatch tier (1 = most preferred)');
+      expect(agentSetTierCommand.usage).toBe('sf agent set-tier <id> <n|none>');
+      expect(typeof agentSetTierCommand.handler).toBe('function');
+    });
+  });
 });
 
 describe('Agent Command Validation', () => {
@@ -276,6 +309,12 @@ describe('Agent Command Validation', () => {
       const result = await agentRegisterCommand.handler(['TestAgent'], { role: 'invalid' });
       expect(result.exitCode).not.toBe(0);
       expect(result.error).toContain('Invalid role');
+    });
+
+    it('should reject --tier on a non-worker role', async () => {
+      const result = await agentRegisterCommand.handler(['TestAgent'], { role: 'director', tier: '1' });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.error).toContain('--tier can only be set on worker agents');
     });
   });
 
@@ -317,6 +356,30 @@ describe('Agent Command Validation', () => {
       expect(result.exitCode).not.toBe(0);
       expect(result.error).toContain('Usage');
     });
+  });
+
+  describe('agentSetTierCommand', () => {
+    it('should fail without id argument', async () => {
+      const result = await agentSetTierCommand.handler([], {});
+      expect(result.exitCode).not.toBe(0);
+      expect(result.error).toContain('Usage');
+    });
+
+    it('should fail without tier argument', async () => {
+      const result = await agentSetTierCommand.handler(['el-abc123'], {});
+      expect(result.exitCode).not.toBe(0);
+      expect(result.error).toContain('Usage');
+    });
+
+    it.each([['0'], ['-1'], ['1.5'], ['abc'], ['0x2'], [' ']])(
+      'should reject invalid tier "%s" before touching the agent',
+      async (tierArg) => {
+        const result = await agentSetTierCommand.handler(['el-abc123', tierArg], {});
+        expect(result.exitCode).not.toBe(0);
+        expect(result.error).toContain('Invalid tier');
+        expect(result.error).toContain('positive integer');
+      }
+    );
   });
 });
 
@@ -479,6 +542,221 @@ describe('agent disable / enable behavioural', () => {
         process.chdir(cwdBefore);
       }
     } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ============================================================================
+// Behavioural round-trip tests for worker dispatch tiers
+//
+// Same tmpdir + chdir approach as above: the handlers resolve the workspace DB
+// through findStoneforgeDir(process.cwd()), so we give them a throwaway
+// .stoneforge/stoneforge.db and run the real handler code end-to-end.
+// ============================================================================
+
+describe('agent tier behavioural', () => {
+  const CREATOR = 'el-0000' as EntityId;
+
+  /** Creates a tmp workspace with a .stoneforge/stoneforge.db and returns it. */
+  async function makeWorkspace(prefix: string) {
+    const tmpRoot = mkdtempSync(join(tmpdir(), prefix));
+    mkdirSync(join(tmpRoot, '.stoneforge'), { recursive: true });
+    const dbPath = join(tmpRoot, '.stoneforge', 'stoneforge.db');
+    const backend = createStorage({ path: dbPath, create: true });
+    initializeSchema(backend);
+    return { tmpRoot, dbPath, api: createOrchestratorAPI(backend) };
+  }
+
+  /** Reads the agent metadata through the API the handlers write to. */
+  async function readMeta(api: ReturnType<typeof createOrchestratorAPI>, agentId: string) {
+    const agent = await api.getAgent(agentId as EntityId);
+    expect(agent).toBeDefined();
+    return (agent!.metadata.agent ?? {}) as { tier?: number };
+  }
+
+  test('register --tier stores the tier on the worker', async () => {
+    const { tmpRoot, dbPath, api } = await makeWorkspace('sf-tier-register-');
+    const cwdBefore = process.cwd();
+    try {
+      process.chdir(tmpRoot);
+      const result = await agentRegisterCommand.handler!(
+        ['CheapWorker', '--role', 'worker'],
+        { db: dbPath, role: 'worker', tier: '2' } as never
+      );
+      expect(result.exitCode).toBe(0);
+
+      const agents = await api.listAgents();
+      expect(agents).toHaveLength(1);
+      const meta = await readMeta(api, agents[0].id);
+      expect(meta.tier).toBe(2);
+      // The tier must round-trip through serialised JSON (not just in memory).
+      expect(JSON.stringify(meta)).toContain('"tier":2');
+    } finally {
+      process.chdir(cwdBefore);
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('register without --tier leaves the worker untiered', async () => {
+    const { tmpRoot, dbPath, api } = await makeWorkspace('sf-tier-untiered-');
+    const cwdBefore = process.cwd();
+    try {
+      process.chdir(tmpRoot);
+      const result = await agentRegisterCommand.handler!(
+        ['PlainWorker', '--role', 'worker'],
+        { db: dbPath, role: 'worker' } as never
+      );
+      expect(result.exitCode).toBe(0);
+
+      const agents = await api.listAgents();
+      const meta = await readMeta(api, agents[0].id);
+      expect(meta.tier).toBeUndefined();
+      expect(JSON.stringify(meta)).not.toContain('"tier"');
+    } finally {
+      process.chdir(cwdBefore);
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  test.each([['0'], ['-1'], ['2.5'], ['abc']])(
+    'register with invalid tier %s fails and registers nothing',
+    async (badTier) => {
+      const { tmpRoot, dbPath, api } = await makeWorkspace('sf-tier-invalid-reg-');
+      const cwdBefore = process.cwd();
+      try {
+        process.chdir(tmpRoot);
+        const result = await agentRegisterCommand.handler!(
+          ['BadWorker', '--role', 'worker'],
+          { db: dbPath, role: 'worker', tier: badTier } as never
+        );
+        expect(result.exitCode).not.toBe(0);
+        expect(result.error).toContain('Invalid tier');
+        // The agent must not have been created.
+        expect(await api.listAgents()).toHaveLength(0);
+      } finally {
+        process.chdir(cwdBefore);
+        rmSync(tmpRoot, { recursive: true, force: true });
+      }
+    }
+  );
+
+  test('set-tier sets, clears and rejects invalid values without changing the agent', async () => {
+    const { tmpRoot, dbPath, api } = await makeWorkspace('sf-tier-set-');
+    const cwdBefore = process.cwd();
+    try {
+      const registered = await api.registerWorker({
+        name: 'tiered-worker',
+        workerMode: 'ephemeral',
+        createdBy: CREATOR,
+      });
+      const agentId = registered.id as unknown as string;
+
+      process.chdir(tmpRoot);
+
+      // Set
+      const setResult = await agentSetTierCommand.handler!([agentId, '3'], { db: dbPath } as never);
+      expect(setResult.exitCode).toBe(0);
+      expect(await readMeta(api, agentId)).toMatchObject({ tier: 3 });
+
+      // Invalid: agent unchanged
+      const badResult = await agentSetTierCommand.handler!([agentId, '0'], { db: dbPath } as never);
+      expect(badResult.exitCode).not.toBe(0);
+      expect(badResult.error).toContain('Invalid tier');
+      expect(await readMeta(api, agentId)).toMatchObject({ tier: 3 });
+
+      // Clear with "none"
+      const clearResult = await agentSetTierCommand.handler!([agentId, 'none'], { db: dbPath } as never);
+      expect(clearResult.exitCode).toBe(0);
+      const cleared = await readMeta(api, agentId);
+      expect(cleared.tier).toBeUndefined();
+      // JSON.stringify drops undefined, so the key is gone from persisted metadata.
+      expect(JSON.stringify(cleared)).not.toContain('"tier"');
+
+      // Re-set after clearing still works
+      const resetResult = await agentSetTierCommand.handler!([agentId, '1'], { db: dbPath } as never);
+      expect(resetResult.exitCode).toBe(0);
+      expect(await readMeta(api, agentId)).toMatchObject({ tier: 1 });
+    } finally {
+      process.chdir(cwdBefore);
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('set-tier refuses a non-worker agent', async () => {
+    const { tmpRoot, dbPath, api } = await makeWorkspace('sf-tier-nonworker-');
+    const cwdBefore = process.cwd();
+    try {
+      const director = await api.registerDirector({ name: 'the-director', createdBy: CREATOR });
+      process.chdir(tmpRoot);
+
+      const result = await agentSetTierCommand.handler!(
+        [director.id as unknown as string, '1'],
+        { db: dbPath } as never
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(result.error).toContain('not a worker');
+      const meta = (await api.getAgent(director.id))!.metadata.agent;
+      expect(JSON.stringify(meta)).not.toContain('"tier"');
+    } finally {
+      process.chdir(cwdBefore);
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('set-tier reports a missing agent', async () => {
+    const { tmpRoot, dbPath } = await makeWorkspace('sf-tier-missing-');
+    const cwdBefore = process.cwd();
+    try {
+      process.chdir(tmpRoot);
+      const result = await agentSetTierCommand.handler!(['el-missing', '1'], { db: dbPath } as never);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.error).toContain('Agent not found');
+    } finally {
+      process.chdir(cwdBefore);
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('list output has a TIER column showing the tier and "-" when unset', async () => {
+    const { tmpRoot, dbPath, api } = await makeWorkspace('sf-tier-list-');
+    const cwdBefore = process.cwd();
+    try {
+      const tiered = await api.registerWorker({
+        name: 'tiered-w',
+        workerMode: 'ephemeral',
+        createdBy: CREATOR,
+        tier: 1,
+      });
+      await api.registerWorker({ name: 'untiered-w', workerMode: 'ephemeral', createdBy: CREATOR });
+
+      process.chdir(tmpRoot);
+      const result = await agentListCommand.handler!([], { db: dbPath } as never);
+      expect(result.exitCode).toBe(0);
+      const out = String(result.message ?? '');
+
+      // Header row carries the new column.
+      expect(out).toContain('TIER');
+
+      const headerLine = out.split('\n')[0] ?? '';
+      const roleIndex = headerLine.indexOf('ROLE');
+      const tierIndex = headerLine.indexOf('TIER');
+      const statusIndex = headerLine.indexOf('STATUS');
+      expect(roleIndex).toBeGreaterThanOrEqual(0);
+      expect(tierIndex).toBeGreaterThan(roleIndex);
+      expect(statusIndex).toBeGreaterThan(tierIndex);
+
+      const tieredLine = out.split('\n').find(l => /\btiered-w\b/.test(l));
+      const untieredLine = out.split('\n').find(l => /\buntiered-w\b/.test(l));
+      expect(tieredLine).toBeTruthy();
+      expect(untieredLine).toBeTruthy();
+      // The tier renders as a standalone cell, not as part of the ID or name.
+      expect(tieredLine!).toMatch(/(^|\s)1(\s|$)/);
+      expect(tieredLine!).toContain(tiered.id);
+      expect(untieredLine!).toMatch(/(^|\s)-(\s|$)/);
+      expect(untieredLine!).not.toMatch(/(^|\s)1(\s|$)/);
+    } finally {
+      process.chdir(cwdBefore);
       rmSync(tmpRoot, { recursive: true, force: true });
     }
   });

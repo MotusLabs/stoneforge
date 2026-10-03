@@ -10,8 +10,26 @@ import { getProviderRegistry, ProviderError } from '@stoneforge/smithy/providers
 import type { Services } from '../services.js';
 import { formatSessionRecord } from '../formatters.js';
 import { createLogger } from '../../utils/logger.js';
+import { isValidAgentTier } from '../../types/index.js';
 
 const logger = createLogger('orchestrator');
+
+/**
+ * Validates a dispatch tier coming from an API request body.
+ *
+ * `null` means "clear the tier" (the agent goes back to being untiered). Any
+ * other value must be a positive integer (1 = most preferred), matching
+ * `isValidAgentTier()`. Returns an error message when the value is invalid.
+ */
+function validateTier(value: unknown): string | undefined {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (!isValidAgentTier(value)) {
+    return 'tier must be a positive integer (1 = most preferred) or null to clear it';
+  }
+  return undefined;
+}
 
 export function createAgentRoutes(services: Services) {
   const { agentRegistry, sessionManager, taskAssignmentService, stewardScheduler } = services;
@@ -49,10 +67,21 @@ export function createAgentRoutes(services: Services) {
         model?: string;
         executablePath?: string;
         targetBranch?: string;
+        tier?: number | null;
       };
 
       if (!body.role || !body.name) {
         return c.json({ error: { code: 'INVALID_INPUT', message: 'role and name are required' } }, 400);
+      }
+
+      // Dispatch tiers only apply to workers; validate before registering so an
+      // invalid value leaves nothing behind.
+      if (body.tier !== undefined && body.role !== 'worker') {
+        return c.json({ error: { code: 'INVALID_INPUT', message: 'tier can only be set on worker agents' } }, 400);
+      }
+      const tierError = validateTier(body.tier);
+      if (tierError) {
+        return c.json({ error: { code: 'VALIDATION_ERROR', message: tierError } }, 400);
       }
 
       const createdBy = (body.createdBy ?? 'el-0000') as EntityId;
@@ -86,6 +115,7 @@ export function createAgentRoutes(services: Services) {
             provider: body.provider,
             model: body.model,
             executablePath: body.executablePath,
+            tier: body.tier ?? undefined,
           });
           break;
 
@@ -175,6 +205,7 @@ export function createAgentRoutes(services: Services) {
         tags?: string[];
         reportsTo?: string;
         createdBy?: string;
+        tier?: number | null;
       };
 
       if (!body.name) {
@@ -186,6 +217,10 @@ export function createAgentRoutes(services: Services) {
       if (body.workerMode !== 'ephemeral' && body.workerMode !== 'persistent') {
         return c.json({ error: { code: 'INVALID_INPUT', message: 'workerMode must be "ephemeral" or "persistent"' } }, 400);
       }
+      const tierError = validateTier(body.tier);
+      if (tierError) {
+        return c.json({ error: { code: 'VALIDATION_ERROR', message: tierError } }, 400);
+      }
 
       const agent = await agentRegistry.registerWorker({
         name: body.name,
@@ -194,6 +229,7 @@ export function createAgentRoutes(services: Services) {
         tags: body.tags,
         maxConcurrentTasks: body.maxConcurrentTasks,
         reportsTo: body.reportsTo as EntityId | undefined,
+        tier: body.tier ?? undefined,
       });
 
       return c.json({ agent }, 201);
@@ -312,6 +348,7 @@ export function createAgentRoutes(services: Services) {
         model?: string | null;
         executablePath?: string | null;
         targetBranch?: string | null;
+        tier?: number | null;
         triggers?: Array<{ type: 'cron'; schedule: string } | { type: 'event'; event: string; condition?: string }>;
         disabled?: boolean;
       };
@@ -343,6 +380,16 @@ export function createAgentRoutes(services: Services) {
 
       if (body.disabled !== undefined && typeof body.disabled !== 'boolean') {
         return c.json({ error: { code: 'VALIDATION_ERROR', message: 'disabled must be a boolean' } }, 400);
+      }
+
+      // Dispatch tiers only apply to workers. Validate the value first so an
+      // invalid tier never partially applies alongside other field updates.
+      if (body.tier !== undefined && agent.metadata?.agent?.agentRole !== 'worker') {
+        return c.json({ error: { code: 'VALIDATION_ERROR', message: 'tier can only be set on worker agents' } }, 400);
+      }
+      const tierError = validateTier(body.tier);
+      if (tierError) {
+        return c.json({ error: { code: 'VALIDATION_ERROR', message: tierError } }, 400);
       }
 
       // Update name if provided
@@ -378,6 +425,15 @@ export function createAgentRoutes(services: Services) {
         }
         updatedAgent = await agentRegistry.updateAgentMetadata(agentId, {
           targetBranch: body.targetBranch === null ? undefined : body.targetBranch.trim(),
+        });
+      }
+
+      // Update the dispatch tier in agent metadata if provided (worker agents
+      // only, null clears it). Setting undefined drops the key so the
+      // absent-means-untiered contract holds in the JSON-serialised metadata.
+      if (body.tier !== undefined) {
+        updatedAgent = await agentRegistry.updateAgentMetadata(agentId, {
+          tier: body.tier === null ? undefined : body.tier,
         });
       }
 

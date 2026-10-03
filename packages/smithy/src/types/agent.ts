@@ -332,6 +332,12 @@ export interface RegisterWorkerInput {
   readonly model?: string;
   /** Custom executable path for the agent's provider CLI. If not set, uses provider default. */
   readonly executablePath?: string;
+  /**
+   * Dispatch tier for worker selection: a positive integer where 1 is the most
+   * preferred. A worker with no tier is treated as the least preferred. Must
+   * satisfy `isValidAgentTier()`. See the Worker Dispatch Tiers spec (design D1).
+   */
+  readonly tier?: number;
 }
 
 /**

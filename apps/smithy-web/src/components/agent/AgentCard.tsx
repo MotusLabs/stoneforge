@@ -122,6 +122,15 @@ export function AgentCard({
                 {agentMeta.model}
               </span>
             )}
+            {typeof workerMeta?.tier === 'number' && workerMeta.tier > 0 && (
+              <span
+                className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-[var(--color-surface-elevated)] text-[var(--color-text-tertiary)] border border-[var(--color-border)]"
+                data-testid={`agent-tier-${agent.id}`}
+                title="Dispatch tier: 1 is the most preferred; untiered workers are dispatched last."
+              >
+                Tier {workerMeta.tier}
+              </span>
+            )}
             {isDisabled && (
               <span
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-[var(--color-warning-muted)] text-[var(--color-warning-text)] border border-[var(--color-warning)]"
@@ -375,6 +384,8 @@ export function AgentCard({
         agentId={agent.id}
         currentProvider={agentMeta?.provider ?? 'claude-code'}
         currentExecutablePath={agentMeta?.executablePath}
+        currentTier={workerMeta?.tier}
+        canSetTier={!!workerMeta}
       />
 
       {/* Change Model Dialog */}

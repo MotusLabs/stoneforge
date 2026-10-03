@@ -1121,3 +1121,260 @@ test.describe('TB-O26: Agent Workspace View', () => {
     });
   });
 });
+
+// ============================================================================
+// Worker Dispatch Tiers
+//
+// Covers the tier surfaces on the agents page:
+// - the "Tier N" badge on AgentCard (and its absence for untiered agents)
+// - the tier input in CreateAgentDialog (workers only, submitted with the POST)
+// - the tier input in the agent edit/provider dialog (PATCH with tier / null)
+// ============================================================================
+
+test.describe('Worker Dispatch Tiers', () => {
+  const tieredAgents = [
+    {
+      id: 'el-worker-tiered',
+      name: 'Tiered Worker',
+      type: 'entity',
+      entityType: 'agent',
+      status: 'active',
+      createdAt: Date.now(),
+      modifiedAt: Date.now(),
+      metadata: {
+        agent: {
+          agentRole: 'worker',
+          workerMode: 'ephemeral',
+          sessionStatus: 'idle',
+          tier: 1,
+        },
+      },
+    },
+    {
+      id: 'el-worker-untiered',
+      name: 'Untiered Worker',
+      type: 'entity',
+      entityType: 'agent',
+      status: 'active',
+      createdAt: Date.now(),
+      modifiedAt: Date.now(),
+      metadata: {
+        agent: {
+          agentRole: 'worker',
+          workerMode: 'ephemeral',
+          sessionStatus: 'idle',
+        },
+      },
+    },
+  ];
+
+  async function mockAgents(page: import('@playwright/test').Page, agents: unknown[]) {
+    await page.route('**/api/agents*', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ agents }),
+      });
+    });
+  }
+
+  test.describe('AgentCard tier badge', () => {
+    test('shows a "Tier N" badge for a tiered worker', async ({ page }) => {
+      await mockAgents(page, tieredAgents);
+      await page.goto('/agents');
+
+      const badge = page.getByTestId('agent-tier-el-worker-tiered');
+      await expect(badge).toBeVisible();
+      await expect(badge).toHaveText('Tier 1');
+    });
+
+    test('shows no tier badge for an untiered worker', async ({ page }) => {
+      await mockAgents(page, tieredAgents);
+      await page.goto('/agents');
+
+      await expect(page.getByTestId('agent-tier-el-worker-untiered')).toHaveCount(0);
+    });
+  });
+
+  test.describe('CreateAgentDialog tier input', () => {
+    test('shows the tier input for workers once settings are expanded', async ({ page }) => {
+      await mockAgents(page, []);
+      await page.goto('/agents');
+      await page.getByTestId('agents-create').click();
+      await page.getByTestId('role-worker').click();
+      await page.getByTestId('toggle-capabilities').click();
+
+      await expect(page.getByTestId('agent-tier')).toBeVisible();
+    });
+
+    test('hides the tier input for stewards', async ({ page }) => {
+      await mockAgents(page, []);
+      await page.goto('/agents?tab=stewards');
+      await page.getByTestId('agents-create').click();
+      await page.getByTestId('toggle-capabilities').click();
+
+      await expect(page.getByTestId('agent-tier')).toHaveCount(0);
+    });
+
+    test('submits the tier with the create request', async ({ page }) => {
+      let createBody: Record<string, unknown> | null = null;
+      await page.route('**/api/agents', async (route) => {
+        const request = route.request();
+        if (request.method() === 'POST') {
+          createBody = request.postDataJSON();
+          route.fulfill({
+            status: 201,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              agent: {
+                id: 'el-new-worker',
+                name: 'cheap-worker',
+                type: 'entity',
+                entityType: 'agent',
+                status: 'active',
+                createdAt: Date.now(),
+                modifiedAt: Date.now(),
+                metadata: { agent: { agentRole: 'worker', workerMode: 'ephemeral', sessionStatus: 'idle', tier: 2 } },
+              },
+            }),
+          });
+        } else {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ agents: [] }),
+          });
+        }
+      });
+
+      await page.goto('/agents');
+      await page.getByTestId('agents-create').click();
+      await page.getByTestId('role-worker').click();
+      await page.getByTestId('toggle-capabilities').click();
+      await page.getByTestId('agent-tier').fill('2');
+      await page.getByTestId('submit-create-agent').click();
+
+      await expect(page.getByTestId('create-agent-dialog')).not.toBeVisible();
+      expect(createBody).toEqual(expect.objectContaining({
+        name: 'e-worker-1',
+        role: 'worker',
+        workerMode: 'ephemeral',
+        tier: 2,
+      }));
+    });
+
+    test('omits the tier from the create request when the field is blank', async ({ page }) => {
+      let createBody: Record<string, unknown> | null = null;
+      await page.route('**/api/agents', async (route) => {
+        const request = route.request();
+        if (request.method() === 'POST') {
+          createBody = request.postDataJSON();
+          route.fulfill({
+            status: 201,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              agent: {
+                id: 'el-new-worker',
+                name: 'plain-worker',
+                type: 'entity',
+                entityType: 'agent',
+                status: 'active',
+                createdAt: Date.now(),
+                modifiedAt: Date.now(),
+                metadata: { agent: { agentRole: 'worker', workerMode: 'ephemeral', sessionStatus: 'idle' } },
+              },
+            }),
+          });
+        } else {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ agents: [] }),
+          });
+        }
+      });
+
+      await page.goto('/agents');
+      await page.getByTestId('agents-create').click();
+      await page.getByTestId('role-worker').click();
+      await page.getByTestId('toggle-capabilities').click();
+      // Leave the tier field blank
+      await page.getByTestId('submit-create-agent').click();
+
+      await expect(page.getByTestId('create-agent-dialog')).not.toBeVisible();
+      expect(createBody).not.toBeNull();
+      expect('tier' in (createBody ?? {})).toBe(false);
+    });
+
+    test('rejects a non-positive tier without submitting', async ({ page }) => {
+      let submitted = false;
+      await page.route('**/api/agents', async (route) => {
+        const request = route.request();
+        if (request.method() === 'POST') {
+          submitted = true;
+        }
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(request.method() === 'POST' ? { agent: {} } : { agents: [] }),
+        });
+      });
+
+      await page.goto('/agents');
+      await page.getByTestId('agents-create').click();
+      await page.getByTestId('role-worker').click();
+      await page.getByTestId('toggle-capabilities').click();
+      await page.getByTestId('agent-tier').fill('0');
+      await page.getByTestId('submit-create-agent').click();
+
+      await expect(page.getByText('Tier must be a positive integer')).toBeVisible();
+      await expect(page.getByTestId('create-agent-dialog')).toBeVisible();
+      expect(submitted).toBe(false);
+    });
+  });
+
+  test.describe('Change provider dialog tier input', () => {
+    test('edits and clears the tier through the provider dialog', async ({ page }) => {
+      const agents = tieredAgents.map(a => ({ ...a, metadata: { agent: { ...a.metadata.agent } } }));
+      let patchBody: Record<string, unknown> | null = null;
+      await page.route('**/api/agents/el-worker-tiered', async (route) => {
+        if (route.request().method() === 'PATCH') {
+          patchBody = route.request().postDataJSON();
+        }
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ agent: agents[0] }),
+        });
+      });
+      await mockAgents(page, agents);
+
+      await page.goto('/agents');
+
+      // Open the card menu and the change-provider dialog
+      await page.getByTestId('agent-menu-el-worker-tiered').click();
+      await page.getByTestId('agent-change-provider-el-worker-tiered').click();
+      await expect(page.getByTestId('change-provider-dialog')).toBeVisible();
+
+      // The current tier is prefilled
+      const tierInput = page.getByTestId('change-provider-tier');
+      await expect(tierInput).toBeVisible();
+      await expect(tierInput).toHaveValue('1');
+
+      // Change the tier and submit
+      await tierInput.fill('3');
+      await page.getByTestId('change-provider-submit').click();
+      await expect(page.getByTestId('change-provider-dialog')).not.toBeVisible();
+      expect(patchBody).toEqual(expect.objectContaining({ tier: 3 }));
+
+      // Clearing the field sends null (clear) rather than omitting the tier
+      patchBody = null;
+      await page.getByTestId('agent-menu-el-worker-tiered').click();
+      await page.getByTestId('agent-change-provider-el-worker-tiered').click();
+      await page.getByTestId('change-provider-tier').fill('');
+      await page.getByTestId('change-provider-submit').click();
+      await expect(page.getByTestId('change-provider-dialog')).not.toBeVisible();
+      expect(patchBody).toEqual(expect.objectContaining({ tier: null }));
+    });
+  });
+});

@@ -50,6 +50,12 @@ export interface BaseAgentMetadata {
   executablePath?: string;
   /** When true, the agent is parked: kept in the list but skipped by dispatch and the scheduler. */
   disabled?: boolean;
+  /**
+   * Dispatch tier for worker selection: a positive integer where 1 is the most
+   * preferred. A worker with no tier is treated as the least preferred and is
+   * dispatched after every tiered worker. Only honoured for workers.
+   */
+  tier?: number;
 }
 
 export interface DirectorMetadata extends BaseAgentMetadata {
@@ -207,6 +213,8 @@ export interface CreateAgentInput {
   model?: string;
   // Custom executable path for the provider CLI (if not set, uses default)
   executablePath?: string;
+  // Dispatch tier for workers: positive integer, 1 = most preferred (if not set, untiered)
+  tier?: number;
   // Target branch for director agents (if not set, auto-detects master/main)
   targetBranch?: string;
 }

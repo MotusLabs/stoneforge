@@ -20,6 +20,10 @@ export interface ChangeProviderDialogProps {
   agentId: string;
   currentProvider: string;
   currentExecutablePath?: string;
+  /** Current dispatch tier (workers only) */
+  currentTier?: number;
+  /** Whether the agent may carry a dispatch tier (workers only) */
+  canSetTier?: boolean;
   onSuccess?: () => void;
 }
 
@@ -29,10 +33,13 @@ export function ChangeProviderDialog({
   agentId,
   currentProvider,
   currentExecutablePath,
+  currentTier,
+  canSetTier = false,
   onSuccess,
 }: ChangeProviderDialogProps) {
   const [provider, setProvider] = useState(currentProvider);
   const [executablePath, setExecutablePath] = useState(currentExecutablePath ?? '');
+  const [tier, setTier] = useState(currentTier === undefined ? '' : String(currentTier));
   const [error, setError] = useState<string | null>(null);
   const changeProvider = useChangeAgentProvider();
   const { data: providersData, isLoading: providersLoading } = useProviders();
@@ -42,9 +49,10 @@ export function ChangeProviderDialog({
     if (isOpen) {
       setProvider(currentProvider);
       setExecutablePath(currentExecutablePath ?? '');
+      setTier(currentTier === undefined ? '' : String(currentTier));
       setError(null);
     }
-  }, [isOpen, currentProvider, currentExecutablePath]);
+  }, [isOpen, currentProvider, currentExecutablePath, currentTier]);
 
   if (!isOpen) return null;
 
@@ -67,7 +75,19 @@ export function ChangeProviderDialog({
     const currentPath = currentExecutablePath ?? '';
     const pathChanged = trimmedPath !== currentPath;
 
-    if (provider === currentProvider && !pathChanged) {
+    // Dispatch tier: blank means no tier, otherwise a positive integer (1 = most preferred)
+    const rawTier = tier.trim();
+    let tierValue: number | undefined;
+    if (canSetTier && rawTier) {
+      if (!/^\d+$/.test(rawTier) || parseInt(rawTier, 10) < 1) {
+        setError('Tier must be a positive integer (1 = most preferred)');
+        return;
+      }
+      tierValue = parseInt(rawTier, 10);
+    }
+    const tierChanged = canSetTier && (tierValue ?? null) !== (currentTier ?? null);
+
+    if (provider === currentProvider && !pathChanged && !tierChanged) {
       handleClose();
       return;
     }
@@ -82,10 +102,18 @@ export function ChangeProviderDialog({
         executablePathValue = trimmedPath || null; // empty string → null (clear override)
       }
 
+      // Same contract for the dispatch tier: null clears it, a number sets it,
+      // and an unchanged value is not sent at all.
+      let tierToSend: number | null | undefined;
+      if (tierChanged) {
+        tierToSend = tierValue ?? null;
+      }
+
       await changeProvider.mutateAsync({
         agentId,
         provider,
         executablePath: executablePathValue,
+        tier: tierToSend,
       });
       onSuccess?.();
       handleClose();
@@ -95,7 +123,10 @@ export function ChangeProviderDialog({
   };
 
   const providers = providersData?.providers ?? [];
-  const hasChanges = provider !== currentProvider || executablePath.trim() !== (currentExecutablePath ?? '');
+  const hasChanges =
+    provider !== currentProvider
+    || executablePath.trim() !== (currentExecutablePath ?? '')
+    || (canSetTier && (tier.trim() === '' ? null : Number(tier.trim())) !== (currentTier ?? null));
 
   return (
     <>
@@ -145,7 +176,9 @@ export function ChangeProviderDialog({
             </button>
           </div>
 
-          <form onSubmit={handleSubmit} className="p-4 space-y-4">
+          {/* noValidate: keep our own tier error message instead of the
+              browser's native tooltip for the min=1 number input. */}
+          <form onSubmit={handleSubmit} noValidate className="p-4 space-y-4">
             {/* Error message */}
             {error && (
               <div className="flex items-center gap-2 px-3 py-2 text-sm text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
@@ -214,6 +247,37 @@ export function ChangeProviderDialog({
                 Custom path to the provider CLI executable. Leave empty to use the default.
               </p>
             </div>
+
+            {/* Dispatch tier (workers only) */}
+            {canSetTier && (
+              <div className="space-y-1">
+                <label htmlFor="change-provider-tier" className="text-sm font-medium text-[var(--color-text)]">
+                  Dispatch Tier (optional)
+                </label>
+                <input
+                  id="change-provider-tier"
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={tier}
+                  onChange={e => setTier(e.target.value)}
+                  placeholder="no tier"
+                  className="
+                    w-full px-3 py-2
+                    text-sm
+                    bg-[var(--color-surface)]
+                    border border-[var(--color-border)]
+                    rounded-lg
+                    placeholder:text-[var(--color-text-tertiary)]
+                    focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30
+                  "
+                  data-testid="change-provider-tier"
+                />
+                <p className="text-xs text-[var(--color-text-tertiary)]">
+                  Positive integer, 1 = most preferred. Clear the field to remove the tier; untiered workers are dispatched last.
+                </p>
+              </div>
+            )}
 
             {/* Actions */}
             <div className="flex justify-end gap-2 pt-2">

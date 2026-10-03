@@ -14,6 +14,7 @@ import type { Command, GlobalOptions, CommandResult, CommandOption } from '@ston
 import { success, failure, ExitCode, getFormatter, getOutputMode, OPERATOR_ENTITY_ID } from '@stoneforge/quarry/cli';
 import type { EntityId, ElementId } from '@stoneforge/core';
 import type { AgentRole, WorkerMode, StewardFocus, AgentMetadata } from '../../types/index.js';
+import { isValidAgentTier } from '../../types/index.js';
 import type { OrchestratorAPI, AgentEntity } from '../../api/index.js';
 import { isAgentDisabled } from '../../services/agent-registry.js';
 
@@ -57,6 +58,35 @@ async function createOrchestratorClient(options: GlobalOptions): Promise<{
  */
 function getAgentMeta(agent: AgentEntity): Record<string, unknown> {
   return (agent.metadata?.agent ?? {}) as unknown as Record<string, unknown>;
+}
+
+/**
+ * Result of parsing a tier argument: either a resolved tier (null = clear) or
+ * an error message explaining why the value is invalid.
+ */
+type ParsedTier = { tier: number | null; error?: undefined } | { tier?: undefined; error: string };
+
+/**
+ * Parses a tier value coming from the CLI (`--tier <n>` or the
+ * `sf agent set-tier <id> <n|none>` argument).
+ *
+ * `none` (case-insensitive) clears the tier and resolves to null. Any other
+ * value must be a positive integer (1 = most preferred), matching
+ * `isValidAgentTier()`. The integer syntax is checked strictly (digits only)
+ * so values like `0x2`, `1e3` or `+2` are rejected instead of being silently
+ * coerced by `Number()`.
+ */
+function parseTierArgument(raw: string): ParsedTier {
+  const value = raw.trim();
+  if (value.toLowerCase() === 'none') {
+    return { tier: null };
+  }
+  if (!/^\d+$/.test(value) || !isValidAgentTier(parseInt(value, 10))) {
+    return {
+      error: `Invalid tier: ${value}. Tier must be a positive integer (1 = most preferred) or "none" to clear it.`,
+    };
+  }
+  return { tier: parseInt(value, 10) };
 }
 
 /**
@@ -271,7 +301,7 @@ async function agentListHandler(
       return success(null, 'No agents found');
     }
 
-    const headers = ['ID', 'NAME', 'ROLE', 'STATUS', 'SESSION'];
+    const headers = ['ID', 'NAME', 'ROLE', 'TIER', 'STATUS', 'SESSION'];
     const rows = agents.map((agent) => {
       const meta = getAgentMeta(agent);
       const baseStatus = (meta.sessionStatus as string) ?? 'idle';
@@ -280,6 +310,7 @@ async function agentListHandler(
         agent.id,
         agent.name ?? '-',
         (meta.agentRole as string) ?? '-',
+        isValidAgentTier(meta.tier) ? String(meta.tier) : '-',
         status,
         (meta.sessionId as string)?.slice(0, 8) ?? '-',
       ];
@@ -298,6 +329,8 @@ export const agentListCommand: Command = {
   description: 'List registered agents',
   usage: 'sf agent list [options]',
   help: `List all registered orchestrator agents.
+
+Columns: ID, NAME, ROLE, TIER (dispatch tier, "-" when unset), STATUS, SESSION.
 
 Options:
   -r, --role <role>        Filter by role (director, worker, steward)
@@ -373,6 +406,9 @@ async function agentShowHandler(
     if (meta.stewardFocus) {
       lines.push(`Focus:    ${meta.stewardFocus}`);
     }
+    if (isValidAgentTier(meta.tier)) {
+      lines.push(`Tier:     ${meta.tier}`);
+    }
 
     return success(agent, lines.join('\n'));
   } catch (err) {
@@ -412,6 +448,7 @@ interface AgentRegisterOptions {
   provider?: string;
   model?: string;
   targetBranch?: string;
+  tier?: string;
 }
 
 const agentRegisterOptions: CommandOption[] = [
@@ -475,6 +512,11 @@ const agentRegisterOptions: CommandOption[] = [
     description: 'Target branch for merge (director only, default: auto-detect)',
     hasValue: true,
   },
+  {
+    name: 'tier',
+    description: 'Dispatch tier for workers: positive integer, 1 = most preferred (default: none)',
+    hasValue: true,
+  },
 ];
 
 async function agentRegisterHandler(
@@ -497,6 +539,20 @@ async function agentRegisterHandler(
       `Invalid role: ${options.role}. Must be one of: ${validRoles.join(', ')}`,
       ExitCode.VALIDATION
     );
+  }
+
+  // Resolve the dispatch tier before touching the registry so an invalid value
+  // fails without leaving a half-registered agent behind.
+  let tier: number | undefined;
+  if (options.tier !== undefined) {
+    if (options.role !== 'worker') {
+      return failure('--tier can only be set on worker agents', ExitCode.VALIDATION);
+    }
+    const parsed = parseTierArgument(options.tier);
+    if (parsed.error !== undefined) {
+      return failure(parsed.error, ExitCode.VALIDATION);
+    }
+    tier = parsed.tier ?? undefined;
   }
 
   const { api, error } = await createOrchestratorClient(options);
@@ -547,6 +603,7 @@ async function agentRegisterHandler(
           roleDefinitionRef,
           provider: options.provider,
           model: options.model,
+          tier,
         });
         break;
       }
@@ -622,6 +679,9 @@ Options:
   --provider <name>       Agent provider (e.g., claude-code, opencode)
   --model <model>         LLM model to use (e.g., claude-sonnet-4-5-20250929)
   --target-branch <branch> Target branch for merge (director only, default: auto-detect)
+  --tier <n>              Dispatch tier for workers: positive integer, 1 = most preferred.
+                          Workers without a tier are dispatched last. Use "sf agent set-tier"
+                          to change it later.
 
 Examples:
   sf agent register MyWorker --role worker --mode ephemeral
@@ -632,7 +692,9 @@ Examples:
   sf agent register TeamWorker --role worker --reportsTo el-director123
   sf agent register DocsSteward --role steward --focus docs --trigger "0 9 * * *"
   sf agent register OcWorker --role worker --provider opencode
-  sf agent register MyWorker --role worker --model claude-sonnet-4-5-20250929`,
+  sf agent register MyWorker --role worker --model claude-sonnet-4-5-20250929
+  sf agent register CheapWorker --role worker --tier 1
+  sf agent register OverflowWorker --role worker --tier 3`,
   options: agentRegisterOptions,
   handler: agentRegisterHandler as Command['handler'],
 };
@@ -1061,16 +1123,17 @@ Examples:
 // ============================================================================
 
 /**
- * Tries to apply a disabled-flag change through the running orchestrator's
- * PATCH /api/agents/:id endpoint so an active scheduler can reconcile (e.g.
- * unregister a steward's cron jobs immediately). Returns true on success,
- * false on any failure (server unreachable, non-2xx, network error, timeout)
- * so the caller can fall back to a direct DB write. The CLI must produce a
- * consistent end state whether the orchestrator is up or not.
+ * Tries to apply a metadata change through the running orchestrator's
+ * PATCH /api/agents/:id endpoint so an active scheduler/dispatch daemon can
+ * reconcile immediately (e.g. unregister a steward's cron jobs, or pick up a
+ * new worker dispatch tier). Returns true on success, false on any failure
+ * (server unreachable, non-2xx, network error, timeout) so the caller can fall
+ * back to a direct DB write. The CLI must produce a consistent end state
+ * whether the orchestrator is up or not.
  */
-async function tryReconcileDisabledViaServer(
+async function tryReconcileAgentPatchViaServer(
   id: string,
-  disabled: boolean
+  body: Record<string, unknown>
 ): Promise<boolean> {
   const apiUrl = (process.env.STONEFORGE_API_URL || 'http://localhost:3457').replace(/\/$/, '');
   const controller = new AbortController();
@@ -1079,7 +1142,7 @@ async function tryReconcileDisabledViaServer(
     const response = await fetch(`${apiUrl}/api/agents/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ disabled }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
     return response.ok;
@@ -1101,7 +1164,7 @@ async function agentDisableHandler(
 
   // Try the running server first so an active scheduler reconciles steward
   // triggers immediately. If unreachable, fall back to direct DB write.
-  const reconciled = await tryReconcileDisabledViaServer(id, true);
+  const reconciled = await tryReconcileAgentPatchViaServer(id, { disabled: true });
   if (reconciled) {
     return success({ id, disabled: true }, `Agent ${id} disabled. It will be skipped by dispatch and the scheduler.`);
   }
@@ -1142,7 +1205,7 @@ async function agentEnableHandler(
 
   // Try the running server first so an active scheduler re-registers a
   // steward's triggers immediately. If unreachable, fall back to direct DB write.
-  const reconciled = await tryReconcileDisabledViaServer(id, false);
+  const reconciled = await tryReconcileAgentPatchViaServer(id, { disabled: false });
   if (reconciled) {
     return success({ id, disabled: false }, `Agent ${id} enabled.`);
   }
@@ -1169,6 +1232,81 @@ Arguments:
 };
 
 // ============================================================================
+// Agent Set-Tier Command
+// ============================================================================
+
+async function agentSetTierHandler(
+  args: string[],
+  options: GlobalOptions
+): Promise<CommandResult> {
+  const [id, tierArg] = args;
+  if (!id || !tierArg) {
+    return failure(
+      'Usage: sf agent set-tier <id> <n|none>\nExample: sf agent set-tier el-abc123 1\nExample: sf agent set-tier el-abc123 none',
+      ExitCode.INVALID_ARGUMENTS
+    );
+  }
+
+  // Validate before touching anything so an invalid value leaves the agent
+  // unchanged.
+  const parsed = parseTierArgument(tierArg);
+  if (parsed.error !== undefined) {
+    return failure(parsed.error, ExitCode.VALIDATION);
+  }
+  const tier = parsed.tier;
+  const message = tier === null
+    ? `Cleared dispatch tier for agent ${id}. It now ranks after every tiered worker.`
+    : `Set dispatch tier ${tier} for agent ${id}.`;
+
+  // Try the running server first so a live dispatch daemon sees the new tier
+  // on its next poll. If unreachable, fall back to a direct DB write.
+  const reconciled = await tryReconcileAgentPatchViaServer(id, { tier });
+  if (reconciled) {
+    return success({ id, tier }, message);
+  }
+
+  const { api, error } = await createOrchestratorClient(options);
+  if (error || !api) return failure(error ?? 'Failed to create API', ExitCode.GENERAL_ERROR);
+
+  const agent = await api.getAgent(id as EntityId);
+  if (!agent) return failure(`Agent not found: ${id}`, ExitCode.NOT_FOUND);
+
+  const meta = getAgentMeta(agent);
+  if (meta.agentRole !== 'worker') {
+    return failure(
+      `Agent ${id} is not a worker (role: ${meta.agentRole ?? 'unknown'}). Dispatch tiers apply to workers only.`,
+      ExitCode.VALIDATION
+    );
+  }
+
+  await api.updateAgentMetadata(
+    id as EntityId,
+    // undefined drops the key so the absent-means-untiered contract holds in
+    // the JSON-serialised metadata.
+    { tier: tier ?? undefined } as Partial<AgentMetadata>
+  );
+
+  return success({ id, tier }, message);
+}
+
+export const agentSetTierCommand: Command = {
+  name: 'set-tier',
+  description: 'Set or clear a worker dispatch tier (1 = most preferred)',
+  usage: 'sf agent set-tier <id> <n|none>',
+  help: `Set the dispatch tier of a worker agent. The dispatch daemon offers ready tasks to idle workers in ascending tier order (tier 1 first); workers without a tier are dispatched last. Within a tier, the least recently dispatched worker is picked first.
+
+Arguments:
+  id    Agent identifier
+  n     Positive integer tier (1 = most preferred), or "none" to clear the tier
+
+Examples:
+  sf agent set-tier el-abc123 1
+  sf agent set-tier el-abc123 3
+  sf agent set-tier el-abc123 none`,
+  handler: agentSetTierHandler as Command['handler'],
+};
+
+// ============================================================================
 // Main Agent Command
 // ============================================================================
 
@@ -1187,10 +1325,14 @@ Subcommands:
   stream    Get agent channel for streaming
   disable   Disable an agent (skipped by dispatch and scheduler)
   enable    Re-enable a previously disabled agent
+  set-tier  Set or clear a worker dispatch tier (1 = most preferred)
 
 Examples:
   sf agent list
   sf agent register MyWorker --role worker
+  sf agent register CheapWorker --role worker --tier 1
+  sf agent set-tier el-abc123 2
+  sf agent set-tier el-abc123 none
   sf agent start el-abc123
   sf agent start el-abc123 --mode interactive`,
   subcommands: {
@@ -1202,6 +1344,7 @@ Examples:
     stream: agentStreamCommand,
     disable: agentDisableCommand,
     enable: agentEnableCommand,
+    'set-tier': agentSetTierCommand,
     // Aliases (hidden from --help via dedup in getCommandHelp)
     create: agentRegisterCommand,
     ls: agentListCommand,

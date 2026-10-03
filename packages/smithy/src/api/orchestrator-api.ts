@@ -304,6 +304,7 @@ export class OrchestratorAPIImpl extends QuarryAPIImpl implements OrchestratorAP
       provider: input.provider,
       model: input.model,
       executablePath: input.executablePath,
+      tier: input.tier,
     };
 
     // Create the entity with agent metadata nested under the agent key

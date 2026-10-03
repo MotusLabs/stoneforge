@@ -167,6 +167,8 @@ interface FormState {
   model: string;
   // Custom executable path (empty string means use default)
   executablePath: string;
+  // Dispatch tier for workers (empty string means no tier)
+  tier: string;
   // Target branch for director (empty string means auto-detect)
   targetBranch: string;
 }
@@ -189,6 +191,7 @@ const defaultState: FormState = {
   provider: 'claude-code',
   model: '',
   executablePath: '',
+  tier: '',
   targetBranch: '',
 };
 
@@ -312,6 +315,17 @@ export function CreateAgentDialog({
       return;
     }
 
+    // Dispatch tier: blank means no tier, otherwise a positive integer (1 = most preferred)
+    let tier: number | undefined;
+    const rawTier = form.tier.trim();
+    if (form.role === 'worker' && rawTier) {
+      if (!/^\d+$/.test(rawTier) || parseInt(rawTier, 10) < 1) {
+        setError('Tier must be a positive integer (1 = most preferred)');
+        return;
+      }
+      tier = parseInt(rawTier, 10);
+    }
+
     // Build input
     const input: CreateAgentInput = {
       name: form.name.trim(),
@@ -324,6 +338,7 @@ export function CreateAgentDialog({
       })(),
       model: form.model || undefined, // Only include if not empty (not using default)
       executablePath: form.executablePath.trim() || undefined, // Only include if not empty (not using default)
+      tier,
       targetBranch: form.role === 'director' && form.targetBranch.trim() ? form.targetBranch.trim() : undefined,
     };
 
@@ -428,7 +443,9 @@ export function CreateAgentDialog({
             </button>
           </div>
 
-          <form onSubmit={handleSubmit} className="p-4 space-y-4">
+          {/* noValidate: the tier field has a native min=1 but the explicit
+              error message below is friendlier than the browser's tooltip. */}
+          <form onSubmit={handleSubmit} noValidate className="p-4 space-y-4">
             {/* Error message */}
             {error && (
               <div className="flex items-center gap-2 px-3 py-2 text-sm text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
@@ -890,6 +907,36 @@ export function CreateAgentDialog({
                       Custom path to the provider CLI executable. Leave empty to use the default.
                     </p>
                   </div>
+                  {/* Dispatch tier (workers only) */}
+                  {form.role === 'worker' && (
+                    <div className="space-y-1">
+                      <label htmlFor="agent-tier" className="text-xs font-medium text-[var(--color-text-secondary)]">
+                        Dispatch Tier (optional)
+                      </label>
+                      <input
+                        id="agent-tier"
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={form.tier}
+                        onChange={e => setForm(prev => ({ ...prev, tier: e.target.value }))}
+                        placeholder="no tier"
+                        className="
+                          w-full px-3 py-1.5
+                          text-sm
+                          bg-[var(--color-surface)]
+                          border border-[var(--color-border)]
+                          rounded-lg
+                          placeholder:text-[var(--color-text-tertiary)]
+                          focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30
+                        "
+                        data-testid="agent-tier"
+                      />
+                      <p className="text-xs text-[var(--color-text-tertiary)]">
+                        Positive integer, 1 = most preferred. Workers without a tier are dispatched last.
+                      </p>
+                    </div>
+                  )}
                   {/* Target Branch (director only) */}
                   {form.role === 'director' && (
                     <div className="space-y-1">

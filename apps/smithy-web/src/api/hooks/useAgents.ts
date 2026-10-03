@@ -418,20 +418,46 @@ export function useRenameAgent() {
 }
 
 /**
- * Hook to change an agent's provider (and optionally its executable path)
+ * Hook to change an agent's provider (and optionally its executable path and
+ * dispatch tier). `tier: null` clears the tier; leaving it `undefined` keeps
+ * the current value untouched.
  */
 export function useChangeAgentProvider() {
   const queryClient = useQueryClient();
 
-  return useMutation<AgentResponse, Error, { agentId: string; provider: string; executablePath?: string | null }>({
-    mutationFn: async ({ agentId, provider, executablePath }) => {
+  return useMutation<AgentResponse, Error, { agentId: string; provider: string; executablePath?: string | null; tier?: number | null }>({
+    mutationFn: async ({ agentId, provider, executablePath, tier }) => {
       const body: Record<string, unknown> = { provider };
       if (executablePath !== undefined) {
         body.executablePath = executablePath;
       }
+      if (tier !== undefined) {
+        body.tier = tier;
+      }
       return fetchApi<AgentResponse>(`/agents/${agentId}`, {
         method: 'PATCH',
         body: JSON.stringify(body),
+      });
+    },
+    onSuccess: (_, { agentId }) => {
+      queryClient.invalidateQueries({ queryKey: ['agents'] });
+      queryClient.invalidateQueries({ queryKey: ['agent', agentId] });
+    },
+  });
+}
+
+/**
+ * Hook to change a worker agent's dispatch tier. `null` clears the tier, which
+ * makes the worker rank after every tiered worker.
+ */
+export function useChangeAgentTier() {
+  const queryClient = useQueryClient();
+
+  return useMutation<AgentResponse, Error, { agentId: string; tier: number | null }>({
+    mutationFn: async ({ agentId, tier }) => {
+      return fetchApi<AgentResponse>(`/agents/${agentId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ tier }),
       });
     },
     onSuccess: (_, { agentId }) => {
