@@ -11,8 +11,9 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, existsSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { documentCommand } from './document.js';
 import type { GlobalOptions } from '../types.js';
 import { ExitCode } from '../types.js';
@@ -25,9 +26,12 @@ import type { ElementId } from '@stoneforge/core';
 // Test Utilities
 // ============================================================================
 
-const TEST_DIR = join(import.meta.dir, '__test_document_workspace__');
-const STONEFORGE_DIR = join(TEST_DIR, '.stoneforge');
-const DB_PATH = join(STONEFORGE_DIR, 'stoneforge.db');
+// Scratch workspace lives in the OS temp dir (NOT next to the sources) so an
+// interrupted run — crash, CI timeout, Ctrl+C — can never leave a
+// __test_document_workspace__ artifact with a test database inside src/.
+let TEST_DIR: string;
+let STONEFORGE_DIR: string;
+let DB_PATH: string;
 
 function createTestOptions<T extends Record<string, unknown> = Record<string, unknown>>(
   overrides: T = {} as T
@@ -66,17 +70,17 @@ function createTestAPI() {
 // ============================================================================
 
 beforeEach(() => {
-  // Create test workspace
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, { recursive: true });
-  }
+  // Fresh isolated workspace per test, in the OS temp dir
+  TEST_DIR = mkdtempSync(join(tmpdir(), 'stoneforge-document-test-'));
+  STONEFORGE_DIR = join(TEST_DIR, '.stoneforge');
+  DB_PATH = join(STONEFORGE_DIR, 'stoneforge.db');
   mkdirSync(STONEFORGE_DIR, { recursive: true });
 });
 
 afterEach(() => {
   // Cleanup test workspace
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, { recursive: true });
+  if (TEST_DIR && existsSync(TEST_DIR)) {
+    rmSync(TEST_DIR, { recursive: true, force: true });
   }
 });
 
@@ -1010,20 +1014,8 @@ describe('document tombstone handling', () => {
 // ============================================================================
 
 describe('doc archive and filter commands', () => {
-  beforeEach(() => {
-    // Create test workspace
-    if (existsSync(TEST_DIR)) {
-      rmSync(TEST_DIR, { recursive: true });
-    }
-    mkdirSync(STONEFORGE_DIR, { recursive: true });
-  });
-
-  afterEach(() => {
-    // Cleanup test workspace
-    if (existsSync(TEST_DIR)) {
-      rmSync(TEST_DIR, { recursive: true });
-    }
-  });
+  // Workspace setup/teardown is handled by the top-level beforeEach/afterEach,
+  // which run for every test in this file.
 
   test('doc archive sets status to archived', async () => {
     const doc = await createTestDocument('Archive me');

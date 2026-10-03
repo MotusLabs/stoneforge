@@ -8,8 +8,9 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from 'bun:test';
-import { mkdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createCommand } from './crud.js';
 import type { GlobalOptions } from '../types.js';
 import { ExitCode } from '../types.js';
@@ -18,9 +19,12 @@ import { ExitCode } from '../types.js';
 // Test Utilities
 // ============================================================================
 
-const TEST_DIR = join(import.meta.dir, '__test_auto_link_workspace__');
-const STONEFORGE_DIR = join(TEST_DIR, '.stoneforge');
-const DB_PATH = join(STONEFORGE_DIR, 'stoneforge.db');
+// Scratch workspace lives in the OS temp dir (NOT next to the sources) so an
+// interrupted run — crash, CI timeout, Ctrl+C — can never leave a
+// __test_auto_link_workspace__ artifact with a test database inside src/.
+let TEST_DIR: string;
+let STONEFORGE_DIR: string;
+let DB_PATH: string;
 
 function createTestOptions(overrides: Partial<GlobalOptions & Record<string, unknown>> = {}): GlobalOptions {
   return {
@@ -40,15 +44,17 @@ function createTestOptions(overrides: Partial<GlobalOptions & Record<string, unk
 // ============================================================================
 
 beforeEach(() => {
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, { recursive: true });
-  }
+  // Fresh isolated workspace per test, in the OS temp dir
+  TEST_DIR = mkdtempSync(join(tmpdir(), 'stoneforge-auto-link-test-'));
+  STONEFORGE_DIR = join(TEST_DIR, '.stoneforge');
+  DB_PATH = join(STONEFORGE_DIR, 'stoneforge.db');
   mkdirSync(STONEFORGE_DIR, { recursive: true });
 });
 
 afterEach(() => {
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, { recursive: true });
+  // Cleanup test workspace
+  if (TEST_DIR && existsSync(TEST_DIR)) {
+    rmSync(TEST_DIR, { recursive: true, force: true });
   }
 });
 

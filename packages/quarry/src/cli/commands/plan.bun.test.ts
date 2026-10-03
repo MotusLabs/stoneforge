@@ -15,8 +15,9 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { planCommand } from './plan.js';
 import { createCommand } from './crud.js';
 import type { GlobalOptions } from '../types.js';
@@ -29,9 +30,12 @@ import type { Task } from '@stoneforge/core';
 // Test Utilities
 // ============================================================================
 
-const TEST_DIR = join(import.meta.dir, '__test_plan_workspace__');
-const STONEFORGE_DIR = join(TEST_DIR, '.stoneforge');
-const DB_PATH = join(STONEFORGE_DIR, 'stoneforge.db');
+// Scratch workspace lives in the OS temp dir (NOT next to the sources) so an
+// interrupted run — crash, CI timeout, Ctrl+C — can never leave a
+// __test_plan_workspace__ artifact with a test database inside src/.
+let TEST_DIR: string;
+let STONEFORGE_DIR: string;
+let DB_PATH: string;
 
 function createTestOptions<T extends Record<string, unknown> = Record<string, unknown>>(
   overrides: T = {} as T
@@ -74,17 +78,17 @@ async function createTestTask(
 // ============================================================================
 
 beforeEach(() => {
-  // Create test workspace
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, { recursive: true });
-  }
+  // Fresh isolated workspace per test, in the OS temp dir
+  TEST_DIR = mkdtempSync(join(tmpdir(), 'stoneforge-plan-test-'));
+  STONEFORGE_DIR = join(TEST_DIR, '.stoneforge');
+  DB_PATH = join(STONEFORGE_DIR, 'stoneforge.db');
   mkdirSync(STONEFORGE_DIR, { recursive: true });
 });
 
 afterEach(() => {
   // Cleanup test workspace
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, { recursive: true });
+  if (TEST_DIR && existsSync(TEST_DIR)) {
+    rmSync(TEST_DIR, { recursive: true, force: true });
   }
 });
 
