@@ -13,7 +13,9 @@
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "playwright test",
-    "test:ui": "playwright test --ui"
+    "test:ui": "playwright test --ui",
+    "test:e2e:setup": "playwright install chromium --only-shell",
+    "test:e2e": "pnpm run test:e2e:setup && playwright test"
   },
   "dependencies": {
     "@stoneforge/ui": "workspace:*",

@@ -34,12 +34,12 @@ export default defineConfig({
     {
       // Run setup-test-db.ts first to ensure .stoneforge-test directory and DB exist
       // before the server starts. This fixes a race condition with globalSetup.
-      command: `tsx ${setupTestDbScript} && STONEFORGE_DB_PATH=${testDbPath} DAEMON_AUTO_START=false PORT=${testApiPort} tsx ${resolve(projectRoot, 'apps/smithy-server/src/index.ts')}`,
+      command: `bun run ${setupTestDbScript} && STONEFORGE_DB_PATH=${testDbPath} DAEMON_AUTO_START=false PORT=${testApiPort} bun run ${resolve(projectRoot, 'apps/smithy-server/src/index.ts')}`,
       port: testApiPort,
       reuseExistingServer: !process.env.CI,
     },
     {
-      command: `VITE_API_PORT=${testApiPort} npm run dev -- --port ${testWebPort}`,
+      command: `VITE_API_PORT=${testApiPort} pnpm run dev -- --port ${testWebPort}`,
       port: testWebPort,
       reuseExistingServer: !process.env.CI,
     },

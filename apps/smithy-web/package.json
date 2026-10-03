@@ -15,7 +15,9 @@
     "pretest": "test -d ../../packages/storage/dist || turbo run build --filter=@stoneforge/core --filter=@stoneforge/storage --filter=@stoneforge/quarry --force",
     "test": "playwright test",
     "test:unit": "vitest run",
-    "test:ui": "playwright test --ui"
+    "test:ui": "playwright test --ui",
+    "test:e2e:setup": "playwright install chromium --only-shell",
+    "test:e2e": "pnpm run test:e2e:setup && playwright test"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

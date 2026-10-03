@@ -116,7 +116,7 @@ apps/
 ### Build & Test
 
 ```bash
-bun install           # Install dependencies
+pnpm install          # Install dependencies
 bun run build         # Build all packages
 bun test              # Run test suite
 bun test --watch      # Watch mode

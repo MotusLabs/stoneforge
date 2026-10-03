@@ -37,7 +37,7 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
     },
     {
-      command: `VITE_API_PORT=${testApiPort} bun run dev -- --port ${testWebPort}`,
+      command: `VITE_API_PORT=${testApiPort} pnpm run dev -- --port ${testWebPort}`,
       port: testWebPort,
       reuseExistingServer: !process.env.CI,
     },
