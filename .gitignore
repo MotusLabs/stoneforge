@@ -9,8 +9,10 @@ dist/
 .astro/
 packages/smithy/web/
 
-# Local deb build artifacts (scripts/build-deb.sh logs and .deb output)
+# Local deb build artifacts (scripts/build-deb.sh logs and .deb output).
+# dist-deb/ is the outdir the CI `package` job uses; out/ is the local default.
 out/
+dist-deb/
 
 # Turbo
 .turbo/
