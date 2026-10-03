@@ -2,6 +2,7 @@
  * Metrics Command Tests
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,6 +12,8 @@ import type { GlobalOptions } from '../types.js';
 import { ExitCode } from '../types.js';
 import { createStorage, initializeSchema } from '@stoneforge/storage';
 import type { StorageBackend } from '@stoneforge/storage';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -67,6 +70,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  backends.closeAll();
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
   }
@@ -79,7 +83,7 @@ afterEach(() => {
 describe('metrics command', () => {
   test('shows empty message when no metrics exist', async () => {
     // Init DB first so schema is created
-    const backend = createStorage({ path: DB_PATH });
+    const backend = backends.track(createStorage({ path: DB_PATH }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -90,7 +94,7 @@ describe('metrics command', () => {
   });
 
   test('shows metrics summary', async () => {
-    const backend = createStorage({ path: DB_PATH });
+    const backend = backends.track(createStorage({ path: DB_PATH }));
     initializeSchema(backend);
     seedMetrics(backend);
 
@@ -107,7 +111,7 @@ describe('metrics command', () => {
   });
 
   test('filters by provider', async () => {
-    const backend = createStorage({ path: DB_PATH });
+    const backend = backends.track(createStorage({ path: DB_PATH }));
     initializeSchema(backend);
     seedMetrics(backend);
 
@@ -124,7 +128,7 @@ describe('metrics command', () => {
   });
 
   test('groups by model', async () => {
-    const backend = createStorage({ path: DB_PATH });
+    const backend = backends.track(createStorage({ path: DB_PATH }));
     initializeSchema(backend);
     seedMetrics(backend);
 
@@ -137,7 +141,7 @@ describe('metrics command', () => {
   });
 
   test('accepts range option', async () => {
-    const backend = createStorage({ path: DB_PATH });
+    const backend = backends.track(createStorage({ path: DB_PATH }));
     initializeSchema(backend);
     seedMetrics(backend);
 
@@ -151,7 +155,7 @@ describe('metrics command', () => {
   });
 
   test('returns data in JSON-friendly format', async () => {
-    const backend = createStorage({ path: DB_PATH });
+    const backend = backends.track(createStorage({ path: DB_PATH }));
     initializeSchema(backend);
     seedMetrics(backend);
 
@@ -181,7 +185,7 @@ describe('metrics command', () => {
   });
 
   test('shows estimated cost', async () => {
-    const backend = createStorage({ path: DB_PATH });
+    const backend = backends.track(createStorage({ path: DB_PATH }));
     initializeSchema(backend);
     seedMetrics(backend);
 
@@ -194,7 +198,7 @@ describe('metrics command', () => {
   });
 
   test('shows error rate', async () => {
-    const backend = createStorage({ path: DB_PATH });
+    const backend = backends.track(createStorage({ path: DB_PATH }));
     initializeSchema(backend);
     seedMetrics(backend);
 

@@ -4,6 +4,7 @@
  * Tests for the `sf log` CLI command that queries the operation_log table.
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,6 +14,8 @@ import type { GlobalOptions } from '../types.js';
 import { ExitCode } from '../types.js';
 import { createStorage, initializeSchema } from '@stoneforge/storage';
 import type { StorageBackend } from '@stoneforge/storage';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -74,13 +77,14 @@ beforeEach(() => {
   DB_PATH = join(STONEFORGE_DIR, 'stoneforge.db');
   mkdirSync(STONEFORGE_DIR, { recursive: true });
 
-  storage = createStorage({ path: DB_PATH });
+  storage = backends.track(createStorage({ path: DB_PATH }));
   initializeSchema(storage);
   seedLogEntries(storage);
   storage.close();
 });
 
 afterEach(() => {
+  backends.closeAll();
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
   }
@@ -183,7 +187,7 @@ describe('log command', () => {
 
   test('shows empty message when no entries', async () => {
     // Clear all entries
-    const freshStorage = createStorage({ path: DB_PATH });
+    const freshStorage = backends.track(createStorage({ path: DB_PATH }));
     initializeSchema(freshStorage);
     freshStorage.run('DELETE FROM operation_log');
     freshStorage.close();

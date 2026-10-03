@@ -8,6 +8,7 @@
  * - playbook create: Create a new playbook
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -19,6 +20,8 @@ import { createStorage, initializeSchema } from '@stoneforge/storage';
 import { createQuarryAPI } from '../../api/quarry-api.js';
 import type { Element, EntityId } from '@stoneforge/core';
 import { createPlaybook, VariableType, type CreatePlaybookInput } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -48,7 +51,7 @@ function createTestOptions<T extends Record<string, unknown> = Record<string, un
 
 // Helper to create API instance for direct manipulation
 function createTestAPI() {
-  const backend = createStorage({ path: DB_PATH, create: true });
+  const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
   initializeSchema(backend);
   return { api: createQuarryAPI(backend), backend };
 }
@@ -81,6 +84,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  backends.closeAll();
   // Cleanup test workspace
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });

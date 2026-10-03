@@ -4,6 +4,7 @@
  * Tests for inbox CLI commands.
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -28,6 +29,8 @@ import type { Element, EntityId } from '@stoneforge/core';
 import { createGroupChannel, createDirectChannel } from '@stoneforge/core';
 import { createMessage } from '@stoneforge/core';
 import { createDocument, ContentType } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -69,7 +72,7 @@ beforeEach(async () => {
   mkdirSync(STONEFORGE_DIR, { recursive: true });
 
   // Initialize database
-  const backend = createStorage({ path: DB_PATH, create: true });
+  const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
   initializeSchema(backend);
 
   // Create a test entity
@@ -148,6 +151,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  backends.closeAll();
   // Cleanup test workspace
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -204,7 +208,7 @@ describe('inbox list command', () => {
 
   test('--all includes read and archived items', async () => {
     // First mark one as read
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     const inboxService = createInboxService(backend);
     inboxService.markAsRead(testInboxItemId);
 
@@ -217,7 +221,7 @@ describe('inbox list command', () => {
 
   test('--status filters by status', async () => {
     // First mark one as read
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     const inboxService = createInboxService(backend);
     inboxService.markAsRead(testInboxItemId);
 
@@ -405,7 +409,7 @@ describe('inbox unread command', () => {
 
   test('marks item as unread', async () => {
     // First mark as read
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     const inboxService = createInboxService(backend);
     inboxService.markAsRead(testInboxItemId);
 
@@ -494,7 +498,7 @@ describe('inbox count command', () => {
 
   test('reflects read items in count', async () => {
     // Mark one as read
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     const inboxService = createInboxService(backend);
     inboxService.markAsRead(testInboxItemId);
 

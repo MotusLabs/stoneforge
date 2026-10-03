@@ -4,6 +4,7 @@
  * Tests the full export/import functionality with a real storage backend.
  */
 
+import { createBackendTracker } from '../testing/storage-test-utils.js';
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +15,8 @@ import type { StorageBackend } from '@stoneforge/storage';
 import type { Element, ElementId, EntityId, Timestamp, Dependency } from '@stoneforge/core';
 import { ElementType, createTimestamp, DependencyType } from '@stoneforge/core';
 import { parseElements } from './serialization.js';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Setup
@@ -169,7 +172,7 @@ function getDependencyCount(backend: StorageBackend): number {
 }
 
 function createTestBackend(path: string): StorageBackend {
-  const backend = createStorage({ path });
+  const backend = backends.track(createStorage({ path }));
   initializeSchema(backend);
   return backend;
 }
@@ -186,6 +189,7 @@ describe('SyncService', () => {
   });
 
   afterEach(() => {
+    backends.closeAll();
     if (backend.isOpen) {
       backend.close();
     }

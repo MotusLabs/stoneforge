@@ -4,6 +4,7 @@
  * Tests for the browser sync HTTP handlers.
  */
 
+import { createBackendTracker } from '../testing/storage-test-utils.js';
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,6 +20,8 @@ import { createStorage, initializeSchema } from '@stoneforge/storage';
 import type { StorageBackend } from '@stoneforge/storage';
 import type { Element, ElementId, EntityId, Timestamp, Dependency } from '@stoneforge/core';
 import { ElementType, createTimestamp, DependencyType, ErrorCode } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Setup
@@ -114,7 +117,7 @@ function getElementCount(backend: StorageBackend): number {
 }
 
 function createTestBackend(path: string): StorageBackend {
-  const backend = createStorage({ path });
+  const backend = backends.track(createStorage({ path }));
   initializeSchema(backend);
   return backend;
 }
@@ -131,6 +134,7 @@ describe('SyncHttpHandlers', () => {
   });
 
   afterEach(() => {
+    backends.closeAll();
     if (backend.isOpen) {
       backend.close();
     }

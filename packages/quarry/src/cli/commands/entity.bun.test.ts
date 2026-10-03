@@ -4,6 +4,7 @@
  * Tests for entity register and list CLI commands.
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -12,6 +13,8 @@ import { entityCommand, entityRegisterCommand, entityListCommand } from './entit
 import type { GlobalOptions } from '../types.js';
 import { ExitCode } from '../types.js';
 import { createStorage, initializeSchema } from '@stoneforge/storage';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -49,11 +52,12 @@ beforeEach(() => {
   mkdirSync(STONEFORGE_DIR, { recursive: true });
 
   // Initialize database
-  const backend = createStorage({ path: DB_PATH, create: true });
+  const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
   initializeSchema(backend);
 });
 
 afterEach(() => {
+  backends.closeAll();
   // Cleanup test workspace
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -468,7 +472,7 @@ import type { ElementId, EntityId } from '@stoneforge/core';
 
 // Helper to create API instance for direct manipulation
 function createTestAPI() {
-  const backend = createStorage({ path: DB_PATH, create: true });
+  const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
   initializeSchema(backend);
   return { api: createQuarryAPI(backend), backend };
 }

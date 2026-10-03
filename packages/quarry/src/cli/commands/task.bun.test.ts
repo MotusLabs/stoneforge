@@ -12,6 +12,7 @@
  * - describe: Set or show task description
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -34,6 +35,8 @@ import { createStorage, initializeSchema } from '@stoneforge/storage';
 import { createQuarryAPI } from '../../api/quarry-api.js';
 import { DependencyType } from '@stoneforge/core';
 import type { ElementId } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -73,7 +76,7 @@ async function createTestTask(
 
 // Helper to create API instance for direct manipulation
 function createTestAPI() {
-  const backend = createStorage({ path: DB_PATH, create: true });
+  const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
   initializeSchema(backend);
   return { api: createQuarryAPI(backend), backend };
 }
@@ -89,12 +92,13 @@ beforeEach(() => {
   DB_PATH = join(STONEFORGE_DIR, 'stoneforge.db');
   mkdirSync(STONEFORGE_DIR, { recursive: true });
   // Initialize the database so tests can run without auto-creation
-  const backend = createStorage({ path: DB_PATH, create: true });
+  const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
   initializeSchema(backend);
   backend.close();
 });
 
 afterEach(() => {
+  backends.closeAll();
   // Cleanup test workspace
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });

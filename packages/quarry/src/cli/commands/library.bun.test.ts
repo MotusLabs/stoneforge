@@ -13,6 +13,7 @@
  * - library delete: Delete a library
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -26,6 +27,8 @@ import { createStorage, initializeSchema } from '@stoneforge/storage';
 import { createQuarryAPI } from '../../api/quarry-api.js';
 import { createDocument, ContentType } from '@stoneforge/core';
 import type { Element, ElementId, EntityId } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -67,7 +70,7 @@ async function createTestLibrary(
 
 // Helper to create a document directly via API
 async function createTestDocument(content: string = 'Test content'): Promise<string> {
-  const backend = createStorage({ path: DB_PATH, create: true });
+  const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
   initializeSchema(backend);
   const api = createQuarryAPI(backend);
 
@@ -95,6 +98,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  backends.closeAll();
   // Cleanup test workspace
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -175,7 +179,7 @@ describe('library list command', () => {
 
   test('returns message when no libraries', async () => {
     // Initialize empty database
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     backend.close();
 
@@ -298,7 +302,7 @@ describe('library docs command', () => {
 
   test('fails when library not found', async () => {
     // Initialize database first
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     backend.close();
 
@@ -420,7 +424,7 @@ describe('library roots command', () => {
 
   test('returns message when no libraries', async () => {
     // Initialize empty database
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     backend.close();
 
@@ -477,7 +481,7 @@ describe('library stats command', () => {
 
   test('fails when library not found', async () => {
     // Initialize database first
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     backend.close();
 
@@ -537,7 +541,7 @@ describe('library delete command', () => {
     expect(result.message).toContain('orphaned');
 
     // Document should still exist (just orphaned)
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
     const doc = await api.get(docId as ElementId);
@@ -547,7 +551,7 @@ describe('library delete command', () => {
 
   test('fails when library not found', async () => {
     // Initialize database first
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     backend.close();
 

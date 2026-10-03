@@ -10,14 +10,24 @@
  * - No unlinked tasks: reports nothing to do
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { GlobalOptions } from '../types.js';
 import { ExitCode } from '../types.js';
-import { createAPI } from '../db.js';
+import { createAPI as openAPI } from '../db.js';
 import type { Task, ElementId, ExternalProvider, ExternalTaskInput, SyncDirection } from '@stoneforge/core';
+
+const backends = createBackendTracker();
+
+function createAPI(...args: Parameters<typeof openAPI>): ReturnType<typeof openAPI> {
+  const result = openAPI(...args);
+  if (result.backend) backends.track(result.backend);
+  return result;
+}
+
 
 // ============================================================================
 // Test Utilities
@@ -259,6 +269,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  backends.closeAll();
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
   }

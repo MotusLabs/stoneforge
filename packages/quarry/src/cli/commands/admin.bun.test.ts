@@ -2,6 +2,7 @@
  * Admin Commands Tests - doctor and migrate
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -12,6 +13,8 @@ import { initCommand } from './init.js';
 import type { GlobalOptions } from '../types.js';
 import { ExitCode } from '../types.js';
 import { createStorage, initializeSchema, CURRENT_SCHEMA_VERSION } from '@stoneforge/storage';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -127,6 +130,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  backends.closeAll();
   restoreFetchMock();
   // Cleanup test workspace
   if (TEST_DIR && existsSync(TEST_DIR)) {
@@ -158,7 +162,7 @@ describe('doctor command', () => {
 
   test('reports healthy for initialized database', async () => {
     // Initialize database with schema
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -170,7 +174,7 @@ describe('doctor command', () => {
   });
 
   test('checks workspace exists', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -184,7 +188,7 @@ describe('doctor command', () => {
   });
 
   test('checks database exists', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -198,7 +202,7 @@ describe('doctor command', () => {
   });
 
   test('checks database connection', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -212,7 +216,7 @@ describe('doctor command', () => {
   });
 
   test('checks schema version', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -228,7 +232,7 @@ describe('doctor command', () => {
 
   test('reports warning for outdated schema', async () => {
     // Create database with older schema version
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     // Initialize schema but then set an older version
     initializeSchema(backend);
     backend.setSchemaVersion(1);
@@ -245,7 +249,7 @@ describe('doctor command', () => {
   });
 
   test('checks schema tables', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -260,7 +264,7 @@ describe('doctor command', () => {
   });
 
   test('checks database integrity', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -275,7 +279,7 @@ describe('doctor command', () => {
   });
 
   test('checks foreign key integrity', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -289,7 +293,7 @@ describe('doctor command', () => {
   });
 
   test('checks blocked cache - reports ok when empty and no blocked tasks', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -303,7 +307,7 @@ describe('doctor command', () => {
   });
 
   test('checks blocked cache - reports warning when tasks have blocked status but no cache entry', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     // Create a task with status='blocked' but no blocked_cache entry
@@ -338,7 +342,7 @@ describe('doctor command', () => {
   });
 
   test('checks blocked cache - reports ok when tasks have blocked status with matching cache entry', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     // Create a blocker task (open)
@@ -385,7 +389,7 @@ describe('doctor command', () => {
   });
 
   test('checks blocked cache - reports warning for orphaned cache entries', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     // Create an element so we can insert cache entry (FK constraint)
@@ -425,7 +429,7 @@ describe('doctor command', () => {
   });
 
   test('reports storage stats', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -440,7 +444,7 @@ describe('doctor command', () => {
   });
 
   test('verbose mode shows details', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions({ verbose: true });
@@ -453,7 +457,7 @@ describe('doctor command', () => {
   });
 
   test('returns summary counts', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -473,7 +477,7 @@ describe('doctor command', () => {
 
 describe('doctor runtime diagnostics', () => {
   test('includes runtime checks when smithy-server is available', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const result = await doctorCommand.handler([], createTestOptions());
@@ -490,7 +494,7 @@ describe('doctor runtime diagnostics', () => {
   });
 
   test('reports error exit when runtime reports stuck tasks', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     setRuntimeDiagnostics({
@@ -523,7 +527,7 @@ describe('doctor runtime diagnostics', () => {
   });
 
   test('reports warning for rate limits without failing the run', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     setRuntimeDiagnostics({
@@ -546,7 +550,7 @@ describe('doctor runtime diagnostics', () => {
   });
 
   test('skips runtime checks gracefully when smithy-server is unavailable', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     setRuntimeDiagnosticsUnavailable();
@@ -566,7 +570,7 @@ describe('doctor runtime diagnostics', () => {
   });
 
   test('reports warning when diagnostics endpoint returns HTTP error', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     setRuntimeDiagnosticsHttpError(404);
@@ -583,7 +587,7 @@ describe('doctor runtime diagnostics', () => {
   });
 
   test('elevated error rate is a warning and high error rate is an error', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     setRuntimeDiagnostics({
@@ -619,7 +623,7 @@ describe('doctor runtime diagnostics', () => {
 describe('migrate command', () => {
   test('reports when already up to date', async () => {
     // Initialize database with full schema
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -642,7 +646,7 @@ describe('migrate command', () => {
 
   test('dry-run shows pending migrations without applying', async () => {
     // Create a database with schema version 1 (one behind current)
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     backend.setSchemaVersion(1);
 
@@ -655,13 +659,13 @@ describe('migrate command', () => {
     expect((result.data as { pendingMigrations: unknown[] }).pendingMigrations.length).toBeGreaterThan(0);
 
     // Verify schema version didn't change
-    const backend2 = createStorage({ path: DB_PATH, create: true });
+    const backend2 = backends.track(createStorage({ path: DB_PATH, create: true }));
     expect(backend2.getSchemaVersion()).toBe(1);
   });
 
   test('applies pending migrations', async () => {
     // Create a database with no schema
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     backend.setSchemaVersion(0);
 
     const options = createTestOptions();
@@ -676,7 +680,7 @@ describe('migrate command', () => {
 
   test('shows migration descriptions', async () => {
     // Create a database with no schema
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     backend.setSchemaVersion(0);
 
     const options = createTestOptions();
@@ -694,7 +698,7 @@ describe('migrate command', () => {
   });
 
   test('reports version numbers', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const options = createTestOptions();
@@ -763,7 +767,7 @@ describe('migrate command structure', () => {
 
 describe('doctor --fix', () => {
   test('fixes orphaned blocked_cache entries', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     // Create an element, add it to blocked_cache, then delete element with FK off
@@ -800,7 +804,7 @@ describe('doctor --fix', () => {
   });
 
   test('fixes orphaned comment entries', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     // Create a document element
@@ -847,7 +851,7 @@ describe('doctor --fix', () => {
   });
 
   test('rebuilds blocked cache after fix', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     // Create a blocker and blocked task with a dependency
@@ -891,7 +895,7 @@ describe('doctor --fix', () => {
   });
 
   test('reports no repairs when database is clean', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     const result = await doctorCommand.handler([], createTestOptions({ fix: true }));
@@ -906,7 +910,7 @@ describe('doctor --fix', () => {
   });
 
   test('updates diagnostics after fix', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
 
     // Create orphaned blocked_cache entry
@@ -957,7 +961,7 @@ describe('doctor --fix', () => {
 describe('admin commands integration', () => {
   test('doctor reports warning when schema is outdated', async () => {
     // Create database with old schema version
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     backend.setSchemaVersion(1);
 
@@ -971,7 +975,7 @@ describe('admin commands integration', () => {
 
   test('migrate fixes schema issues reported by doctor', async () => {
     // Create database with no schema
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     backend.setSchemaVersion(0);
 
     // First doctor should report problems

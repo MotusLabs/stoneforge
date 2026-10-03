@@ -14,6 +14,7 @@
  * - plan auto-complete: Auto-complete stale plans
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -25,6 +26,8 @@ import { ExitCode } from '../types.js';
 import type { Plan } from '@stoneforge/core';
 import { PlanStatus } from '@stoneforge/core';
 import type { Task } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -86,6 +89,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  backends.closeAll();
   // Cleanup test workspace
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -746,7 +750,7 @@ describe('plan lifecycle scenarios', () => {
     // 3. Restart the plan (not currently supported via CLI, testing API directly)
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -771,7 +775,7 @@ describe('plan lifecycle scenarios', () => {
     // 3. Reopen the plan (via API)
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -825,7 +829,7 @@ describe('plan progress tracking scenarios', () => {
     expect(progress.completionPercentage).toBe(0);
 
     // Complete 2 tasks via API
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -865,7 +869,7 @@ describe('plan progress tracking scenarios', () => {
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { TaskStatus } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -892,7 +896,7 @@ describe('plan progress tracking scenarios', () => {
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { TaskStatus } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -1014,7 +1018,7 @@ describe('plan task management scenarios', () => {
   test('hierarchical task creation with createTaskInPlan', async () => {
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -1123,7 +1127,7 @@ describe('plan auto-complete command', () => {
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { TaskStatus } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -1160,7 +1164,7 @@ describe('plan auto-complete command', () => {
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { TaskStatus } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -1204,7 +1208,7 @@ describe('plan auto-complete command', () => {
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { TaskStatus } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -1234,7 +1238,7 @@ describe('plan auto-complete command', () => {
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { TaskStatus } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -1264,7 +1268,7 @@ describe('plan auto-complete command', () => {
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { TaskStatus } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 

@@ -7,6 +7,7 @@
  * - status: Show sync status
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -24,6 +25,8 @@ import { createStorage, initializeSchema } from '@stoneforge/storage';
 import { createQuarryAPI } from '../../api/quarry-api.js';
 import type { ExportResult, ImportResult } from '../../sync/types.js';
 import type { Element, ElementId } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -64,13 +67,14 @@ async function createTestTask(
 
 // Helper to create API instance for direct manipulation
 function createTestAPI() {
-  const backend = createStorage({ path: DB_PATH, create: true });
+  const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
   initializeSchema(backend);
   return { api: createQuarryAPI(backend), backend };
 }
 
 // Helper to create API with a fresh database (no leftover files)
 function createFreshTestAPI() {
+  backends.closeAll();
   // Remove and recreate the database
   if (existsSync(DB_PATH)) {
     rmSync(DB_PATH, { force: true });
@@ -101,6 +105,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  backends.closeAll();
   // Cleanup test workspace
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -637,7 +642,7 @@ describe('export-import round-trip', () => {
 
     // Create a fresh database with a different path for import
     const importDbPath = join(STONEFORGE_DIR, 'import-test.db');
-    const importBackend = createStorage({ path: importDbPath, create: true });
+    const importBackend = backends.track(createStorage({ path: importDbPath, create: true }));
     initializeSchema(importBackend);
     const importApi = createQuarryAPI(importBackend);
 
@@ -674,7 +679,7 @@ describe('export-import round-trip', () => {
 
     // Create a fresh database with a different path for import
     const importDbPath = join(STONEFORGE_DIR, 'import-test-2.db');
-    const importBackend = createStorage({ path: importDbPath, create: true });
+    const importBackend = backends.track(createStorage({ path: importDbPath, create: true }));
     initializeSchema(importBackend);
 
     // Import using the new database
@@ -706,7 +711,7 @@ describe('integration with CRUD commands', () => {
 
     // Create a fresh database with a different path for import
     const importDbPath = join(STONEFORGE_DIR, 'import-list-test.db');
-    const importBackend = createStorage({ path: importDbPath, create: true });
+    const importBackend = backends.track(createStorage({ path: importDbPath, create: true }));
     initializeSchema(importBackend);
 
     // Import using the new database

@@ -2,6 +2,7 @@
  * History Command Tests
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,6 +14,8 @@ import type { StorageBackend } from '@stoneforge/storage';
 import { createQuarryAPI } from '../../api/quarry-api.js';
 import { createTask } from '@stoneforge/core';
 import type { ElementId, EntityId } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 // Test directory
 const TEST_DIR = join(process.cwd(), '.test-history');
@@ -48,12 +51,13 @@ describe('history command', () => {
     mkdirSync(TEST_DIR, { recursive: true });
 
     // Create backend and API
-    backend = createStorage({ path: TEST_DB });
+    backend = backends.track(createStorage({ path: TEST_DB }));
     initializeSchema(backend);
     api = createQuarryAPI(backend);
   });
 
   afterEach(() => {
+    backends.closeAll();
     // Clean up
     backend.close();
     if (existsSync(TEST_DIR)) {

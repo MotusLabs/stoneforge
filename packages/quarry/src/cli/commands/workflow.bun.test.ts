@@ -10,6 +10,7 @@
  * - workflow gc: Garbage collect old ephemeral workflows
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -19,6 +20,8 @@ import type { GlobalOptions } from '../types.js';
 import { ExitCode } from '../types.js';
 import type { Workflow } from '@stoneforge/core';
 import { WorkflowStatus } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -70,6 +73,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  backends.closeAll();
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
   }
@@ -205,7 +209,7 @@ describe('workflow list command', () => {
     const workflowId = await createTestWorkflow('temp');
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
     await api.delete(workflowId as unknown as ElementId, {});
@@ -661,7 +665,7 @@ describe('workflow lifecycle scenarios', () => {
     // 2. Manually update status via API
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 

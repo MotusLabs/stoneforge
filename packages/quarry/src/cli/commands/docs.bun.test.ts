@@ -7,6 +7,7 @@
  * - docs dir: Show the Documentation Directory document
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -25,6 +26,8 @@ import {
   type CreateLibraryInput,
 } from '@stoneforge/core';
 import type { Element, ElementId, EntityId } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -57,7 +60,7 @@ async function createTestDocument(
   title: string = 'Test Document',
   content: string = 'Test content'
 ): Promise<string> {
-  const backend = createStorage({ path: DB_PATH, create: true });
+  const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
   initializeSchema(backend);
   const api = createQuarryAPI(backend);
 
@@ -75,7 +78,7 @@ async function createTestDocument(
 
 // Helper to create a library directly via API
 async function createTestLibrary(name: string): Promise<string> {
-  const backend = createStorage({ path: DB_PATH, create: true });
+  const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
   initializeSchema(backend);
   const api = createQuarryAPI(backend);
 
@@ -102,6 +105,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  backends.closeAll();
   // Cleanup test workspace
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -178,7 +182,7 @@ describe('docs init command', () => {
     await initSubCmd.handler([], options);
 
     // Check that only one library exists with the Documentation name
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -205,7 +209,7 @@ describe('docs init command', () => {
     const data = result.data as { directoryDocId: string };
 
     // Read the document and check its content
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -228,7 +232,7 @@ describe('docs init command', () => {
     };
 
     // Check that the dependency exists
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 

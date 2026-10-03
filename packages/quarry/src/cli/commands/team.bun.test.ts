@@ -9,6 +9,7 @@
  * - team members: List team members
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,6 +19,8 @@ import type { GlobalOptions } from '../types.js';
 import { ExitCode } from '../types.js';
 import type { Team } from '@stoneforge/core';
 import type { Element, EntityId } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -64,7 +67,7 @@ async function createTestEntity(
   const { createQuarryAPI } = await import('../../api/quarry-api.js');
   const { createStorage, initializeSchema } = await import('@stoneforge/storage');
   const { createEntity } = await import('@stoneforge/core');
-  const backend = createStorage({ path: DB_PATH, create: true });
+  const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
   initializeSchema(backend);
   const api = createQuarryAPI(backend);
 
@@ -91,6 +94,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  backends.closeAll();
   // Cleanup test workspace
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -197,7 +201,7 @@ describe('team list command', () => {
     const teamId = await createTestTeam('Temp');
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
     await api.delete(teamId as unknown as ElementId, {});
@@ -279,7 +283,7 @@ describe('team add command', () => {
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { createTask } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -309,7 +313,7 @@ describe('team add command', () => {
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { createDocument, ContentType } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -340,7 +344,7 @@ describe('team add command', () => {
     const { createQuarryAPI } = await import('../../api/quarry-api.js');
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { createEntity } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -673,7 +677,7 @@ describe('team task assignment workflows', () => {
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { createTeam } = await import('@stoneforge/core');
     const { createTask } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -714,7 +718,7 @@ describe('team task assignment workflows', () => {
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { createTeam } = await import('@stoneforge/core');
     const { createTask } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -752,7 +756,7 @@ describe('team task assignment workflows', () => {
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { createTeam } = await import('@stoneforge/core');
     const { createTask } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -789,7 +793,7 @@ describe('team task assignment workflows', () => {
     const { createStorage, initializeSchema } = await import('@stoneforge/storage');
     const { createTeam } = await import('@stoneforge/core');
     const { createTask, TaskStatus } = await import('@stoneforge/core');
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 

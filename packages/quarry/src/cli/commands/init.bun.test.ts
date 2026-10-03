@@ -2,6 +2,7 @@
  * init Command Tests
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { existsSync, rmSync, readFileSync, mkdirSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,6 +12,8 @@ import { ExitCode, DEFAULT_GLOBAL_OPTIONS } from '../types.js';
 import { createStorage, initializeSchema } from '@stoneforge/storage';
 import { createQuarryAPI } from '../../api/quarry-api.js';
 import type { Channel } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 describe('initCommand', () => {
   let testDir: string;
@@ -24,6 +27,7 @@ describe('initCommand', () => {
   });
 
   afterEach(() => {
+    backends.closeAll();
     // Restore original directory and clean up
     process.chdir(originalCwd);
     try {
@@ -498,7 +502,7 @@ describe('initCommand', () => {
 
       // Open the created database and verify channels exist
       const dbPath = join(testDir, '.stoneforge', 'stoneforge.db');
-      const backend = createStorage({ path: dbPath });
+      const backend = backends.track(createStorage({ path: dbPath }));
       const api = createQuarryAPI(backend);
 
       for (const agentDef of DEFAULT_AGENTS) {
@@ -526,7 +530,7 @@ describe('initCommand', () => {
       expect(result.exitCode).toBe(ExitCode.SUCCESS);
 
       const dbPath = join(testDir, '.stoneforge', 'stoneforge.db');
-      const backend = createStorage({ path: dbPath });
+      const backend = backends.track(createStorage({ path: dbPath }));
       const api = createQuarryAPI(backend);
 
       for (const agentDef of DEFAULT_AGENTS) {
@@ -558,7 +562,7 @@ describe('initCommand', () => {
       expect(second.exitCode).toBe(ExitCode.SUCCESS);
 
       // Open DB and verify each agent has exactly one channel
-      const backend = createStorage({ path: dbPath });
+      const backend = backends.track(createStorage({ path: dbPath }));
       const api = createQuarryAPI(backend);
 
       const channelIds = new Set<string>();

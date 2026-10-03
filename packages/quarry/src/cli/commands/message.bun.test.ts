@@ -4,6 +4,7 @@
  * Tests for message send, list, and thread CLI commands.
  */
 
+import { createBackendTracker } from '../../testing/storage-test-utils.js';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, existsSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -17,6 +18,8 @@ import { createGroupChannel } from '@stoneforge/core';
 import { createDocument, ContentType } from '@stoneforge/core';
 import type { Element, EntityId } from '@stoneforge/core';
 import type { Message } from '@stoneforge/core';
+
+const backends = createBackendTracker();
 
 // ============================================================================
 // Test Utilities
@@ -61,7 +64,7 @@ beforeEach(async () => {
   mkdirSync(STONEFORGE_DIR, { recursive: true });
 
   // Initialize database
-  const backend = createStorage({ path: DB_PATH, create: true });
+  const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
   initializeSchema(backend);
 
   // Create a test channel for message tests
@@ -79,6 +82,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  backends.closeAll();
   // Cleanup test workspace
   if (TEST_DIR && existsSync(TEST_DIR)) {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -194,7 +198,7 @@ describe('msg send command', () => {
 
   test('fails with thread parent in different channel', async () => {
     // Create another channel
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -739,7 +743,7 @@ describe('msg thread command options', () => {
 
 describe('E2E: Direct Messaging Flow', () => {
   test('complete direct message conversation between two users', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -796,7 +800,7 @@ describe('E2E: Direct Messaging Flow', () => {
   });
 
   test('non-participant cannot send to direct channel', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -833,7 +837,7 @@ describe('E2E: Group Channel Messaging Flow', () => {
     const THIRD_USER = 'el-user4' as EntityId;
 
     // Create channel with multiple members
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -891,7 +895,7 @@ describe('E2E: Group Channel Messaging Flow', () => {
   test('new member can message after being added', async () => {
     const NEW_MEMBER = 'el-newbie' as EntityId;
 
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -930,7 +934,7 @@ describe('E2E: Group Channel Messaging Flow', () => {
   });
 
   test('removed member cannot send messages', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -1091,7 +1095,7 @@ describe('E2E: Threaded Conversation Flow', () => {
 
 describe('E2E: Channel Lifecycle with Messaging', () => {
   test('full workflow: create channel, exchange messages, verify history', async () => {
-    const backend = createStorage({ path: DB_PATH, create: true });
+    const backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     const api = createQuarryAPI(backend);
 
@@ -1153,7 +1157,7 @@ describe('E2E: Channel Lifecycle with Messaging', () => {
 
   test('messages persist across database connections', async () => {
     // Create channel and send messages
-    let backend = createStorage({ path: DB_PATH, create: true });
+    let backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     let api = createQuarryAPI(backend);
 
@@ -1177,7 +1181,7 @@ describe('E2E: Channel Lifecycle with Messaging', () => {
     backend.close();
 
     // Reopen database and verify message persists
-    backend = createStorage({ path: DB_PATH, create: true });
+    backend = backends.track(createStorage({ path: DB_PATH, create: true }));
     initializeSchema(backend);
     api = createQuarryAPI(backend);
 
