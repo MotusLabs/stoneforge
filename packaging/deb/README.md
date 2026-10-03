@@ -29,6 +29,27 @@ dpkg-deb -x stoneforge_<ver>_amd64.deb /tmp/sftest
 STONEFORGE_HOME=/tmp/sftest/opt/stoneforge /tmp/sftest/usr/bin/sf --version
 ```
 
+## Verify a built package
+
+```sh
+# no root needed; set SMOKE_PORT if 3457 is already taken on this machine
+SMOKE_PORT=3477 scripts/smoke-test-deb.sh dist-deb/stoneforge_<ver>_amd64.deb --extract
+
+# CI / disposable machines: installs with sudo apt-get, purges afterwards
+sudo scripts/smoke-test-deb.sh dist-deb/stoneforge_<ver>_amd64.deb --expect-version 1.25.0
+```
+
+The smoke test (design D7) checks package metadata, the bundled runtime (with
+a poisoned-`PATH` `node` trap), `sf --version` (the reported version token
+must equal the expected one exactly — `1.25.0` rejects a reported
+`v1.25.01`), `sf init` (exercises better-sqlite3), `sf serve` health + web
+UI + an outbound-connection strace audit, a node-pty PTY spawn, and — in
+default mode — that `apt-get purge` removes only the package while user
+workspaces survive. Its pure helpers (version comparison, strace classifier)
+have built-in unit tests: `scripts/smoke-test-deb.sh --self-test` (needs no
+.deb). See `scripts/smoke-test-deb.sh --help`.
+
+
 ## Build
 
 ```sh
