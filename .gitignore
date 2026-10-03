@@ -25,6 +25,12 @@ bun.lockb
 .stoneforge-test/
 .elemental-test/
 
+# CLI bun-test scratch workspaces. These are created next to the sources by
+# older test files and left behind when a run is interrupted (crash, CI
+# timeout, Ctrl+C). New tests must use mkdtempSync(tmpdir()) instead — this
+# rule only stops leaked test databases from being committed.
+__test*_workspace__/
+
 # Local development files
 prompt.md
 
