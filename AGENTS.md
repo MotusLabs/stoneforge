@@ -157,7 +157,7 @@ See `sf show el-49ra` for the complete list. **Top 10 for agents:**
 6. **No auto cycle detection** - `api.addDependency()` doesn't check cycles; use `DependencyService.detectCycle()`
 7. **FTS not indexed on import** - After `sf import`, run `sf document reindex` to rebuild search index
 8. **`relates-to` is bidirectional** - Query both directions: `getDependencies()` AND `getDependents()`
-9. **Closed/tombstone always wins** - In merge conflicts, these statuses take precedence
+9. **Tombstone TTL precedes closed status** - Fresh tombstones (age <= TTL, default 30 days) win over live state; expired tombstones lose. Both tombstones use status handling then `updatedAt` (local on ties). After TTL handling, `closed`/`tombstone` statuses beat other string statuses; see Storage Reference for details.
 10. **Server ports** - Platform: 3456, Orchestrator: 3457 (not 3000)
 
 ---

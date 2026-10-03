@@ -58,7 +58,23 @@ Soft-deleted elements have a `deletedAt` timestamp. Tombstones are classified by
 - **Fresh tombstone** (within TTL, default 30 days): Wins over a live element. The deletion should propagate to other branches.
 - **Expired tombstone** (past TTL): Loses to a live element. An ancient deletion shouldn't override an element that's been recreated or kept alive elsewhere.
 
+The TTL is the numeric third argument to `mergeElements()` in
+`packages/quarry/src/sync/merge.ts`. SyncService imports use the 30-day default;
+there is no import option or YAML setting for it. Age equal to the TTL is still
+fresh. Classification uses a nonempty string `deletedAt`, not status alone;
+an invalid date is expired. Expiry changes precedence and does not purge
+exported tombstones.
+
+When both sides are normal tombstones, later `updatedAt` wins (local on ties),
+with tag union, regardless of freshness or `deletedAt` ordering. Tombstone-vs-live
+rules run before status precedence and return the winner without tag union.
+
 ### Status merge
+
+After tombstone TTL handling, `closed` and `tombstone` string statuses beat other
+string statuses; neither gets precedence over the other. A status-only
+`tombstone` without `deletedAt` is classified as live but retains this status
+precedence. Status precedence returns the winner without tag union.
 
 Closed status is **sticky** — if one version is closed and the other is open, closed always wins regardless of timestamps. This prevents a scenario where an agent on a stale branch accidentally reopens a completed task.
 

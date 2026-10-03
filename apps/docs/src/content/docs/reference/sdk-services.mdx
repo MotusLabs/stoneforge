@@ -241,7 +241,11 @@ syncService.importFromStrings(elementsJsonl, dependenciesJsonl, { force: true })
 #### Merge strategy
 
 - Newer `updatedAt` wins by default
-- `closed` and `tombstone` statuses **always win**
+- Fresh tombstones (`age <= TTL`) win over live state; expired tombstones lose, before closed-status handling
+- TTL defaults to 30 days in the numeric third argument to `mergeElements()`; SyncService uses that default with no import/YAML setting
+- Both normal tombstones use later `updatedAt` (local on ties), with tag union, regardless of freshness or `deletedAt` ordering
+- After TTL handling, `closed`/`tombstone` string statuses beat other string statuses; status-only tombstones without `deletedAt` are classified as live but retain this precedence
+- Tombstone/status precedence returns the entire winner without tag union; expiry does not purge tombstones
 - Tags merged as union (cannot remove via sync)
 - Content hash excludes timestamps for conflict detection
 

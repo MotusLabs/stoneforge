@@ -84,7 +84,7 @@ Reads always go to SQLite. The JSONL files are never read at runtime — they ex
                   │ merge
          ┌───────▼────────┐
          │  Merge Logic   │  ← Content hash comparison
-         │ (newer wins)   │  ← closed/tombstone always wins
+         │ (newer wins)   │  ← tombstone TTL, then closed status
          └───────┬────────┘
                  │
          ┌───────▼────────┐
