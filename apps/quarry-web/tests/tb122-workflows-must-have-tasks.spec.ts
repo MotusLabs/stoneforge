@@ -53,20 +53,20 @@ test.describe('TB122: Workflows Must Have Task Children', () => {
       expect(response.ok()).toBe(true);
       const created = await response.json();
 
-      expect(created.id).toBeDefined();
-      expect(created.title).toBe(workflowTitle);
+      expect(created.workflow.id).toBeDefined();
+      expect(created.workflow.title).toBe(workflowTitle);
       expect(created.initialTask).toBeDefined();
       expect(created.initialTask.id).toBeDefined();
 
       // Verify task was created and added to workflow
-      const tasksResponse = await page.request.get(`/api/workflows/${created.id}/tasks`);
+      const tasksResponse = await page.request.get(`/api/workflows/${created.workflow.id}/tasks`);
       expect(tasksResponse.ok()).toBe(true);
-      const tasks = await tasksResponse.json();
-      expect(tasks.length).toBe(1);
-      expect(tasks[0].title).toBe(taskTitle);
+      const tasksBody = await tasksResponse.json();
+      expect(tasksBody.tasks.length).toBe(1);
+      expect(tasksBody.tasks[0].title).toBe(taskTitle);
 
       // Cleanup - use delete with force
-      await page.request.delete(`/api/workflows/${created.id}?force=true`);
+      await page.request.delete(`/api/workflows/${created.workflow.id}?force=true`);
     });
 
     test('POST /api/workflows with initialTaskId adds existing task to workflow', async ({ page }) => {
@@ -92,18 +92,18 @@ test.describe('TB122: Workflows Must Have Task Children', () => {
       expect(response.ok()).toBe(true);
       const created = await response.json();
 
-      expect(created.id).toBeDefined();
-      expect(created.title).toBe(workflowTitle);
+      expect(created.workflow.id).toBeDefined();
+      expect(created.workflow.title).toBe(workflowTitle);
       expect(created.initialTask.id).toBe(task.id);
 
       // Verify task was added to workflow
-      const tasksResponse = await page.request.get(`/api/workflows/${created.id}/tasks`);
-      const tasks = await tasksResponse.json();
-      expect(tasks.length).toBe(1);
-      expect(tasks[0].id).toBe(task.id);
+      const tasksResponse = await page.request.get(`/api/workflows/${created.workflow.id}/tasks`);
+      const tasksBody = await tasksResponse.json();
+      expect(tasksBody.tasks.length).toBe(1);
+      expect(tasksBody.tasks[0].id).toBe(task.id);
 
       // Cleanup - delete workflow with force (will clean up task too)
-      await page.request.delete(`/api/workflows/${created.id}?force=true`);
+      await page.request.delete(`/api/workflows/${created.workflow.id}?force=true`);
     });
 
     test('POST /api/workflows with invalid initialTaskId returns error', async ({ page }) => {
@@ -196,7 +196,7 @@ test.describe('TB122: Workflows Must Have Task Children', () => {
         },
       });
       const created = await response.json();
-      workflowId = created.id;
+      workflowId = created.workflow.id;
       taskId = created.initialTask.id;
     });
 
@@ -258,9 +258,9 @@ test.describe('TB122: Workflows Must Have Task Children', () => {
 
       // Verify workflow still has one task
       const tasksResponse = await page.request.get(`/api/workflows/${multiWorkflowId}/tasks`);
-      const tasks = await tasksResponse.json();
-      expect(tasks.length).toBe(1);
-      expect(tasks[0].id).toBe(secondTaskId);
+      const tasksBody = await tasksResponse.json();
+      expect(tasksBody.tasks.length).toBe(1);
+      expect(tasksBody.tasks[0].id).toBe(secondTaskId);
 
       // Now the remaining task cannot be deleted
       const canDeleteSecondResponse = await page.request.get(`/api/workflows/${multiWorkflowId}/can-delete-task/${secondTaskId}`);
@@ -277,12 +277,14 @@ test.describe('TB122: Workflows Must Have Task Children', () => {
   //
   // Creation is playbook-only: a workflow always gets its tasks from the
   // selected playbook's steps. The modal previews those steps and the server
-  // rejects playbooks with no steps. Playbook endpoints are mocked because the
-  // Quarry server only serves filesystem discovery for playbooks, not the
-  // CRUD/instantiate API the shared modal uses.
+  // rejects playbooks with no steps. The first tests mock the playbook
+  // endpoints to exercise the modal UI with a known dataset; the remaining
+  // ones run against the Quarry server and the playbook fixtures seeded by
+  // the global setup.
   // ============================================================================
 
   test.describe('UI - Create Workflow Modal', () => {
+
     test('Create Workflow button is visible on playbook cards', async ({ page }) => {
       const playbook = makePlaybook();
       await mockPlaybookRoutes(page, { playbooks: [playbook] });
@@ -322,6 +324,18 @@ test.describe('TB122: Workflows Must Have Task Children', () => {
       await expect(stepsPreview).toContainText('Third Step');
     });
 
+    test('steps preview lists the tasks the workflow will get', async ({ page }) => {
+      await page.goto('/workflows');
+      await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+
+      await page.getByTestId('playbook-create-e2e-release-flow').click();
+      await expect(page.getByTestId('create-title-input')).toBeVisible({ timeout: 10000 });
+
+      await expect(page.getByTestId('steps-preview')).toContainText('Steps (2)');
+      await expect(page.getByTestId('steps-preview')).toContainText('Run test suite');
+      await expect(page.getByTestId('steps-preview')).toContainText('Deploy to environment');
+    });
+
     test('instantiating a playbook with no steps is rejected', async ({ page }) => {
       const playbook = makePlaybook({ steps: [] });
       await mockPlaybookRoutes(page, {
@@ -346,14 +360,35 @@ test.describe('TB122: Workflows Must Have Task Children', () => {
         page.getByRole('dialog', { name: 'Create Workflow', exact: true })
       ).toBeVisible();
     });
+
+    test('instantiating a playbook without steps is rejected with the TB122 message', async ({ page }) => {
+      await page.goto('/workflows');
+      await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+
+      await page.getByTestId('playbook-create-e2e-empty-steps').click();
+      await expect(page.getByTestId('create-title-input')).toBeVisible({ timeout: 10000 });
+
+      await page.getByTestId('create-submit-button').click();
+
+      // The modal stays open and surfaces the server-side TB122 rejection
+      const dialog = page.getByRole('dialog', { name: 'Create Workflow', exact: true });
+      await expect(dialog).toBeVisible({ timeout: 5000 });
+      await expect(dialog).toContainText('Workflows must have at least one task');
+
+      // Nothing was created
+      const listResponse = await page.request.get('/api/workflows?playbookId=e2e-empty-steps');
+      const workflows = (await listResponse.json()).workflows;
+      expect(workflows).toHaveLength(0);
+    });
+
   });
 
   test.describe('UI - Workflow Detail View', () => {
     // The workflows page renders an inline detail view for the selected
     // workflow, listing its tasks. The last-task deletion guard itself is
-    // enforced by the API (see the can-delete-task tests above). The workflow
-    // endpoints are mocked because the shared UI hooks expect envelope
-    // responses the Quarry server does not serve.
+    // enforced by the API (see the can-delete-task tests above). The first
+    // tests mock the workflow endpoints to exercise the detail UI with a
+    // known dataset; the last runs against the Quarry server.
 
     test('detail view shows the workflow task', async ({ page }) => {
       const workflow = {
@@ -394,5 +429,27 @@ test.describe('TB122: Workflows Must Have Task Children', () => {
       await expect(page.getByTestId('workflow-task-task-first')).toBeVisible();
       await expect(page.getByTestId('workflow-task-task-second')).toBeVisible();
     });
+
+    test('detail view lists the tasks of the workflow', async ({ page }) => {
+      // Create a workflow with two tasks from the seeded playbook
+      const createResponse = await page.request.post('/api/playbooks/e2e-release-flow/instantiate', {
+        data: { variables: { environment: 'production' } },
+      });
+      expect(createResponse.status()).toBe(201);
+      const result = await createResponse.json();
+
+      await page.goto(`/workflows?tab=active&selected=${result.workflow.id}`);
+      await expect(page.getByTestId('workflow-detail-page')).toBeVisible({ timeout: 10000 });
+
+      // Both tasks of the workflow are listed
+      await expect(page.getByTestId(`workflow-task-${result.tasks[0].id}`)).toBeVisible();
+      await expect(page.getByTestId(`workflow-task-${result.tasks[1].id}`)).toBeVisible();
+      await expect(page.getByTestId('workflow-progress-dashboard')).toContainText('Run test suite');
+      await expect(page.getByTestId('workflow-progress-dashboard')).toContainText('Deploy to environment');
+
+      // Cleanup
+      await page.request.delete(`/api/workflows/${result.workflow.id}?force=true`);
+    });
+
   });
 });

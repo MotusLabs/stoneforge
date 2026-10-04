@@ -1,4 +1,26 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+
+/**
+ * Notification system tests.
+ *
+ * The bell in the header (NotificationCenter) toggles a slide-in
+ * NotificationSidebar (see apps/smithy-web/src/components/notification/).
+ * The sidebar is always mounted and translated off-canvas when closed, so
+ * open/closed state is asserted via the backdrop (only rendered while open)
+ * and the bell's aria-expanded attribute.
+ */
+
+/** Open the notification sidebar via the bell and wait for it to appear. */
+async function openSidebar(page: Page) {
+  await page.getByTestId('notification-bell').click();
+  await expect(page.getByTestId('notification-sidebar-backdrop')).toBeVisible();
+}
+
+/** Assert the notification sidebar is closed. */
+async function expectSidebarClosed(page: Page) {
+  await expect(page.getByTestId('notification-sidebar-backdrop')).not.toBeVisible();
+  await expect(page.getByTestId('notification-bell')).toHaveAttribute('aria-expanded', 'false');
+}
 
 test.describe('TB-O25a: Notification System', () => {
   test.describe('Notification Center UI', () => {
@@ -15,45 +37,45 @@ test.describe('TB-O25a: Notification System', () => {
       await expect(page.getByTestId('notification-bell')).toBeVisible();
     });
 
-    test('opens notification dropdown on bell click', async ({ page }) => {
+    test('opens notification sidebar on bell click', async ({ page }) => {
       await page.goto('/');
 
       // Click notification bell
       await page.getByTestId('notification-bell').click();
 
-      // Dropdown should appear
-      await expect(page.getByTestId('notification-dropdown')).toBeVisible();
+      // Sidebar should slide in (backdrop rendered, panel active)
+      await expect(page.getByTestId('notification-sidebar-backdrop')).toBeVisible();
+      const sidebar = page.getByTestId('notification-sidebar');
+      await expect(sidebar).toHaveAttribute('aria-hidden', 'false');
 
-      // Should show empty state initially (no notifications)
+      // Should show the notification list (empty state initially)
       await expect(page.getByTestId('notification-list')).toBeVisible();
     });
 
-    test('closes dropdown when clicking outside', async ({ page }) => {
+    test('closes sidebar when clicking the backdrop', async ({ page }) => {
       await page.goto('/');
 
-      // Open dropdown
-      await page.getByTestId('notification-bell').click();
-      await expect(page.getByTestId('notification-dropdown')).toBeVisible();
+      // Open sidebar
+      await openSidebar(page);
 
-      // Click outside (on the main content area)
-      await page.getByTestId('app-shell').click({ position: { x: 400, y: 300 } });
+      // Click the backdrop (outside the sidebar panel)
+      await page.getByTestId('notification-sidebar-backdrop').click({ position: { x: 50, y: 300 } });
 
-      // Dropdown should be closed
-      await expect(page.getByTestId('notification-dropdown')).not.toBeVisible();
+      // Sidebar should be closed
+      await expectSidebarClosed(page);
     });
 
-    test('closes dropdown on escape key', async ({ page }) => {
+    test('closes sidebar on escape key', async ({ page }) => {
       await page.goto('/');
 
-      // Open dropdown
-      await page.getByTestId('notification-bell').click();
-      await expect(page.getByTestId('notification-dropdown')).toBeVisible();
+      // Open sidebar
+      await openSidebar(page);
 
       // Press escape
       await page.keyboard.press('Escape');
 
-      // Dropdown should be closed
-      await expect(page.getByTestId('notification-dropdown')).not.toBeVisible();
+      // Sidebar should be closed
+      await expectSidebarClosed(page);
     });
 
     test('displays empty state message when no notifications', async ({ page }) => {
@@ -64,8 +86,8 @@ test.describe('TB-O25a: Notification System', () => {
       });
       await page.reload();
 
-      // Open dropdown
-      await page.getByTestId('notification-bell').click();
+      // Open sidebar
+      await openSidebar(page);
 
       // Should show empty state
       await expect(page.getByText('No notifications')).toBeVisible();
@@ -170,8 +192,8 @@ test.describe('TB-O25a: Notification System', () => {
       });
       await page.reload();
 
-      // Open dropdown
-      await page.getByTestId('notification-bell').click();
+      // Open sidebar
+      await openSidebar(page);
 
       // Notifications should be visible
       await expect(page.getByTestId('notification-test-1')).toBeVisible();
@@ -199,8 +221,8 @@ test.describe('TB-O25a: Notification System', () => {
       });
       await page.reload();
 
-      // Open dropdown
-      await page.getByTestId('notification-bell').click();
+      // Open sidebar
+      await openSidebar(page);
 
       // Notification should be visible
       await expect(page.getByTestId('notification-dismiss-test')).toBeVisible();
@@ -243,8 +265,8 @@ test.describe('TB-O25a: Notification System', () => {
       // Badge should show 2 unread
       await expect(page.getByTestId('notification-badge')).toHaveText('2');
 
-      // Open dropdown and mark all as read
-      await page.getByTestId('notification-bell').click();
+      // Open sidebar and mark all as read
+      await openSidebar(page);
       await page.getByLabel('Mark all as read').click();
 
       // Badge should be gone (no unread)
@@ -268,8 +290,8 @@ test.describe('TB-O25a: Notification System', () => {
       });
       await page.reload();
 
-      // Open dropdown
-      await page.getByTestId('notification-bell').click();
+      // Open sidebar
+      await openSidebar(page);
 
       // Notification should exist
       await expect(page.getByTestId('notification-clear-1')).toBeVisible();
@@ -284,8 +306,8 @@ test.describe('TB-O25a: Notification System', () => {
     test('navigates to settings when clicking settings button', async ({ page }) => {
       await page.goto('/');
 
-      // Open dropdown
-      await page.getByTestId('notification-bell').click();
+      // Open sidebar
+      await openSidebar(page);
 
       // Click settings button
       await page.getByLabel('Notification settings').click();
@@ -318,7 +340,7 @@ test.describe('TB-O25a: Notification System', () => {
       await page.reload();
 
       // Verify notification was loaded
-      await page.getByTestId('notification-bell').click();
+      await openSidebar(page);
       await expect(page.getByText('Toast Test')).toBeVisible();
     });
   });
@@ -331,19 +353,19 @@ test.describe('TB-O25a: Notification System', () => {
       await expect(bell).toHaveAttribute('aria-label', /Notifications/);
       await expect(bell).toHaveAttribute('aria-expanded', 'false');
 
-      // Open dropdown
+      // Open sidebar
       await bell.click();
       await expect(bell).toHaveAttribute('aria-expanded', 'true');
     });
 
-    test('notification dropdown has proper role', async ({ page }) => {
+    test('notification sidebar has proper role', async ({ page }) => {
       await page.goto('/');
 
-      await page.getByTestId('notification-bell').click();
+      await openSidebar(page);
 
-      const dropdown = page.getByTestId('notification-dropdown');
-      await expect(dropdown).toHaveAttribute('role', 'menu');
-      await expect(dropdown).toHaveAttribute('aria-label', 'Notifications');
+      const sidebar = page.getByTestId('notification-sidebar');
+      await expect(sidebar).toHaveAttribute('role', 'dialog');
+      await expect(sidebar).toHaveAttribute('aria-label', 'Notification sidebar');
     });
 
     test('notification items have accessible dismiss buttons', async ({ page }) => {
@@ -363,7 +385,7 @@ test.describe('TB-O25a: Notification System', () => {
       });
       await page.reload();
 
-      await page.getByTestId('notification-bell').click();
+      await openSidebar(page);
       await page.getByTestId('notification-a11y-test').hover();
 
       // Dismiss button should have accessible label
@@ -382,12 +404,11 @@ test.describe('TB-O25a: Notification System', () => {
 
       await page.goto('/');
 
-      await page.getByTestId('notification-bell').click();
+      await openSidebar(page);
 
-      // The offline badge should appear in the notification dropdown since we're not connected
-      // Use more specific selector within the notification dropdown
-      const dropdown = page.getByTestId('notification-dropdown');
-      await expect(dropdown.getByText('Offline')).toBeVisible();
+      // The offline badge appears in the sidebar header when SSE is down
+      const sidebar = page.getByTestId('notification-sidebar');
+      await expect(sidebar.getByText('Offline')).toBeVisible();
     });
   });
 });

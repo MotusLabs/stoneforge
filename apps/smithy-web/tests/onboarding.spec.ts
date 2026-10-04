@@ -18,10 +18,19 @@ import { initCheckpoints } from '../test-utils/checkpoint';
 /**
  * Clears the localStorage onboarding flag and any preset configuration
  * so that the preset selection modal and tour appear as if for a new user.
+ *
+ * The clear runs only on the first load of the test: addInitScript handlers
+ * re-run on every reload, and re-clearing the completion flag after the tour
+ * was skipped/completed would make the tour auto-start again on reload
+ * (breaking the "does not reappear on reload" assertions below).
  */
 async function clearOnboardingState(page: import('@playwright/test').Page) {
   await page.addInitScript(() => {
-    localStorage.removeItem('stoneforge:onboarding-complete');
+    if (!sessionStorage.getItem('sf-test-onboarding-cleared')) {
+      localStorage.removeItem('stoneforge:onboarding-complete');
+      localStorage.removeItem('stoneforge:onboarding-step');
+      sessionStorage.setItem('sf-test-onboarding-cleared', '1');
+    }
   });
 }
 
@@ -264,25 +273,25 @@ test.describe('Onboarding Guided Tour', () => {
     const tooltip = page.getByTestId('onboarding-tooltip');
     await expect(tooltip).toBeVisible({ timeout: 5000 });
 
-    // Step 1: Activity Dashboard
-    await expect(tooltip).toContainText('Activity Dashboard');
+    // Step 1: Welcome (targets the activity page)
+    await expect(tooltip).toContainText('Welcome to Stoneforge');
     await expect(page.getByTestId('onboarding-backdrop')).toBeVisible();
-    await capture(page, 'Step 1 highlights Activity Dashboard');
+    await capture(page, 'Step 1 highlights the Activity page');
 
-    // Step 2: Agent Cards
+    // Step 2: System Status
     await page.getByTestId('onboarding-next').click();
-    await expect(tooltip).toContainText('Agent Cards');
-    await capture(page, 'Step 2 highlights Agent Cards');
+    await expect(tooltip).toContainText('System Status');
+    await capture(page, 'Step 2 highlights System Status');
 
-    // Step 3: System Status Bar
+    // Step 3: Active Agents
     await page.getByTestId('onboarding-next').click();
-    await expect(tooltip).toContainText('System Status Bar');
-    await capture(page, 'Step 3 highlights System Status Bar');
+    await expect(tooltip).toContainText('Active Agents');
+    await capture(page, 'Step 3 highlights Active Agents');
 
-    // Step 4: Sidebar Navigation
+    // Step 4: Global Controls (header)
     await page.getByTestId('onboarding-next').click();
-    await expect(tooltip).toContainText('Sidebar Navigation');
-    await capture(page, 'Step 4 highlights Sidebar Navigation');
+    await expect(tooltip).toContainText('Global Controls');
+    await capture(page, 'Step 4 highlights Global Controls');
   });
 
   test('step content shows title, description, step counter, and navigation buttons', async ({
@@ -295,7 +304,7 @@ test.describe('Onboarding Guided Tour', () => {
     await expect(tooltip).toBeVisible({ timeout: 5000 });
 
     // Title
-    await expect(tooltip).toContainText('Activity Dashboard');
+    await expect(tooltip).toContainText('Welcome to Stoneforge');
     // Description
     await expect(tooltip).toContainText('command center');
     // Step counter — "1 of N"
@@ -376,9 +385,13 @@ test.describe('Onboarding Guided Tour', () => {
     await expect(page.getByTestId('onboarding-tooltip')).not.toBeVisible();
   });
 
-  test('Notification Bell step only appears when Approve preset is active', async ({
+  test('Notifications step only appears when Approve preset is active', async ({
     page,
   }) => {
+    // The approve-preset tour has 30+ steps across multiple routes; the
+    // tooltip re-anchors asynchronously after each route navigation.
+    test.setTimeout(90_000);
+
     // Override to use 'approve' preset
     await mockPresetConfigured(page, 'approve');
 
@@ -393,6 +406,10 @@ test.describe('Onboarding Guided Tour', () => {
     let hasMoreSteps = true;
 
     while (hasMoreSteps) {
+      // Wait for the tooltip to anchor on the current step's target before
+      // reading/clicking (it hides briefly during route transitions)
+      await expect(tooltip).toBeVisible({ timeout: 15_000 });
+
       const titleText = await tooltip.locator('h3').textContent();
       if (titleText) stepTitles.push(titleText);
 
@@ -408,11 +425,14 @@ test.describe('Onboarding Guided Tour', () => {
       }
     }
 
-    // Should contain the Notification Bell step
-    expect(stepTitles).toContain('Notification Bell');
+    // Should contain the Notifications step
+    expect(stepTitles).toContain('Notifications');
   });
 
-  test('Notification Bell step does NOT appear for Auto preset', async ({ page }) => {
+  test('Notifications step does NOT appear for Auto preset', async ({ page }) => {
+    // Full-tour walk across multiple routes; see the approve-preset variant
+    test.setTimeout(90_000);
+
     // auto preset (already set in beforeEach)
     await page.goto('/activity');
     await expect(page.getByTestId('activity-page')).toBeVisible({ timeout: 10000 });
@@ -425,6 +445,8 @@ test.describe('Onboarding Guided Tour', () => {
     let hasMoreSteps = true;
 
     while (hasMoreSteps) {
+      await expect(tooltip).toBeVisible({ timeout: 15_000 });
+
       const titleText = await tooltip.locator('h3').textContent();
       if (titleText) stepTitles.push(titleText);
 
@@ -439,11 +461,14 @@ test.describe('Onboarding Guided Tour', () => {
       }
     }
 
-    // Should NOT contain the Notification Bell step
-    expect(stepTitles).not.toContain('Notification Bell');
+    // Should NOT contain the Notifications step
+    expect(stepTitles).not.toContain('Notifications');
   });
 
   test('last step shows Finish button instead of Next', async ({ page }) => {
+    // Full-tour walk across multiple routes; see the approve-preset variant
+    test.setTimeout(90_000);
+
     await page.goto('/activity');
     await expect(page.getByTestId('activity-page')).toBeVisible({ timeout: 10000 });
 
@@ -454,7 +479,7 @@ test.describe('Onboarding Guided Tour', () => {
     let nextText = await page.getByTestId('onboarding-next').textContent();
     while (!nextText?.includes('Finish')) {
       await page.getByTestId('onboarding-next').click();
-      await page.waitForTimeout(200);
+      await expect(tooltip).toBeVisible({ timeout: 15_000 });
       nextText = await page.getByTestId('onboarding-next').textContent();
     }
 
@@ -463,6 +488,9 @@ test.describe('Onboarding Guided Tour', () => {
   });
 
   test('clicking Finish on last step completes the tour', async ({ page }) => {
+    // Full-tour walk across multiple routes; see the approve-preset variant
+    test.setTimeout(90_000);
+
     const capture = initCheckpoints('tour-finish');
 
     await page.goto('/activity');
@@ -475,7 +503,7 @@ test.describe('Onboarding Guided Tour', () => {
     let nextText = await page.getByTestId('onboarding-next').textContent();
     while (!nextText?.includes('Finish')) {
       await page.getByTestId('onboarding-next').click();
-      await page.waitForTimeout(200);
+      await expect(tooltip).toBeVisible({ timeout: 15_000 });
       nextText = await page.getByTestId('onboarding-next').textContent();
     }
 
@@ -497,15 +525,15 @@ test.describe('Onboarding Guided Tour', () => {
     await expect(tooltip).toBeVisible({ timeout: 5000 });
 
     // Step 1
-    await expect(tooltip).toContainText('Activity Dashboard');
+    await expect(tooltip).toContainText('Welcome to Stoneforge');
 
     // Go to step 2
     await page.getByTestId('onboarding-next').click();
-    await expect(tooltip).toContainText('Agent Cards');
+    await expect(tooltip).toContainText('System Status');
 
     // Go back to step 1
     await page.getByTestId('onboarding-prev').click();
-    await expect(tooltip).toContainText('Activity Dashboard');
+    await expect(tooltip).toContainText('Welcome to Stoneforge');
   });
 });
 
@@ -558,7 +586,7 @@ test.describe('Restart Tour from Settings', () => {
     // Tour should start from the beginning
     const tooltip = page.getByTestId('onboarding-tooltip');
     await expect(tooltip).toBeVisible({ timeout: 5000 });
-    await expect(tooltip).toContainText('Activity Dashboard');
+    await expect(tooltip).toContainText('Welcome to Stoneforge');
     await expect(tooltip).toContainText(/1 of \d+/);
 
     await capture(page, 'Tour replayed from beginning after restart from settings');
@@ -651,6 +679,10 @@ test.describe('Preset Change from Settings', () => {
 
 test.describe('Full Onboarding E2E Flow', () => {
   test('complete flow: modal → select preset → tour → finish', async ({ page }) => {
+    // Full-tour walk across multiple routes; see the approve-preset variant
+    // in the guided-tour describe above
+    test.setTimeout(90_000);
+
     const capture = initCheckpoints('full-e2e-flow');
     await clearOnboardingState(page);
 
@@ -693,17 +725,19 @@ test.describe('Full Onboarding E2E Flow', () => {
     await expect(page.getByTestId('preset-selection-modal')).not.toBeVisible({ timeout: 10000 });
     await capture(page, 'E2E Step 2 - Modal dismissed after selecting Auto preset');
 
-    // Step 3: Tour auto-starts
+    // Step 3: Tour auto-starts (AppShell sees the preset via the shared
+    // workflow-preset cache updated by the modal's save)
     const tooltip = page.getByTestId('onboarding-tooltip');
     await expect(tooltip).toBeVisible({ timeout: 5000 });
-    await expect(tooltip).toContainText('Activity Dashboard');
+    await expect(tooltip).toContainText('Welcome to Stoneforge');
     await capture(page, 'E2E Step 3 - Tour started with first step');
 
     // Step 4: Navigate through all steps
     let nextText = await page.getByTestId('onboarding-next').textContent();
     while (!nextText?.includes('Finish')) {
       await page.getByTestId('onboarding-next').click();
-      await page.waitForTimeout(300);
+      // The tooltip re-anchors asynchronously after route transitions
+      await expect(tooltip).toBeVisible({ timeout: 15_000 });
       nextText = await page.getByTestId('onboarding-next').textContent();
     }
     await capture(page, 'E2E Step 4 - Navigated to last tour step');

@@ -4,9 +4,17 @@
  * Fetches and updates the workspace workflow preset via the server API.
  * The preset is stored in the workspace config file (config.yaml) and
  * controls merge behavior and agent permissions.
+ *
+ * State is kept in the shared react-query cache so that every consumer
+ * (AppShell tour gating, the dashboard's first-load modal, and the Settings
+ * workflow preset section) sees updates immediately. Without the shared
+ * cache, selecting a preset in the first-load modal would not notify
+ * AppShell, and the onboarding tour would never auto-start until a manual
+ * page reload.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 export type WorkflowPreset = 'auto' | 'review' | 'approve';
 
@@ -24,51 +32,42 @@ export interface WorkflowPresetState {
 }
 
 const API_BASE = '/api';
+const WORKFLOW_PRESET_QUERY_KEY = ['workflow-preset'] as const;
+
+interface WorkflowPresetResponse {
+  preset: WorkflowPreset | null;
+  isConfigured?: boolean;
+}
 
 /**
  * Hook for managing the workspace workflow preset.
  *
  * Fetches the current preset on mount and provides a setter that
- * persists the choice to the server (config.yaml).
+ * persists the choice to the server (config.yaml) and updates the
+ * shared cache for all hook consumers.
  */
 export function useWorkflowPreset(): WorkflowPresetState {
-  const [preset, setPresetState] = useState<WorkflowPreset | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
-  // Fetch current preset on mount
-  useEffect(() => {
-    let cancelled = false;
-
-    async function fetchPreset() {
-      try {
-        const res = await fetch(`${API_BASE}/settings/workflow-preset`, {
-          headers: { 'Content-Type': 'application/json' },
-        });
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
-        const data = await res.json() as { preset: WorkflowPreset | null };
-        if (!cancelled) {
-          setPresetState(data.preset);
-          setIsLoading(false);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(String(err));
-          setIsLoading(false);
-        }
+  const { data, isLoading, error } = useQuery<WorkflowPresetResponse, Error>({
+    queryKey: WORKFLOW_PRESET_QUERY_KEY,
+    queryFn: async () => {
+      const res = await fetch(`${API_BASE}/settings/workflow-preset`, {
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
       }
-    }
-
-    fetchPreset();
-    return () => { cancelled = true; };
-  }, []);
+      return res.json();
+    },
+    retry: false,
+    refetchOnWindowFocus: false,
+    staleTime: 30_000,
+  });
 
   // Update preset
   const setPreset = useCallback(async (newPreset: WorkflowPreset): Promise<boolean> => {
     try {
-      setError(null);
       const res = await fetch(`${API_BASE}/settings/workflow-preset`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -78,18 +77,20 @@ export function useWorkflowPreset(): WorkflowPresetState {
         const errData = await res.json().catch(() => ({ error: { message: 'Unknown error' } }));
         throw new Error(errData.error?.message || `HTTP ${res.status}`);
       }
-      setPresetState(newPreset);
+      // Propagate to every useWorkflowPreset consumer via the shared cache
+      queryClient.setQueryData(WORKFLOW_PRESET_QUERY_KEY, { preset: newPreset });
       return true;
-    } catch (err) {
-      setError(String(err));
+    } catch {
       return false;
     }
-  }, []);
+  }, [queryClient]);
+
+  const preset = data?.preset ?? null;
 
   return {
     preset,
     isLoading,
-    error,
+    error: error ? error.message : null,
     isConfigured: preset !== null,
     setPreset,
   };

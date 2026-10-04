@@ -234,33 +234,32 @@ test.describe('TB70: Deep-Link Navigation', () => {
   // ============================================================================
   test.describe('Workflows Page', () => {
     test('navigating to /workflows?selected=<id> opens workflow detail', async ({ page }) => {
-      // Create a workflow so the deep link has a real target. Workflows require
-      // an initial task (TB122); POST /api/workflows accepts initialTask details.
-      const created = await page.request.post('/api/workflows', {
+      // Create a workflow to deep-link to
+      const createResponse = await page.request.post('/api/workflows', {
         data: {
           title: `Deep Link Workflow ${Date.now()}`,
           createdBy: 'el-0000',
-          initialTask: { title: `Deep Link Task ${Date.now()}`, createdBy: 'el-0000' },
+          initialTask: { title: 'Deep link task' },
         },
       });
-      expect(created.ok()).toBe(true);
-      const workflow = await created.json();
+      expect(createResponse.ok()).toBe(true);
+      const created = await createResponse.json();
+      const workflowId = created.workflow.id;
 
-      // The quarry workflows endpoint currently returns a bare array (see
-      // workflows.spec.ts). It does NOT use the { items } pagination envelope
-      // of tasks/entities/documents — guard so a shape change fails loudly
-      // instead of silently skipping.
-      const response = await page.request.get('/api/workflows?limit=1');
-      const workflows = await response.json();
-      expect(Array.isArray(workflows), 'GET /api/workflows must return an array').toBe(true);
-      expect(workflows.some((w: { id: string }) => w.id === workflow.id)).toBe(true);
+      // Navigate directly with selected param
+      await page.goto(`/workflows?selected=${workflowId}`);
 
-      // Navigate directly with selected param. NOTE: this currently renders the
-      // ElementNotFound state instead, because useWorkflowDetail expects
-      // { workflow } while the quarry endpoint returns a bare object — tracked
-      // by el-3qfp8e. The assertion below states the intended behavior.
-      await page.goto(`/workflows?selected=${workflow.id}`);
+      // The detail view replaces the list page when a workflow is selected
       await expect(page.getByTestId('workflow-detail-page')).toBeVisible({ timeout: 10000 });
+      const detail = page.getByTestId('workflow-progress-dashboard');
+      await expect(detail).toBeVisible({ timeout: 10000 });
+      await expect(detail.getByRole('heading', { name: created.workflow.title })).toBeVisible();
+
+      // The workflow's tasks render in the detail view
+      await expect(page.getByTestId(`workflow-task-${created.initialTask.id}`)).toBeVisible();
+
+      // Cleanup
+      await page.request.delete(`/api/workflows/${workflowId}?force=true`);
     });
 
     test('navigating to non-existent workflow shows Not Found', async ({ page }) => {
