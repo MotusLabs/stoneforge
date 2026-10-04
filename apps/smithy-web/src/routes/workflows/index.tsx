@@ -33,6 +33,7 @@ import {
   useCancelWorkflow,
   useDeleteWorkflow,
   useWorkflowDetail,
+  isWorkflowTerminal,
   // Types
   type Workflow as WorkflowType,
   type Playbook,
@@ -165,8 +166,16 @@ export function WorkflowsPage() {
   };
 
   const handleDeleteWorkflow = async (workflowId: string) => {
+    // WorkflowCard only offers Delete for terminal workflows. The Quarry
+    // server requires force for finished durable workflows (the smithy server
+    // ignores the flag), so the explicit delete of a terminal workflow is
+    // sent as forced (a no-op for ephemeral ones).
+    const workflow = allWorkflows.find((w: WorkflowType) => w.id === workflowId);
     try {
-      await deleteWorkflow.mutateAsync({ workflowId });
+      await deleteWorkflow.mutateAsync({
+        workflowId,
+        force: workflow ? isWorkflowTerminal(workflow.status) : false,
+      });
     } catch (error) {
       console.error('Failed to delete workflow:', error);
     }

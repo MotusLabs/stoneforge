@@ -283,13 +283,20 @@ export function useCancelWorkflow() {
 
 /**
  * Hook to delete a workflow
+ *
+ * The Quarry server refuses to hard-delete a durable workflow unless the
+ * request opts in with `?force=true` (ephemeral workflows delete without it).
+ * The Workflows page only offers Delete on terminal workflows, where the click
+ * is an explicit "remove this finished workflow" intent, so its callers pass
+ * `force` for those. The smithy server ignores the flag.
  */
 export function useDeleteWorkflow() {
   const queryClient = useQueryClient();
 
-  return useMutation<{ success: boolean }, Error, { workflowId: string }>({
-    mutationFn: async ({ workflowId }) => {
-      return fetchApi(`/workflows/${workflowId}`, {
+  return useMutation<{ success: boolean }, Error, { workflowId: string; force?: boolean }>({
+    mutationFn: async ({ workflowId, force = false }) => {
+      const path = force ? `/workflows/${workflowId}?force=true` : `/workflows/${workflowId}`;
+      return fetchApi(path, {
         method: 'DELETE',
       });
     },

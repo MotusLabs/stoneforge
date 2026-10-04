@@ -47,6 +47,8 @@ export {
   formatWorkflowDuration,
   formatRelativeTime,
   generateStepId,
+  isWorkflowTerminal,
+  isWorkflowActive,
 } from './utils';
 
 // Hooks

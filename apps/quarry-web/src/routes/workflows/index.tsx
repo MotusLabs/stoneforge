@@ -35,6 +35,7 @@ import {
   useCancelWorkflow,
   useDeleteWorkflow,
   useWorkflowDetail,
+  isWorkflowTerminal,
 } from '@stoneforge/ui/workflows';
 
 type TabValue = 'templates' | 'active';
@@ -164,8 +165,15 @@ export function WorkflowsPage() {
   };
 
   const handleDeleteWorkflow = async (workflowId: string) => {
+    // WorkflowCard only offers Delete for terminal workflows. Finished durable
+    // workflows require force on the server, so the explicit delete of a
+    // terminal workflow is sent as forced (a no-op for ephemeral ones).
+    const workflow = allWorkflows.find(w => w.id === workflowId);
     try {
-      await deleteWorkflow.mutateAsync({ workflowId });
+      await deleteWorkflow.mutateAsync({
+        workflowId,
+        force: workflow ? isWorkflowTerminal(workflow.status) : false,
+      });
     } catch (error) {
       console.error('Failed to delete workflow:', error);
     }

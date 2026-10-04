@@ -467,6 +467,52 @@ test.describe('TB25: Workflow List + Create', () => {
     await expect(page.getByTestId(`workflow-card-${created.id}`)).toBeVisible({ timeout: 10000 });
     await expect(page.getByTestId(`workflow-card-${created.id}`)).toContainText(workflowTitle);
   });
+
+  test('deleting a completed durable workflow from its card forces the delete', async ({ page }) => {
+    // A completed durable workflow lands in the Recent section, whose card
+    // menu offers Delete. The Quarry server rejects DELETE of a durable
+    // workflow unless it is sent with ?force=true, so the card's delete must
+    // be issued as forced or it silently fails. Workflow list routes are
+    // mocked (see mockWorkflowRoutes) with the forced DELETE intercepted
+    // separately below.
+    const workflows: MockWorkflow[] = [
+      { id: 'wf-delete-1', title: 'Completed Durable Workflow', status: 'completed', ephemeral: false },
+    ];
+    await mockWorkflowRoutes(page, { workflows });
+
+    // Fulfill the forced DELETE and drop the workflow from the live list, as
+    // the server would. The glob '?' is literal, so only the forced URL
+    // matches here; an unforced DELETE falls through to the real server,
+    // which rejects it with 400 and fails this test.
+    let forcedDeleteSeen = false;
+    await page.route('**/api/workflows/*?force=true', async (route) => {
+      forcedDeleteSeen = true;
+      const url = new URL(route.request().url());
+      const workflowId = url.pathname.split('/').pop();
+      const index = workflows.findIndex((w) => w.id === workflowId);
+      if (index !== -1) workflows.splice(index, 1);
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, workflowId }),
+      });
+    });
+
+    await page.goto('/workflows?tab=active');
+    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+
+    // The completed workflow is listed in the Recent section
+    const card = page.getByTestId('workflow-card-wf-delete-1');
+    await expect(card).toBeVisible();
+
+    // Open the card menu and click Delete
+    await card.getByRole('button', { name: 'Workflow actions' }).click();
+    await card.getByRole('button', { name: 'Delete' }).click();
+
+    // The delete was issued with force and the card is removed from the list
+    await expect(card).not.toBeVisible({ timeout: 10000 });
+    expect(forcedDeleteSeen).toBe(true);
+  });
 });
 
 // ============================================================================
