@@ -16,7 +16,7 @@ test.describe('TB67: Upfront Data Loading Strategy', () => {
 
     test('error state shows retry button on API failure', async ({ page }) => {
       // Mock the elements/all endpoint to fail
-      await page.route('/api/elements/all', async (route) => {
+      await page.route(/\/api\/elements\/all(?:\?.*)?$/, async (route) => {
         await route.fulfill({
           status: 500,
           contentType: 'application/json',
@@ -218,7 +218,7 @@ test.describe('TB67: Upfront Data Loading Strategy', () => {
     test('clicking retry after error reloads data', async ({ page }) => {
       // Start with a failing endpoint
       let shouldFail = true;
-      await page.route('/api/elements/all', async (route) => {
+      await page.route(/\/api\/elements\/all(?:\?.*)?$/, async (route) => {
         if (shouldFail) {
           await route.fulfill({
             status: 500,

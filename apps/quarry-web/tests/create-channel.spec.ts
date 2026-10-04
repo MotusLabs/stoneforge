@@ -295,7 +295,9 @@ test.describe('TB31: Create Channel', () => {
     const finalResponse = await page.request.get('/api/channels');
     const finalChannels = (await finalResponse.json()).items;
     const expectedName = uniqueName.toLowerCase();
-    expect(finalChannels.some((ch: { name: string }) => ch.name === expectedName)).toBe(true);
+    expect(finalChannels.find((record: { name: string }) => record.name === expectedName)).toMatchObject({
+      createdBy: 'el-0000',
+    });
   });
 
   test('submit button is disabled without required fields', async ({ page }) => {

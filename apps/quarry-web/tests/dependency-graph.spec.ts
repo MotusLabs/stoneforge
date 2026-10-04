@@ -38,7 +38,7 @@ test.describe('TB8: Dependency Graph Lens', () => {
   });
 
   test('dependency graph page is accessible via navigation', async ({ page }) => {
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
   });
 
@@ -60,7 +60,7 @@ test.describe('TB8: Dependency Graph Lens', () => {
 
     // Should be on dependencies page
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
-    await expect(page).toHaveURL('/dashboard/dependencies');
+    await expect(page).toHaveURL('/dependencies');
   });
 
   test('dependency graph page shows task selector when tasks exist', async ({ page }) => {
@@ -72,7 +72,7 @@ test.describe('TB8: Dependency Graph Lens', () => {
 
     const allTasks = [...readyTasks, ...blockedTasks];
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
 
     // Wait for loading to complete
@@ -97,7 +97,7 @@ test.describe('TB8: Dependency Graph Lens', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
 
     // Wait for loading to complete
@@ -108,7 +108,7 @@ test.describe('TB8: Dependency Graph Lens', () => {
   });
 
   test('status legend is displayed', async ({ page }) => {
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
 
     // Check for status legend items
@@ -132,7 +132,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -152,7 +152,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -172,7 +172,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -192,7 +192,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -215,7 +215,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -242,7 +242,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -264,7 +264,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -287,7 +287,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -313,7 +313,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -339,7 +339,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -366,7 +366,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -392,7 +392,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -418,7 +418,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -442,7 +442,7 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
       return;
     }
 
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
@@ -770,7 +770,7 @@ test.describe('TB133: Dependency Graph - Read-Only Mode', () => {
 test.describe('TB115a: Edge Type Labels', () => {
   // Helper function to wait for the dependency graph page to stabilize
   async function waitForGraphPageReady(page: import('@playwright/test').Page) {
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     // Wait for toolbar to be visible (indicates loading is complete)
     await expect(page.getByTestId('graph-toolbar')).toBeVisible({ timeout: 10000 });
@@ -880,7 +880,7 @@ test.describe('TB115a: Edge Type Labels', () => {
     });
 
     // Navigate to the dependency graph for the source task
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByTestId('graph-toolbar')).toBeVisible({ timeout: 10000 });
 
@@ -955,7 +955,7 @@ test.describe('TB115a: Edge Type Labels', () => {
 test.describe('TB115b: Auto-Layout Graph Formatting', () => {
   // Helper function to wait for the dependency graph page to stabilize
   async function waitForGraphPageReady(page: import('@playwright/test').Page) {
-    await page.goto('/dashboard/dependencies');
+    await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     // Wait for toolbar to be visible (indicates loading is complete)
     await expect(page.getByTestId('graph-toolbar')).toBeVisible({ timeout: 10000 });

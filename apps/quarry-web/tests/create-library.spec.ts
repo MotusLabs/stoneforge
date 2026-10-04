@@ -240,7 +240,9 @@ test.describe('TB29: Create Library', () => {
     const finalResponse = await page.request.get('/api/libraries');
     const finalLibraries = await finalResponse.json();
     expect(finalLibraries.length).toBe(initialCount + 1);
-    expect(finalLibraries.some((lib: { name: string }) => lib.name === uniqueName)).toBe(true);
+    expect(finalLibraries.find((record: { name: string }) => record.name === uniqueName)).toMatchObject({
+      createdBy: 'el-0000',
+    });
   });
 
   test('submit button is disabled without required fields', async ({ page }) => {

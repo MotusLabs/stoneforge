@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Resume el-2y9h5w's sequential baseline shards in the current worktree."""
+import argparse
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--last-shard', type=int, choices=range(1, 21), default=20)
+args = parser.parse_args()
 
 root = Path(__file__).resolve().parents[3]
 results = root / '.stoneforge/triage-el-2y9h5w'
@@ -27,7 +32,7 @@ def read_report(path):
     return None
 
 
-for shard in range(1, 21):
+for shard in range(1, args.last_shard + 1):
     target = results / f'shard-{shard}.json'
     if read_report(target):
         print(f'Skipping complete shard {shard}', flush=True)
