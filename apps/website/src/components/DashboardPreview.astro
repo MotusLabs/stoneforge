@@ -1248,7 +1248,7 @@ const directMessages = [
               </div>
               <div>
                 <div class="text-[10px] font-semibold text-[var(--site-text-primary)]">Editor</div>
-                <div class="text-[5px] text-[var(--site-text-ghost)] font-mono">apps/smithy-server/src/daemon-state.ts</div>
+                <div class="text-[5px] text-[var(--site-text-ghost)] font-mono">packages/smithy/src/server/daemon-state.ts</div>
               </div>
             </div>
           </div>
@@ -2202,7 +2202,7 @@ const directMessages = [
             <!-- Conversation output -->
             <div class="flex-1 p-1.5 text-[5px] leading-relaxed space-y-1 overflow-hidden">
               <!-- Context text -->
-              <div class="text-[rgba(255,255,255,0.5)]">smithy-server never got the bulk update endpoint that the quarry server has. The frontend hook was added but had nothing to talk to. Should be a quick fix for a worker &mdash; just port the endpoint pattern from <span class="text-[var(--site-accent)] font-mono">packages/quarry/src/server/index.ts:588</span> into <span class="text-[var(--site-accent)] font-mono">apps/smithy-server/src/routes/tasks.ts</span>.</div>
+              <div class="text-[rgba(255,255,255,0.5)]">smithy-server never got the bulk update endpoint that the quarry server has. The frontend hook was added but had nothing to talk to. Should be a quick fix for a worker &mdash; just port the endpoint pattern from <span class="text-[var(--site-accent)] font-mono">packages/quarry/src/server/index.ts:588</span> into <span class="text-[var(--site-accent)] font-mono">packages/smithy/src/server/routes/tasks.ts</span>.</div>
               <!-- User message (highlighted) -->
               <div class="rounded px-1 py-0.5 text-[rgba(255,255,255,0.9)]" style="background: rgba(96,165,250,0.15); border-left: 2px solid var(--site-accent);">No, it should be moved to packages/shared-routes and used in both servers</div>
               <!-- Bullet point -->
