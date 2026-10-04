@@ -5,13 +5,15 @@
  *
  * Behaviors tested:
  * - Plans: card list view, detail sheet/side panel, FAB for create on mobile
+ *   (the header Create action stays visible at every size — it switches to
+ *   its short label on mobile — and the FAB is an additional affordance)
  * - Workflows: tabs + search at every size, template card grid that
  *   collapses to one column on mobile (no FAB), and the playbook-based
  *   Create Workflow modal opened from a template card
  * - Responsive create modals
  */
 
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import {
   setViewport,
   waitForResponsiveUpdate,
@@ -23,10 +25,29 @@ import {
 } from './helpers/create-workflow-modal';
 
 test.describe('TB148: Responsive Plans Page', () => {
+  // The plans page only renders list and detail UI when plans exist. The
+  // global setup seeds just an operator entity, so describes that assert
+  // list/detail views create their plan through the real API first (the
+  // pattern used by plans.spec.ts and deep-link.spec.ts). Plans must have
+  // at least one task (TB121), so creation includes an initialTask.
+  async function seedPlan(page: Page, label: string): Promise<{ id: string }> {
+    const response = await page.request.post('/api/plans', {
+      data: {
+        title: `TB148 ${label} Plan ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        createdBy: 'el-0000',
+        initialTask: { title: `TB148 ${label} task` },
+      },
+    });
+    expect(response.ok()).toBeTruthy();
+    return await response.json();
+  }
+
   test.describe('Mobile Viewport (< 640px)', () => {
     test.beforeEach(async ({ page }) => {
       // Set viewport BEFORE navigation
       await setViewport(page, 'xs');
+      // Card list view renders only when a plan exists
+      await seedPlan(page, 'Mobile');
       await page.goto('/plans');
       // Wait for responsive hooks to stabilize
       await waitForResponsiveUpdate(page, 300);
@@ -45,12 +66,9 @@ test.describe('TB148: Responsive Plans Page', () => {
     });
 
     test('should show card-based list view on mobile', async ({ page }) => {
-      // Wait for plans to load
-      await page.waitForSelector('[data-testid="mobile-plans-list"]', { timeout: 10000 });
-
       // Mobile list view should be visible
       const mobileListView = page.getByTestId('mobile-plans-list');
-      await expect(mobileListView).toBeVisible();
+      await expect(mobileListView).toBeVisible({ timeout: 10000 });
 
       // Desktop list view should not be visible
       const desktopListView = page.getByTestId('plans-list');
@@ -62,9 +80,10 @@ test.describe('TB148: Responsive Plans Page', () => {
       const fab = page.getByTestId('mobile-create-plan-fab');
       await expect(fab).toBeVisible();
 
-      // Regular create button should not be visible
+      // The header Create action stays available on mobile (short label);
+      // the FAB is an additional mobile affordance, not a replacement
       const createButton = page.getByTestId('create-plan-btn');
-      await expect(createButton).not.toBeVisible();
+      await expect(createButton).toBeVisible();
     });
 
     test('should open full-screen create modal when FAB is clicked', async ({ page }) => {
@@ -82,8 +101,12 @@ test.describe('TB148: Responsive Plans Page', () => {
   });
 
   test.describe('Tablet Viewport (768px)', () => {
+    let seededPlan: { id: string } | undefined;
+
     test.beforeEach(async ({ page }) => {
       await setViewport(page, 'lg');
+      // Desktop list view renders only when a plan exists
+      seededPlan = await seedPlan(page, 'Tablet');
       await page.goto('/plans');
       await waitForResponsiveUpdate(page);
     });
@@ -91,7 +114,7 @@ test.describe('TB148: Responsive Plans Page', () => {
     test('should show desktop list view on tablet', async ({ page }) => {
       // Wait for list view content
       const listViewContent = page.getByTestId('plans-list');
-      await expect(listViewContent).toBeVisible();
+      await expect(listViewContent).toBeVisible({ timeout: 10000 });
 
       // Mobile list view should not be present
       const mobileListView = page.getByTestId('mobile-plans-list');
@@ -116,11 +139,10 @@ test.describe('TB148: Responsive Plans Page', () => {
 
     test('should show side panel when plan is selected on tablet', async ({ page }) => {
       // Wait for plans to load
-      await page.waitForSelector('[data-testid="plans-list"]', { timeout: 10000 });
+      await expect(page.getByTestId('plans-list')).toBeVisible({ timeout: 10000 });
 
-      // Click on first plan item
-      const firstPlanItem = page.locator('[data-testid^="plan-item-"]').first();
-      await firstPlanItem.click();
+      // Click on the seeded plan item
+      await page.getByTestId(`plan-item-${seededPlan!.id}`).click();
 
       // Side panel should be visible
       const detailContainer = page.getByTestId('plan-detail-container');
@@ -133,8 +155,12 @@ test.describe('TB148: Responsive Plans Page', () => {
   });
 
   test.describe('Desktop Viewport (1280px)', () => {
+    let seededPlan: { id: string } | undefined;
+
     test.beforeEach(async ({ page }) => {
       await setViewport(page, '2xl');
+      // Desktop list view renders only when a plan exists
+      seededPlan = await seedPlan(page, 'Desktop');
       await page.goto('/plans');
       await waitForResponsiveUpdate(page);
     });
@@ -160,7 +186,7 @@ test.describe('TB148: Responsive Plans Page', () => {
     test('should show desktop list view on desktop', async ({ page }) => {
       // Wait for list view content
       const listViewContent = page.getByTestId('plans-list');
-      await expect(listViewContent).toBeVisible();
+      await expect(listViewContent).toBeVisible({ timeout: 10000 });
 
       // Mobile list view should not be present
       const mobileListView = page.getByTestId('mobile-plans-list');
@@ -179,11 +205,10 @@ test.describe('TB148: Responsive Plans Page', () => {
 
     test('should show side panel when plan is selected on desktop', async ({ page }) => {
       // Wait for plans to load
-      await page.waitForSelector('[data-testid="plans-list"]', { timeout: 10000 });
+      await expect(page.getByTestId('plans-list')).toBeVisible({ timeout: 10000 });
 
-      // Click on first plan item
-      const firstPlanItem = page.locator('[data-testid^="plan-item-"]').first();
-      await firstPlanItem.click();
+      // Click on the seeded plan item
+      await page.getByTestId(`plan-item-${seededPlan!.id}`).click();
 
       // Side panel should be visible
       const detailContainer = page.getByTestId('plan-detail-container');
@@ -198,16 +223,18 @@ test.describe('TB148: Responsive Plans Page', () => {
       await page.goto('/plans');
       await waitForResponsiveUpdate(page);
 
-      // Verify desktop layout
+      // Verify desktop layout: header create button, no FAB
       await expect(page.getByTestId('create-plan-btn')).toBeVisible();
+      await expect(page.getByTestId('mobile-create-plan-fab')).not.toBeVisible();
 
       // Resize to mobile
       await setViewport(page, 'xs');
       await waitForResponsiveUpdate(page, 300);
 
-      // Verify mobile layout
+      // Verify mobile layout: the FAB appears while the header create button
+      // stays available (it switches to its short label on small screens)
       await expect(page.getByTestId('mobile-create-plan-fab')).toBeVisible();
-      await expect(page.getByTestId('create-plan-btn')).not.toBeVisible();
+      await expect(page.getByTestId('create-plan-btn')).toBeVisible();
     });
   });
 });

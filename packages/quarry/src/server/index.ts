@@ -119,8 +119,6 @@ export interface QuarryServerOptions {
 }
 
 export interface QuarryApp {
-  /** Resolves once background services finish their initial startup. */
-  ready: Promise<void>;
   app: InstanceType<typeof Hono>;
   api: QuarryAPI;
   syncService: SyncService;
