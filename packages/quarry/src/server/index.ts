@@ -10,11 +10,12 @@
  */
 
 import { resolve, dirname, extname } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, statSync, unlinkSync } from 'node:fs';
 import { registerStaticMiddleware } from './static.js';
 import { mkdir, readdir, unlink, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 // Core types and factory functions
 import {
@@ -27,6 +28,9 @@ import {
   discoverPlaybookFiles,
   loadPlaybookFromFile,
   createPlaybook,
+  updatePlaybook,
+  writePlaybookFile,
+  PLAYBOOK_FILE_EXTENSION,
   createLibrary,
   createGroupChannel,
   createDirectChannel,
@@ -115,6 +119,8 @@ export interface QuarryServerOptions {
 }
 
 export interface QuarryApp {
+  /** Resolves once background services finish their initial startup. */
+  ready: Promise<void>;
   app: InstanceType<typeof Hono>;
   api: QuarryAPI;
   syncService: SyncService;
@@ -191,7 +197,7 @@ export function createQuarryApp(options: QuarryServerOptions = {}): QuarryApp {
     syncConfig: config.sync,
     outputDir: resolve(PROJECT_ROOT, '.stoneforge/sync'),
   });
-  autoExportService.start().catch((err: Error) => {
+  const autoExportReady = autoExportService.start().catch((err: Error) => {
     console.error('[stoneforge] Failed to start auto-export:', err);
   });
 
@@ -200,7 +206,7 @@ export function createQuarryApp(options: QuarryServerOptions = {}): QuarryApp {
   // ============================================================================
 
   const broadcaster = initializeBroadcaster(api);
-  broadcaster.start().catch((err: Error) => {
+  const broadcasterReady = broadcaster.start().catch((err: Error) => {
     console.error('[stoneforge] Failed to start event broadcaster:', err);
   });
 
@@ -3212,6 +3218,194 @@ app.post('/api/playbooks/:name/instantiate', async (c) => {
 });
 
 // ============================================================================
+// Playbook Write Endpoints (file-based CRUD)
+// ============================================================================
+//
+// Quarry playbooks are files discovered from PLAYBOOK_SEARCH_PATHS rather than
+// stored elements, so create/update/delete persist YAML files instead of
+// writing to the database. The playbook name is the stable identifier (same as
+// GET /api/playbooks/:name above).
+//
+// Scope decision: every write resolves its target through the same discovery
+// scan the GET routes use, so the editor can only create/modify/delete
+// playbooks inside the discovery paths. Playbooks that live outside
+// PLAYBOOK_SEARCH_PATHS are invisible to the server and cannot be edited
+// through this API. The core factories validate the playbook name pattern
+// (letters, digits, underscore, hyphen), which also rules out path
+// separators and '..' — the name becomes the filename on create.
+
+/**
+ * Finds a discovered playbook file by name (case-insensitive).
+ * Mirrors the lookup semantics of GET /api/playbooks/:name.
+ */
+function findPlaybookFileByName(name: string): DiscoveredPlaybook | undefined {
+  const discovered = discoverPlaybookFiles(PLAYBOOK_SEARCH_PATHS, { recursive: true });
+  return discovered.find((p: DiscoveredPlaybook) => p.name.toLowerCase() === name.toLowerCase());
+}
+
+/**
+ * Directory where new playbooks are persisted: the first existing search
+ * path, falling back to the primary one (.stoneforge/playbooks) which
+ * writePlaybookFile creates on demand.
+ */
+function getPlaybookWriteDirectory(): string {
+  for (const dir of PLAYBOOK_SEARCH_PATHS) {
+    try {
+      if (statSync(dir).isDirectory()) {
+        return dir;
+      }
+    } catch {
+      // Path does not exist (or is not a directory) — try the next one
+    }
+  }
+  return PLAYBOOK_SEARCH_PATHS[0];
+}
+
+/**
+ * Maps StoneforgeError codes thrown by the core playbook factories onto the
+ * error response style used by the rest of this file.
+ */
+function playbookWriteErrorReply(c: Context, error: unknown, action: string): Response {
+  const code = (error as { code?: string }).code;
+  const message = (error as Error).message;
+
+  if (code === 'ALREADY_EXISTS' || code === 'CYCLE_DETECTED') {
+    return c.json({ error: { code, message } }, 409);
+  }
+  if (code) {
+    // ValidationError and friends (INVALID_INPUT, MISSING_REQUIRED_FIELD,
+    // TITLE_TOO_LONG, FIELD_TOO_LONG, ...)
+    return c.json({ error: { code: 'VALIDATION_ERROR', message } }, 400);
+  }
+  console.error(`[stoneforge] Failed to ${action} playbook:`, error);
+  return c.json({ error: { code: 'INTERNAL_ERROR', message: `Failed to ${action} playbook` } }, 500);
+}
+
+// Create a playbook by persisting it as a YAML file in the discovery paths.
+// Returns the same { playbook } envelope shape as GET /api/playbooks/:name
+// (with the playbook name exposed as `id`), which is what the shared
+// @stoneforge/ui hooks (useCreatePlaybook) expect.
+app.post('/api/playbooks', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const {
+      name,
+      title,
+      descriptionRef,
+      steps,
+      variables,
+      extends: extendsArr,
+      tags,
+    } = body ?? {};
+
+    if (typeof name !== 'string' || name.length === 0) {
+      return c.json({ error: { code: 'VALIDATION_ERROR', message: 'name is required and must be a non-empty string' } }, 400);
+    }
+    if (typeof title !== 'string' || title.length === 0) {
+      return c.json({ error: { code: 'VALIDATION_ERROR', message: 'title is required and must be a non-empty string' } }, 400);
+    }
+
+    // Reject name collisions with any playbook the server can discover
+    if (findPlaybookFileByName(name)) {
+      return c.json({ error: { code: 'ALREADY_EXISTS', message: `A playbook named '${name}' already exists` } }, 409);
+    }
+
+    const playbook = await createPlaybook({
+      name,
+      title,
+      createdBy: 'system' as EntityId,
+      descriptionRef: typeof descriptionRef === 'string' ? (descriptionRef as DocumentId) : undefined,
+      // Pass the raw values through (defaulting only when absent) so the
+      // factory validates malformed payloads (e.g. steps: "nope") with a 400
+      steps: steps ?? [],
+      variables: variables ?? [],
+      extends: extendsArr ?? undefined,
+      tags: tags ?? undefined,
+    }, api.getIdGeneratorConfig());
+
+    const directory = getPlaybookWriteDirectory();
+    const filePath = resolve(directory, `${playbook.name}${PLAYBOOK_FILE_EXTENSION}`);
+    writePlaybookFile(playbook, filePath);
+
+    return c.json({
+      playbook: { ...playbook, id: playbook.name, filePath, directory },
+    }, 201);
+  } catch (error) {
+    return playbookWriteErrorReply(c, error, 'create');
+  }
+});
+
+// Update a discovered playbook by rewriting its YAML file in place.
+// The file keeps its original name and location, so alternate extensions
+// (.playbook.yml) and nested directories survive edits. Note that
+// descriptionRef and tags are accepted for contract parity with the shared
+// hooks but are not persisted — the playbook YAML schema has no fields for
+// them.
+app.patch('/api/playbooks/:name', async (c) => {
+  try {
+    const name = c.req.param('name');
+    const body = await c.req.json().catch(() => ({}));
+    const {
+      title,
+      descriptionRef,
+      steps,
+      variables,
+      extends: extendsArr,
+      tags,
+    } = body ?? {};
+
+    const found = findPlaybookFileByName(name);
+    if (!found) {
+      return c.json({ error: { code: 'NOT_FOUND', message: 'Playbook not found' } }, 404);
+    }
+
+    // Rebuild the in-memory playbook from the stored file, then apply the
+    // update so core validation runs on the merged result (updatePlaybook
+    // bumps the version, which the YAML writer persists)
+    const current = await createPlaybook(
+      loadPlaybookFromFile(found.path, 'system' as EntityId),
+      api.getIdGeneratorConfig()
+    );
+
+    const updated = updatePlaybook(current, {
+      title,
+      descriptionRef: typeof descriptionRef === 'string' ? (descriptionRef as DocumentId) : undefined,
+      steps,
+      variables,
+      extends: extendsArr,
+      tags,
+    });
+
+    writePlaybookFile(updated, found.path);
+
+    return c.json({
+      playbook: { ...updated, id: updated.name, filePath: found.path, directory: found.directory },
+    });
+  } catch (error) {
+    return playbookWriteErrorReply(c, error, 'update');
+  }
+});
+
+// Delete a discovered playbook by unlinking its file.
+app.delete('/api/playbooks/:name', async (c) => {
+  try {
+    const name = c.req.param('name');
+
+    const found = findPlaybookFileByName(name);
+    if (!found) {
+      return c.json({ error: { code: 'NOT_FOUND', message: 'Playbook not found' } }, 404);
+    }
+
+    unlinkSync(found.path);
+
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('[stoneforge] Failed to delete playbook:', error);
+    return c.json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to delete playbook' } }, 500);
+  }
+});
+
+// ============================================================================
 // Teams Endpoints
 // ============================================================================
 
@@ -4002,7 +4196,8 @@ app.delete('/api/uploads/:filename', async (c) => {
 });
 
   // Return the app and services
-  return { app, api, syncService, autoExportService, inboxService, broadcaster, storageBackend };
+  const ready = Promise.all([autoExportReady, broadcasterReady]).then(() => {});
+  return { app, api, syncService, autoExportService, inboxService, broadcaster, storageBackend, ready };
 }
 
 // ============================================================================
