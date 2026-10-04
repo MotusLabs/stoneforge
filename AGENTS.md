@@ -17,7 +17,7 @@ Context and instructions for AI coding agents working on the Stoneforge reposito
 
 | I need... | Key Files | Reference Doc |
 |-----------|-----------|---------------|
-| Add an API endpoint | `apps/quarry-server/src/index.ts`, `apps/smithy-server/src/routes/` | `sf show el-5z1q` |
+| Add an API endpoint | `apps/quarry-server/src/index.ts`, `packages/smithy/src/server/routes/` | `sf show el-5z1q` |
 | Add a core type | `packages/core/src/types/` | `sf show el-6c3s` |
 | Work with dependencies | `packages/quarry/src/services/dependency.ts` | `sf show el-200z` |
 | Add an orchestrator service | `packages/smithy/src/services/` | `sf show el-50ia` |
@@ -58,7 +58,7 @@ packages/
 apps/
 ├── quarry-server/     # Platform HTTP + WebSocket (port 3456)
 ├── quarry-web/        # Platform React SPA (port 5173)
-├── smithy-server/     # Orchestrator API (port 3457)
+├── smithy-server/     # Orchestrator dev entry (thin wrapper; routes live in packages/smithy/src/server/, port 3457)
 ├── smithy-web/        # Orchestrator dashboard (port 5174)
 ├── docs/              # @stoneforge/docs - Astro documentation site
 └── website/           # @stoneforge/website - Public website

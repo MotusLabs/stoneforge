@@ -25,5 +25,10 @@ export default defineConfig({
       '**/*.bun.test.ts',
       '**/.stoneforge/.worktrees/**',
     ],
+    // The app-level route tests that were vitest-compatible moved to
+    // packages/smithy/src/server/routes/ (legacy duplicate tree removed in
+    // task el-5zmnji); every remaining test here is bun-native, so vitest
+    // legitimately finds nothing to run.
+    passWithNoTests: true,
   },
 });

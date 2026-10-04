@@ -498,3 +498,71 @@ describe('PATCH /api/agents/:id — dispatch tier', () => {
     expect(agentRegistry.updateAgentMetadata).toHaveBeenCalledWith('agent-001', { tier: 1 });
   });
 });
+
+// ============================================================================
+// Model field (ported from apps/smithy-server/src/index.bun.test.ts — the
+// legacy duplicate tree removed in task el-5zmnji; these cases were not
+// covered elsewhere in the live package)
+// ============================================================================
+
+describe('POST /api/agents — model field', () => {
+  let services: Services;
+  let agentRegistry: ReturnType<typeof createMockServices>['agentRegistry'];
+
+  beforeEach(() => {
+    const mocks = createMockServices();
+    services = mocks.services;
+    agentRegistry = mocks.agentRegistry;
+  });
+
+  it('stores model in agent metadata', async () => {
+    const created = createMockAgent('worker');
+    agentRegistry.registerWorker.mockResolvedValue({
+      ...created,
+      metadata: { agent: { ...created.metadata.agent, model: 'claude-sonnet-4-5-20250929' } },
+    });
+
+    const app = createAgentRoutes(services);
+    const res = await app.request('/api/agents', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'worker', name: 'model-test-worker', workerMode: 'ephemeral', model: 'claude-sonnet-4-5-20250929' }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(201);
+    expect(agentRegistry.registerWorker).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'model-test-worker', model: 'claude-sonnet-4-5-20250929' })
+    );
+    // Model is stored inside metadata.agent.model (following AgentMetadata structure)
+    expect(body.agent?.metadata?.agent?.model).toBe('claude-sonnet-4-5-20250929');
+  });
+});
+
+describe('PATCH /api/agents/:id — model field validation', () => {
+  let services: Services;
+  let agentRegistry: ReturnType<typeof createMockServices>['agentRegistry'];
+
+  beforeEach(() => {
+    const mocks = createMockServices();
+    services = mocks.services;
+    agentRegistry = mocks.agentRegistry;
+  });
+
+  it('rejects an empty model string with 400 VALIDATION_ERROR', async () => {
+    agentRegistry.getAgent.mockResolvedValue(createMockAgent('worker'));
+
+    const app = createAgentRoutes(services);
+    const res = await app.request('/api/agents/agent-001', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: '' }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error?.code).toBe('VALIDATION_ERROR');
+    expect(body.error?.message).toContain('Model must be a non-empty string');
+    expect(agentRegistry.updateAgentMetadata).not.toHaveBeenCalled();
+  });
+});

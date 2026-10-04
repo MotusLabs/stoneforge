@@ -5,6 +5,7 @@
  */
 
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { EntityId, ElementId, Task } from '@stoneforge/core';
 import { createTimestamp, ElementType } from '@stoneforge/core';
@@ -22,6 +23,135 @@ import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('sessions');
 const CODEX_RESUME_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// ============================================================================
+// Rate limit guard (shared by session start and resume)
+// ============================================================================
+
+/**
+ * A rate-limit refusal for a session start/resume: everything the 429
+ * response needs. Produced by {@link evaluateRateLimitRefusal}.
+ */
+interface RateLimitRefusal {
+  /** Human-readable reason, naming the limited account when it is known. */
+  message: string;
+  /** Seconds until the named limit resets (>= 1). */
+  retryAfterSeconds: number;
+  /** ISO timestamp of the soonest reset (global refusal). */
+  soonestReset?: string;
+  /** Normalised account key of the limited account (per-agent refusal). */
+  accountKey?: string;
+  /** ISO timestamp when `accountKey` resets (per-agent refusal). */
+  resetsAt?: string;
+}
+
+/**
+ * Seconds to advise the client to wait before retrying, derived from a reset
+ * timestamp. Falls back to 60s when no reset time is known.
+ */
+function retryAfterSecondsFromReset(resetsAt: string | undefined): number {
+  if (!resetsAt) {
+    return 60; // Default to 60 seconds if no reset time available
+  }
+  return Math.max(1, Math.ceil((new Date(resetsAt).getTime() - Date.now()) / 1000));
+}
+
+/**
+ * Rate limit guard shared by session start and resume.
+ *
+ * Two checks, in order:
+ *
+ * 1. **Global pause** — `getRateLimitStatus().isPaused` is true when a
+ *    manual sleep (`sf daemon sleep`) is active or when every enabled
+ *    ephemeral worker's account is limited, so nothing can be dispatched at
+ *    all. During a manual sleep the message says so, and `Retry-After`
+ *    follows the sleep deadline — real limits may reset sooner, but the
+ *    operator's pause still holds.
+ * 2. **This agent's account** — a partial limit does not pause dispatch, but
+ *    the agent being started or resumed may itself run on one of the limited
+ *    accounts. Without this check such a spawn slips through and immediately
+ *    hits the limit. `isAgentRateLimited` applies the fallback-chain rule:
+ *    an agent with an explicit `executablePath` is judged on its own account
+ *    key alone, an agent served by the chain only when every chain entry is
+ *    limited.
+ *
+ * Refusing explicitly (instead of spawning into a rejecting provider) is the
+ * fix for the 2026-10-04 phantom-success reports: `sf agent start` returned
+ * a session ID and "running" while nothing actually executed.
+ *
+ * @returns The refusal to answer with, or undefined when the session may start
+ */
+async function evaluateRateLimitRefusal(
+  dispatchDaemon: NonNullable<Services['dispatchDaemon']>,
+  agent: Parameters<NonNullable<Services['dispatchDaemon']>['isAgentRateLimited']>[0]
+): Promise<RateLimitRefusal | undefined> {
+  const rateLimitStatus = await dispatchDaemon.getRateLimitStatus();
+  if (rateLimitStatus.isPaused) {
+    if (rateLimitStatus.manualSleepUntil) {
+      return {
+        message: 'Dispatch is paused by manual sleep',
+        retryAfterSeconds: retryAfterSecondsFromReset(rateLimitStatus.manualSleepUntil),
+        soonestReset: rateLimitStatus.soonestReset,
+      };
+    }
+    return {
+      message: 'All worker accounts are currently rate-limited',
+      retryAfterSeconds: retryAfterSecondsFromReset(rateLimitStatus.soonestReset),
+      soonestReset: rateLimitStatus.soonestReset,
+    };
+  }
+
+  const agentLimit = dispatchDaemon.isAgentRateLimited(agent);
+  if (agentLimit) {
+    return {
+      message:
+        `Account '${agentLimit.accountKey}' is currently rate-limited until ${agentLimit.resetsAt}. ` +
+        `The session was NOT started. If the limit is stale, clear it with 'sf daemon wake'.`,
+      retryAfterSeconds: retryAfterSecondsFromReset(agentLimit.resetsAt),
+      accountKey: agentLimit.accountKey,
+      resetsAt: agentLimit.resetsAt,
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * Renders a {@link RateLimitRefusal} as the 429 response (with Retry-After).
+ */
+function rateLimitResponse(c: Context, refusal: RateLimitRefusal): Response {
+  return c.json(
+    {
+      error: {
+        code: 'RATE_LIMITED',
+        message: refusal.message,
+        retryAfter: refusal.retryAfterSeconds,
+        soonestReset: refusal.soonestReset,
+        accountKey: refusal.accountKey,
+        resetsAt: refusal.resetsAt,
+      },
+    },
+    { status: 429, headers: { 'Retry-After': String(refusal.retryAfterSeconds) } }
+  );
+}
+
+/**
+ * Shared guard for the start/resume routes: when a dispatch daemon is
+ * available and it refuses the spawn (global pause or the agent's own
+ * account being limited), renders the 429 refusal; otherwise undefined and
+ * the spawn may proceed.
+ */
+async function rateLimitRefusal(
+  c: Context,
+  services: Services,
+  agent: Parameters<NonNullable<Services['dispatchDaemon']>['isAgentRateLimited']>[0]
+): Promise<Response | undefined> {
+  if (!services.dispatchDaemon) {
+    return undefined;
+  }
+  const refusal = await evaluateRateLimitRefusal(services.dispatchDaemon, agent);
+  return refusal ? rateLimitResponse(c, refusal) : undefined;
+}
 
 type NotifyClientsCallback = (
   agentId: EntityId,
@@ -248,6 +378,14 @@ export function createSessionRoutes(
           },
           409
         );
+      }
+
+      // Refuse the spawn explicitly when dispatch is paused or the agent's
+      // account is rate-limited, instead of returning a session that
+      // immediately dies.
+      const limited = await rateLimitRefusal(c, services, agent);
+      if (limited) {
+        return limited;
       }
 
       const existingSession = sessionManager.getActiveSession(agentId);
@@ -584,6 +722,14 @@ Please begin working on this task. Use \`sf task get ${taskResult.id}\` to see f
           },
           409
         );
+      }
+
+      // Refuse the spawn explicitly when dispatch is paused or the agent's
+      // account is rate-limited, instead of returning a session that
+      // immediately dies.
+      const limited = await rateLimitRefusal(c, services, agent);
+      if (limited) {
+        return limited;
       }
 
       const existingSession = sessionManager.getActiveSession(agentId);
