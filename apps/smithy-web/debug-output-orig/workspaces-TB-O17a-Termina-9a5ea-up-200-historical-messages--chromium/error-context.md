@@ -1,0 +1,157 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - complementary [ref=e4]:
+      - img "Stoneforge" [ref=e6]
+      - navigation [ref=e7]:
+        - generic [ref=e8]:
+          - link "Activity" [ref=e9] [cursor=pointer]:
+            - /url: /activity
+            - img [ref=e11]
+          - link "Inbox" [ref=e13] [cursor=pointer]:
+            - /url: /inbox
+            - img [ref=e15]
+          - link "Editor" [ref=e18] [cursor=pointer]:
+            - /url: /editor
+            - img [ref=e20]
+        - generic [ref=e25]:
+          - link "Tasks" [ref=e26] [cursor=pointer]:
+            - /url: /tasks
+            - img [ref=e28]
+          - link "Merge Requests" [ref=e31] [cursor=pointer]:
+            - /url: /merge-requests
+            - img [ref=e33]
+          - link "Plans" [ref=e37] [cursor=pointer]:
+            - /url: /plans
+            - img [ref=e39]
+          - link "Workflows" [ref=e42] [cursor=pointer]:
+            - /url: /workflows
+            - img [ref=e44]
+        - generic [ref=e48]:
+          - link "Agents" [ref=e49] [cursor=pointer]:
+            - /url: /agents
+            - img [ref=e51]
+          - link "Workspaces" [ref=e56] [cursor=pointer]:
+            - /url: /workspaces
+            - img [ref=e58]
+        - generic [ref=e63]:
+          - link "Messages" [ref=e64] [cursor=pointer]:
+            - /url: /messages
+            - img [ref=e66]
+          - link "Documents" [ref=e68] [cursor=pointer]:
+            - /url: /documents
+            - img [ref=e70]
+        - link "Metrics" [ref=e74] [cursor=pointer]:
+          - /url: /metrics
+          - img [ref=e76]
+      - link "Settings" [ref=e79] [cursor=pointer]:
+        - /url: /settings
+        - img [ref=e81]
+      - button "Expand sidebar" [ref=e85]:
+        - img [ref=e86]
+    - generic [ref=e89]:
+      - banner [ref=e90]:
+        - generic [ref=e91]:
+          - navigation "Breadcrumb" [ref=e93]:
+            - list [ref=e94]:
+              - listitem [ref=e95]:
+                - generic [ref=e96]:
+                  - img [ref=e97]
+                  - text: Workspaces
+          - generic [ref=e102]:
+            - button "Open command palette" [ref=e103]:
+              - img [ref=e104]
+              - generic [ref=e107]: Search...
+              - generic [ref=e108]:
+                - img [ref=e109]
+                - text: K
+            - button "operator" [ref=e111]:
+              - img [ref=e112]
+              - generic [ref=e115]: operator
+              - img [ref=e116]
+            - img [ref=e119]
+            - button "No running agents" [disabled] [ref=e121]:
+              - img [ref=e122]
+              - generic [ref=e125]: Stop All
+            - button "Notifications" [ref=e127]:
+              - img [ref=e128]
+            - button "Switch to dark mode" [ref=e133]:
+              - img [ref=e134]
+            - generic [ref=e139]: Connecting...
+      - main [ref=e140]:
+        - generic [ref=e141]:
+          - generic [ref=e142]:
+            - generic [ref=e143]:
+              - img [ref=e145]
+              - generic [ref=e150]:
+                - heading "Workspaces" [level=1] [ref=e151]
+                - paragraph [ref=e152]: Terminal multiplexer for agent sessions • 1 pane
+            - generic [ref=e153]:
+              - button "Single" [ref=e155]:
+                - img [ref=e156]
+                - generic [ref=e158]: Single
+                - img [ref=e159]
+              - button "Add Pane A P" [ref=e161]:
+                - img [ref=e162]
+                - generic [ref=e163]: Add Pane
+                - generic [ref=e164]: A P
+          - generic [ref=e168]:
+            - generic [ref=e169]:
+              - generic [ref=e170]:
+                - generic "Session not running" [ref=e171]
+                - generic [ref=e172]:
+                  - img [ref=e173]
+                  - text: worker
+                - generic "Scroll Test Agent" [ref=e175]
+                - generic [ref=e176]: ephemeral
+              - generic [ref=e177]:
+                - button "Start Session" [ref=e178]:
+                  - img [ref=e179]
+                - button "More options" [ref=e182]:
+                  - img [ref=e183]
+                - button "Close pane" [ref=e187]:
+                  - img [ref=e188]
+            - generic [ref=e191]:
+              - generic [ref=e192]:
+                - generic [ref=e194]:
+                  - img [ref=e195]
+                  - paragraph [ref=e198]: Not connected
+                - generic [ref=e199]:
+                  - textbox "Connect to send messages" [disabled] [ref=e200]
+                  - button "Send message (Enter)" [disabled] [ref=e201]:
+                    - img [ref=e202]
+              - generic [ref=e205]:
+                - img [ref=e209]
+                - generic [ref=e211]:
+                  - heading "Session Idle" [level=3] [ref=e212]
+                  - paragraph [ref=e213]: Start a session to interact with Scroll Test Agent.
+                - button "Start Session" [ref=e214]:
+                  - img [ref=e215]
+                  - text: Start Session
+                - generic [ref=e217]: Ephemeral Worker • Stream
+    - complementary [ref=e218]:
+      - button "Create Director" [ref=e219]:
+        - img [ref=e220]
+    - dialog [ref=e221]:
+      - generic [ref=e222]:
+        - generic [ref=e223]:
+          - img [ref=e224]
+          - heading [level=2] [ref=e227]: Notifications
+          - generic [ref=e228]: Offline
+        - generic [ref=e229]:
+          - button [ref=e230]:
+            - img [ref=e231]
+          - button [ref=e234]:
+            - img [ref=e235]
+      - generic [ref=e238]:
+        - button [ref=e239]: All
+        - button [ref=e240]: Approvals
+        - button [ref=e241]: Notifications
+      - generic [ref=e244]:
+        - img [ref=e245]
+        - paragraph [ref=e248]: No notifications
+        - paragraph [ref=e249]: You're all caught up!
+  - region "Notifications alt+T"
+```

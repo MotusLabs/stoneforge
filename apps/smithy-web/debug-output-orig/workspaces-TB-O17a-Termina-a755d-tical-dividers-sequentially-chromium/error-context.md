@@ -1,0 +1,266 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - complementary [ref=e4]:
+      - img "Stoneforge" [ref=e6]
+      - navigation [ref=e7]:
+        - generic [ref=e8]:
+          - link "Activity" [ref=e9]:
+            - /url: /activity
+            - img [ref=e11]
+          - link "Inbox" [ref=e13]:
+            - /url: /inbox
+            - img [ref=e15]
+          - link "Editor" [ref=e18]:
+            - /url: /editor
+            - img [ref=e20]
+        - generic [ref=e25]:
+          - link "Tasks" [ref=e26]:
+            - /url: /tasks
+            - img [ref=e28]
+          - link "Merge Requests" [ref=e31]:
+            - /url: /merge-requests
+            - img [ref=e33]
+          - link "Plans" [ref=e37]:
+            - /url: /plans
+            - img [ref=e39]
+          - link "Workflows" [ref=e42]:
+            - /url: /workflows
+            - img [ref=e44]
+        - generic [ref=e48]:
+          - link "Agents" [ref=e49]:
+            - /url: /agents
+            - img [ref=e51]
+          - link "Workspaces" [ref=e56]:
+            - /url: /workspaces
+            - img [ref=e58]
+        - generic [ref=e63]:
+          - link "Messages" [ref=e64]:
+            - /url: /messages
+            - img [ref=e66]
+          - link "Documents" [ref=e68]:
+            - /url: /documents
+            - img [ref=e70]
+        - link "Metrics" [ref=e74]:
+          - /url: /metrics
+          - img [ref=e76]
+      - link "Settings" [ref=e79]:
+        - /url: /settings
+        - img [ref=e81]
+      - button "Expand sidebar" [ref=e85]:
+        - img [ref=e86]
+    - generic [ref=e89]:
+      - banner [ref=e90]:
+        - generic [ref=e91]:
+          - navigation "Breadcrumb" [ref=e93]:
+            - list [ref=e94]:
+              - listitem [ref=e95]:
+                - generic [ref=e96]:
+                  - img [ref=e97]
+                  - text: Workspaces
+          - generic [ref=e102]:
+            - button "Open command palette" [ref=e103]:
+              - img [ref=e104]
+              - generic [ref=e107]: Search...
+              - generic [ref=e108]:
+                - img [ref=e109]
+                - text: K
+            - button "operator" [ref=e111]:
+              - img [ref=e112]
+              - generic [ref=e115]: operator
+              - img [ref=e116]
+            - generic [ref=e118]:
+              - img [ref=e119]
+              - generic [ref=e121]: Autopilot
+            - button "No running agents" [disabled] [ref=e122]:
+              - img [ref=e123]
+              - generic [ref=e126]: Stop All
+            - button "Notifications" [ref=e128]:
+              - img [ref=e129]
+            - button "Switch to dark mode" [ref=e132]:
+              - img [ref=e133]
+            - generic [ref=e138]: Connected
+      - main [ref=e139]:
+        - generic [ref=e140]:
+          - generic [ref=e141]:
+            - generic [ref=e142]:
+              - img [ref=e144]
+              - generic [ref=e149]:
+                - heading "Workspaces" [level=1] [ref=e150]
+                - paragraph [ref=e151]: Terminal multiplexer for agent sessions • 3 panes
+            - generic [ref=e152]:
+              - button "Grid" [ref=e154]:
+                - img [ref=e155]
+                - generic [ref=e157]: Grid
+                - img [ref=e158]
+              - button "Rotate" [ref=e160]:
+                - img [ref=e161]
+                - generic [ref=e164]: Rotate
+              - button "Add Pane A P" [ref=e165]:
+                - img [ref=e166]
+                - generic [ref=e167]: Add Pane
+                - generic [ref=e168]: A P
+          - generic [ref=e171]:
+            - generic:
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic "Session not running"
+                        - generic:
+                          - img
+                          - text: worker
+                        - generic "Worker 1"
+                        - generic: persistent
+                      - generic:
+                        - button "Start Session":
+                          - img
+                        - button "Maximize":
+                          - img
+                        - generic:
+                          - button "More options":
+                            - img
+                        - button "Close pane":
+                          - img
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - generic:
+                              - generic:
+                                - textbox "Terminal input"
+                              - generic:
+                                - generic:
+                                  - generic: WebSocket error
+                      - generic:
+                        - generic:
+                          - generic:
+                            - img
+                        - generic:
+                          - heading "Session Idle" [level=3]
+                          - paragraph: Start a session to interact with Worker 1.
+                        - button "Start Session":
+                          - img
+                          - text: Start Session
+                        - generic: Persistent Worker • Interactive
+            - separator [active] [ref=e172]:
+              - generic "Swap sections":
+                - img
+            - generic:
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - generic:
+                              - generic "Session not running"
+                              - generic:
+                                - img
+                                - text: worker
+                              - generic "Worker 2"
+                              - generic: persistent
+                            - generic:
+                              - button "Start Session":
+                                - img
+                              - button "Maximize":
+                                - img
+                              - generic:
+                                - button "More options":
+                                  - img
+                              - button "Close pane":
+                                - img
+                          - generic:
+                            - generic:
+                              - generic:
+                                - generic:
+                                  - generic:
+                                    - generic:
+                                      - textbox "Terminal input"
+                                    - generic:
+                                      - generic:
+                                        - generic: WebSocket error
+                            - generic:
+                              - generic:
+                                - generic:
+                                  - img
+                              - generic:
+                                - heading "Session Idle" [level=3]
+                                - paragraph: Start a session to interact with Worker 2.
+                              - button "Start Session":
+                                - img
+                                - text: Start Session
+                              - generic: Persistent Worker • Interactive
+                  - separator:
+                    - generic "Swap sections":
+                      - img
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - generic:
+                              - generic "Session not running"
+                              - generic:
+                                - img
+                                - text: worker
+                              - generic "Worker 3"
+                              - generic: ephemeral
+                            - generic:
+                              - button "Start Session":
+                                - img
+                              - button "Maximize":
+                                - img
+                              - generic:
+                                - button "More options":
+                                  - img
+                              - button "Close pane":
+                                - img
+                          - generic:
+                            - generic:
+                              - generic:
+                                - generic:
+                                  - img
+                                  - paragraph: Not connected
+                              - generic:
+                                - textbox "Connect to send messages" [disabled]
+                                - button "Send message (Enter)" [disabled]:
+                                  - img
+                            - generic:
+                              - generic:
+                                - generic:
+                                  - img
+                              - generic:
+                                - heading "Session Idle" [level=3]
+                                - paragraph: Start a session to interact with Worker 3.
+                              - button "Start Session":
+                                - img
+                                - text: Start Session
+                              - generic: Ephemeral Worker • Stream
+    - complementary [ref=e173]:
+      - button "Create Director" [ref=e174]:
+        - img [ref=e175]
+    - dialog [ref=e176]:
+      - generic [ref=e177]:
+        - generic [ref=e178]:
+          - img [ref=e179]
+          - heading [level=2] [ref=e182]: Notifications
+        - generic [ref=e183]:
+          - button [ref=e184]:
+            - img [ref=e185]
+          - button [ref=e188]:
+            - img [ref=e189]
+      - generic [ref=e192]:
+        - button [ref=e193]: All
+        - button [ref=e194]: Approvals
+        - button [ref=e195]: Notifications
+      - generic [ref=e198]:
+        - img [ref=e199]
+        - paragraph [ref=e202]: No notifications
+        - paragraph [ref=e203]: You're all caught up!
+  - region "Notifications alt+T"
+```
