@@ -24,6 +24,7 @@
     "build": "tsc",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
+    "test": "bun test src",
     "clean": "rm -rf dist"
   },
   "files": [

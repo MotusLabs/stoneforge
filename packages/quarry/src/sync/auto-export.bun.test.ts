@@ -350,4 +350,138 @@ describe('AutoExportService', () => {
 
     expect(service).toBeInstanceOf(AutoExportService);
   });
+
+  // --------------------------------------------------------------------------
+  // Startup/shutdown race (see server lifecycle: createQuarryApp fires
+  // autoExportService.start() without awaiting it — a stop() that races that
+  // startup must not leave a late-armed poll interval running)
+  // --------------------------------------------------------------------------
+
+  test('stop during startup prevents the poll interval from arming', async () => {
+    const outputDir = join(tempDir, 'sync');
+    const service = createAutoExportService({
+      syncService,
+      backend,
+      syncConfig: defaultSyncConfig({ exportDebounce: 20 }),
+      outputDir,
+    });
+
+    // Begin startup but do NOT await it — stop() races the in-flight initial
+    // export. Old behavior: stop() saw no pollInterval (no-op), then start()
+    // resumed and armed the interval anyway, polling a torn-down service.
+    const started = service.start();
+    const stopped = service.stop();
+    await Promise.all([started, stopped]);
+
+    // If the interval were (wrongly) armed, ticks every 20ms would export a
+    // dirty element within the wait window below.
+    const task = createTestElement({ id: 'el-race1' as ElementId });
+    insertElement(backend, task);
+    backend.markDirty('el-race1');
+
+    await sleep(80);
+
+    // Dirty element must still be pending — no export ran
+    expect(backend.getDirtyElements()).toHaveLength(1);
+    expect(existsSync(join(outputDir, 'elements.jsonl'))).toBe(true); // only the initial full export ran
+    const content = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+    expect(content).not.toContain('el-race1');
+  });
+
+  test('stop awaits the in-flight initial export before resolving', async () => {
+    const outputDir = join(tempDir, 'sync');
+
+    let exportStarted = false;
+    let releaseExport: () => void = () => {};
+    const exportGate = new Promise<void>((resolve) => {
+      releaseExport = resolve;
+    });
+    const originalExport = syncService.export.bind(syncService);
+    syncService.export = async (options) => {
+      exportStarted = true;
+      await exportGate; // hold the initial export open
+      return originalExport(options);
+    };
+
+    const service = createAutoExportService({
+      syncService,
+      backend,
+      syncConfig: defaultSyncConfig(),
+      outputDir,
+    });
+
+    const started = service.start();
+    await sleep(10); // let the initial export enter the gate
+    expect(exportStarted).toBe(true);
+
+    const stopped = service.stop();
+    let stopResolved = false;
+    stopped.then(() => {
+      stopResolved = true;
+    });
+
+    await sleep(30);
+    // stop() must wait for the in-flight export — closing the database or
+    // removing the output dir before it settles is what produced the
+    // 'Database is closed' / ENOENT teardown noise.
+    expect(stopResolved).toBe(false);
+
+    releaseExport();
+    await Promise.all([started, stopped]);
+
+    expect(stopResolved).toBe(true);
+    // The gated initial export was allowed to complete
+    expect(existsSync(join(outputDir, 'elements.jsonl'))).toBe(true);
+  });
+
+  test('stop awaits an in-flight export tick before resolving', async () => {
+    const outputDir = join(tempDir, 'sync');
+
+    let tickExportCount = 0;
+    let releaseExport: () => void = () => {};
+    const originalExport = syncService.export.bind(syncService);
+    syncService.export = async (options) => {
+      if (options.full) {
+        return originalExport(options);
+      }
+      tickExportCount++;
+      await new Promise<void>((resolve) => {
+        releaseExport = resolve;
+      });
+      return originalExport(options);
+    };
+
+    const service = createAutoExportService({
+      syncService,
+      backend,
+      syncConfig: defaultSyncConfig({ exportDebounce: 10 }),
+      outputDir,
+    });
+
+    await service.start();
+
+    const task = createTestElement({ id: 'el-race2' as ElementId });
+    insertElement(backend, task);
+    backend.markDirty('el-race2');
+
+    // Wait until a tick export is parked in the gate
+    await sleep(40);
+    expect(tickExportCount).toBeGreaterThanOrEqual(1);
+
+    const stopped = service.stop();
+    let stopResolved = false;
+    stopped.then(() => {
+      stopResolved = true;
+    });
+
+    await sleep(30);
+    expect(stopResolved).toBe(false); // still draining the in-flight tick
+
+    releaseExport();
+    await stopped;
+    expect(stopResolved).toBe(true);
+
+    // The tick finished cleanly — dirty tracking acknowledged
+    expect(backend.getDirtyElements()).toHaveLength(0);
+  });
 });

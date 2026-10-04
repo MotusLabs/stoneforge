@@ -24,7 +24,7 @@ export type {
 export { getChannelForElementType, parseClientMessage } from './types.js';
 
 // Broadcaster
-export { EventBroadcaster, initializeBroadcaster, getBroadcaster } from './broadcaster.js';
+export { EventBroadcaster, initializeBroadcaster, getBroadcaster, resetBroadcaster } from './broadcaster.js';
 export type { EventListener } from './broadcaster.js';
 
 // Handler utilities

@@ -37,6 +37,18 @@ export class EventBroadcaster {
   private lastEventId: number = 0;
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private pollIntervalMs: number;
+  /**
+   * In-flight startup promise, so concurrent `start()` calls share one
+   * startup and `stop()` can wait for startup work to settle.
+   */
+  private startPromise: Promise<void> | null = null;
+  /**
+   * Incremented on every `stop()`. A `start()` that began before a `stop()`
+   * detects the mismatch once its awaits resume and must not arm the poll
+   * interval — otherwise teardown leaves a late-started poller running
+   * against a closed database.
+   */
+  private stopGeneration = 0;
 
   constructor(api: QuarryLikeAPI, pollIntervalMs: number = 500) {
     this.api = api;
@@ -65,15 +77,38 @@ export class EventBroadcaster {
   }
 
   /**
-   * Start polling for events
+   * Start polling for events.
+   *
+   * Safe to call concurrently: overlapping calls await the same startup.
+   * If `stop()` is called while startup is in flight, the startup completes
+   * but the poll interval is never armed.
    */
   async start(): Promise<void> {
     if (this.pollInterval) {
       return;
     }
+    if (this.startPromise) {
+      return this.startPromise;
+    }
 
+    const generation = this.stopGeneration;
+    const promise = this.performStart(generation).finally(() => {
+      if (this.startPromise === promise) {
+        this.startPromise = null;
+      }
+    });
+    this.startPromise = promise;
+    return promise;
+  }
+
+  private async performStart(generation: number): Promise<void> {
     // Initialize last event ID from database
     await this.initializeLastEventId();
+
+    // A stop() raced this startup — do not arm the poll interval
+    if (generation !== this.stopGeneration) {
+      return;
+    }
 
     // Start polling
     this.pollInterval = setInterval(() => {
@@ -86,9 +121,24 @@ export class EventBroadcaster {
   }
 
   /**
-   * Stop polling for events
+   * Stop polling for events.
+   *
+   * If a `start()` is still in flight, this awaits it first, so once the
+   * returned promise resolves no startup work (and no poll interval armed by
+   * it) is left running. Callers tearing down shared resources (e.g. closing
+   * the database) should await this before doing so.
    */
-  stop(): void {
+  async stop(): Promise<void> {
+    this.stopGeneration++;
+
+    if (this.startPromise) {
+      try {
+        await this.startPromise;
+      } catch {
+        // Startup errors are logged by performStart paths; stop must not throw
+      }
+    }
+
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
@@ -183,4 +233,28 @@ export function initializeBroadcaster(api: QuarryLikeAPI, pollIntervalMs?: numbe
  */
 export function getBroadcaster(): EventBroadcaster | null {
   return broadcaster;
+}
+
+/**
+ * Clear the singleton broadcaster instance.
+ *
+ * After a server/app is stopped, the singleton still points at the stopped
+ * broadcaster (bound to a possibly-closed database). A later
+ * `initializeBroadcaster()` in the same process — e.g. integration tests
+ * that create and tear down apps sequentially — would otherwise reuse that
+ * stale instance. Call this during teardown so the next
+ * `initializeBroadcaster()` creates a fresh instance.
+ *
+ * When `instance` is passed, the singleton is only cleared if it is that
+ * exact instance — stopping one app must not unregister a different app's
+ * broadcaster that has since taken over the singleton.
+ */
+export function resetBroadcaster(instance?: EventBroadcaster): void {
+  if (instance && broadcaster !== instance) {
+    return;
+  }
+  if (broadcaster) {
+    void broadcaster.stop();
+  }
+  broadcaster = null;
 }

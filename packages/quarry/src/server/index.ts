@@ -92,7 +92,7 @@ import {
   createPlanRoutes,
   createTaskRoutes as createSharedTaskRoutes,
 } from '@stoneforge/shared-routes';
-import { initializeBroadcaster } from './ws/broadcaster.js';
+import { initializeBroadcaster, resetBroadcaster } from './ws/broadcaster.js';
 import { handleOpen, handleMessage, handleClose, handleError, getClientCount, broadcastInboxEvent, type ClientData } from './ws/handler.js';
 
 // ============================================================================
@@ -128,6 +128,23 @@ export interface QuarryApp {
   inboxService: InboxService;
   broadcaster: ReturnType<typeof initializeBroadcaster>;
   storageBackend: ReturnType<typeof createStorage>;
+  /**
+   * Resolves once all background services (auto-export initial export, event
+   * broadcaster) have finished their async startup. Never rejects — startup
+   * failures are logged by the services themselves. Await this before making
+   * assertions that depend on services being fully up.
+   */
+  ready: Promise<void>;
+  /**
+   * Stop all background services and close the database.
+   *
+   * Awaits any in-flight service startup (and export ticks) first, so no
+   * async work outlives teardown — safe to call immediately after
+   * `createQuarryApp`, even before `ready` settles. Await this before
+   * disposing shared resources (e.g. removing temp directories in tests).
+   * Idempotent.
+   */
+  stop(): Promise<void>;
 }
 
 // ============================================================================
@@ -197,7 +214,7 @@ export function createQuarryApp(options: QuarryServerOptions = {}): QuarryApp {
     syncConfig: config.sync,
     outputDir: resolve(PROJECT_ROOT, '.stoneforge/sync'),
   });
-  const autoExportReady = autoExportService.start().catch((err: Error) => {
+  const autoExportStart = autoExportService.start().catch((err: Error) => {
     console.error('[stoneforge] Failed to start auto-export:', err);
   });
 
@@ -206,9 +223,43 @@ export function createQuarryApp(options: QuarryServerOptions = {}): QuarryApp {
   // ============================================================================
 
   const broadcaster = initializeBroadcaster(api);
-  const broadcasterReady = broadcaster.start().catch((err: Error) => {
+  const broadcasterStart = broadcaster.start().catch((err: Error) => {
     console.error('[stoneforge] Failed to start event broadcaster:', err);
   });
+
+  // ============================================================================
+  // Lifecycle: ready + stop
+  // ============================================================================
+
+  // Resolves once every background service's async startup has settled
+  // (success or logged failure) — never rejects.
+  const ready = Promise.all([autoExportStart, broadcasterStart]).then(() => undefined);
+
+  let stopPromise: Promise<void> | null = null;
+  const stop = (): Promise<void> => {
+    if (!stopPromise) {
+      stopPromise = (async (): Promise<void> => {
+        // Wait for startup work to settle before tearing anything down, so a
+        // stop() racing createQuarryApp's service starts cannot leave late
+        // async work (initial export, event polling) running against a closed
+        // database or a removed output directory.
+        await ready;
+
+        // Stop pollers first — they read from the database.
+        await broadcaster.stop();
+        // Release the singleton so a later createQuarryApp in the same process
+        // gets a fresh broadcaster instead of this (soon dead) one. Only
+        // resets if this broadcaster still owns the singleton.
+        resetBroadcaster(broadcaster);
+        await autoExportService.stop();
+
+        if (storageBackend.isOpen) {
+          storageBackend.close();
+        }
+      })();
+    }
+    return stopPromise;
+  };
 
   // ============================================================================
   // Create Hono App
@@ -4196,8 +4247,7 @@ app.delete('/api/uploads/:filename', async (c) => {
 });
 
   // Return the app and services
-  const ready = Promise.all([autoExportReady, broadcasterReady]).then(() => {});
-  return { app, api, syncService, autoExportService, inboxService, broadcaster, storageBackend, ready };
+  return { app, api, syncService, autoExportService, inboxService, broadcaster, storageBackend, ready, stop };
 }
 
 // ============================================================================
