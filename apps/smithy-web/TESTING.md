@@ -22,6 +22,18 @@ needed. Node.js and pnpm (the repository's package manager, used by Turbo builds
 must also be available. Linux installs also need `python3`, `make`, and `g++`
 for the native `node-pty` dependency. Install these system prerequisites before
 running pnpm.
+
+Browser provisioning goes through `scripts/ensure-playwright-browsers.mjs`
+(`test:e2e:setup`, the `test`/`test:ui` scripts, and both apps' global setup
+hooks all call it). It exits immediately when the required build is already
+complete, and otherwise installs it under a cross-process lock in the shared
+browsers directory — concurrent suites, shards, and worktrees wait for the one
+install instead of racing it (the source of ETXTBSY / V8 snapshot spawn errors
+after workspace restarts). Do not run `playwright install` by hand while suites
+are running; use the setup script. After a workspace/pod restart the first run
+re-downloads the build once — the browsers directory is not persisted across
+pod restarts (see workspace runbook el-2423ix).
+
 On Linux, Chromium requires its system libraries; on a minimal OS install these
 with `bun run --cwd apps/smithy-web test:e2e:setup --with-deps`
 (requires permission to install OS packages).
