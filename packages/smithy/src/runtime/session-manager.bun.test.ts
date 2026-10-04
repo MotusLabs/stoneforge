@@ -22,6 +22,7 @@ import type {
   UWPCheckOptions,
 } from './spawner.js';
 import type { AgentRegistry } from '../services/agent-registry.js';
+import { getProviderRegistry } from '../providers/registry.js';
 import type { AgentEntity } from '../api/orchestrator-api.js';
 import type { AgentMetadata } from '../types/agent.js';
 import {
@@ -405,6 +406,44 @@ describe('SessionManager', () => {
       const agent = await registry.getAgent(testAgentId);
       const meta = agent?.metadata?.agent as AgentMetadata;
       expect(meta?.sessionStatus).toBe('running');
+    });
+
+    test('forwards per-spawn provider and timeout overrides to the spawner', async () => {
+      // The supervised server spawn routes 'sf agent start --provider/--timeout'
+      // through StartSessionOptions; both must reach the spawner's spawn call
+      // (task el-3hxa0i). Registers an always-available fake provider so the
+      // resolution is deterministic and probes no real executable.
+      const FAKE = 'sm-test-start-provider';
+      getProviderRegistry().register({
+        name: FAKE,
+        headless: {
+          name: `${FAKE}-headless`,
+          spawn: async () => { throw new Error('not expected'); },
+          isAvailable: async () => true,
+        },
+        interactive: {
+          name: `${FAKE}-interactive`,
+          spawn: async () => { throw new Error('not expected'); },
+          isAvailable: async () => true,
+        },
+        isAvailable: async () => true,
+        getInstallInstructions: () => 'not needed',
+        listModels: async () => [],
+      });
+
+      await sessionManager.startSession(testAgentId, {
+        provider: FAKE,
+        timeout: 300000,
+        model: 'fake-vendor/fake-model',
+        environmentVariables: { MY_VAR: 'value' },
+      });
+
+      expect(spawner._lastSpawnOptions?.provider?.name).toBe(FAKE);
+      expect(spawner._lastSpawnOptions?.timeout).toBe(300000);
+      expect(spawner._lastSpawnOptions?.model).toBe('fake-vendor/fake-model');
+      expect(spawner._lastSpawnOptions?.environmentVariables).toMatchObject({
+        MY_VAR: 'value',
+      });
     });
   });
 

@@ -10,11 +10,12 @@
  * reported a phantom success while nothing actually ran (task el-3hxa0i).
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { EntityId, ElementId } from '@stoneforge/core';
 import type { Services } from '../services.js';
 import { createSessionRoutes } from './sessions.js';
+import { getProviderRegistry } from '../../providers/registry.js';
 
 // ============================================================================
 // Test Fixtures
@@ -618,6 +619,170 @@ describe('partial limit — the agent\'s own account decides (agent-scoped)', ()
     });
 
     expect(res.status).toBe(201);
+    expect(mocks.sessionManager.resumeSession).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ============================================================================
+// Spawn option forwarding and validation (start/resume)
+//
+// 'sf agent start' routes every non-streaming option through the server
+// (task el-3hxa0i). The start route must forward the spawn-shaping body
+// fields to sessionManager.startSession and reject invalid ones with 400
+// instead of letting them fail mid-spawn or be silently dropped; the resume
+// route must explicitly refuse start-only options (a resumed session keeps
+// its original shape) rather than ignoring them.
+// ============================================================================
+
+describe('start/resume routes — spawn option forwarding and validation', () => {
+  const FAKE_PROVIDER = 'vitest-fake-start-provider';
+
+  beforeAll(() => {
+    // Register an always-available provider so provider forwarding can be
+    // asserted without probing a real executable.
+    getProviderRegistry().register({
+      name: FAKE_PROVIDER,
+      headless: {
+        name: `${FAKE_PROVIDER}-headless`,
+        spawn: async () => {
+          throw new Error('not expected in route tests');
+        },
+        isAvailable: async () => true,
+      },
+      interactive: {
+        name: `${FAKE_PROVIDER}-interactive`,
+        spawn: async () => {
+          throw new Error('not expected in route tests');
+        },
+        isAvailable: async () => true,
+      },
+      isAvailable: async () => true,
+      getInstallInstructions: () => 'not needed',
+      listModels: async () => [],
+    });
+  });
+
+  let mocks: ReturnType<typeof createMockServices>;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mocks = createMockServices();
+  });
+
+  it('forwards spawn-shaping options to sessionManager.startSession', async () => {
+    const app = createApp(mocks.services);
+    const res = await app.request('/api/agents/agent-001/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        interactive: true,
+        cols: 160,
+        rows: 40,
+        environmentVariables: { MY_VAR: 'value' },
+        provider: FAKE_PROVIDER,
+        model: 'fake-vendor/fake-model',
+        timeout: 300000,
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(mocks.sessionManager.startSession).toHaveBeenCalledTimes(1);
+    expect(mocks.sessionManager.startSession).toHaveBeenCalledWith(
+      'agent-001',
+      expect.objectContaining({
+        interactive: true,
+        cols: 160,
+        rows: 40,
+        environmentVariables: { MY_VAR: 'value' },
+        provider: FAKE_PROVIDER,
+        model: 'fake-vendor/fake-model',
+        timeout: 300000,
+      })
+    );
+  });
+
+  it.each([['abc'], [0], [-1], [null]])(
+    'rejects an invalid timeout (%s) with 400 before spawning',
+    async (badTimeout) => {
+      const app = createApp(mocks.services);
+      const res = await app.request('/api/agents/agent-001/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timeout: badTimeout }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { code: string; message: string } };
+      expect(body.error.code).toBe('INVALID_TIMEOUT');
+      expect(body.error.message).toContain('positive number');
+      expect(mocks.sessionManager.startSession).not.toHaveBeenCalled();
+    }
+  );
+
+  it('rejects an unknown provider with 400 and lists the available providers', async () => {
+    const app = createApp(mocks.services);
+    const res = await app.request('/api/agents/agent-001/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'definitely-not-registered' }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('INVALID_PROVIDER');
+    expect(body.error.message).toContain("Provider 'definitely-not-registered' is not registered");
+    expect(mocks.sessionManager.startSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed model for the effective provider with 400 (no silent provider-default fallback)', async () => {
+    const app = createApp(mocks.services);
+    const res = await app.request('/api/agents/agent-001/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'opencode', model: 'claude-sonnet-4' }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('INVALID_MODEL');
+    expect(body.error.message).toContain('claude-sonnet-4');
+    expect(mocks.sessionManager.startSession).not.toHaveBeenCalled();
+  });
+
+  it('resume forwards its options and explicitly refuses start-only options', async () => {
+    const app = createApp(mocks.services);
+
+    // Happy path: only resume-supported fields.
+    const ok = await app.request('/api/agents/agent-001/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        providerSessionId: 'provider-session-123',
+        workingDirectory: '/tmp/work',
+        resumePrompt: 'continue',
+      }),
+    });
+    expect(ok.status).toBe(201);
+    expect(mocks.sessionManager.resumeSession).toHaveBeenCalledWith(
+      'agent-001',
+      expect.objectContaining({
+        providerSessionId: 'provider-session-123',
+        workingDirectory: '/tmp/work',
+        resumePrompt: 'continue',
+      })
+    );
+
+    // Start-only options are refused by name, not silently dropped.
+    const refused = await app.request('/api/agents/agent-001/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ providerSessionId: 'provider-session-123', model: 'some-model' }),
+    });
+    expect(refused.status).toBe(400);
+    const body = (await refused.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('UNSUPPORTED_FOR_RESUME');
+    expect(body.error.message).toContain('model');
+    // Only the successful resume above ran.
     expect(mocks.sessionManager.resumeSession).toHaveBeenCalledTimes(1);
   });
 });

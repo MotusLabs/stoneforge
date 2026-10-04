@@ -146,6 +146,293 @@ export function resolveAgentStartOverrides(
 }
 
 /**
+ * Default orchestrator server URL (same default as the daemon commands and
+ * tryReconcileAgentPatchViaServer).
+ */
+const DEFAULT_ORCHESTRATOR_URL = 'http://localhost:3457';
+
+/**
+ * Default spawn/init timeout (ms) the spawner applies when --timeout is not
+ * given — mirrors SpawnerService's default. The server spawn request only
+ * answers after the spawn settles, so the HTTP abort budget must cover it.
+ */
+const DEFAULT_SPAWN_TIMEOUT_MS = 120_000;
+
+/**
+ * Extra budget on top of the spawn timeout for the HTTP round trip itself
+ * (worktree creation, prompt assembly, response serialisation).
+ */
+const SERVER_REQUEST_OVERHEAD_MS = 10_000;
+
+/**
+ * Parses a positive-integer CLI option (--timeout, --cols, --rows).
+ * Undefined input passes through as undefined. Anything that is not a
+ * positive integer is rejected — silently coercing (e.g. "120.5" -> 120)
+ * would ignore what the user actually typed.
+ */
+function parsePositiveIntOption(
+  name: string,
+  raw: string | undefined
+): { value?: number; error?: string } {
+  if (raw === undefined) {
+    return {};
+  }
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed) || parseInt(trimmed, 10) <= 0) {
+    return { error: `Invalid ${name}: ${raw}. Must be a positive integer.` };
+  }
+  return { value: parseInt(trimmed, 10) };
+}
+
+/**
+ * Parses a --env KEY=VALUE assignment into a single-entry record. An entry
+ * without '=' (or with an empty key) is rejected instead of silently
+ * dropping the variable.
+ */
+function parseEnvAssignment(raw: string): { entry?: Record<string, string>; error?: string } {
+  const eq = raw.indexOf('=');
+  if (eq <= 0) {
+    return { error: `Invalid --env: ${raw}. Must be KEY=VALUE.` };
+  }
+  return { entry: { [raw.slice(0, eq)]: raw.slice(eq + 1) } };
+}
+
+/**
+ * Resolves the orchestrator server URL: --server option, then the
+ * STONEFORGE_API_URL environment variable, then the default.
+ */
+function getOrchestratorUrl(options: { server?: string }): string {
+  return (options.server ?? process.env.STONEFORGE_API_URL ?? DEFAULT_ORCHESTRATOR_URL).replace(/\/$/, '');
+}
+
+/**
+ * Connect-phase error codes: failures that happen BEFORE the request is
+ * delivered to any server, proving no spawn can have started. Bun uses
+ * 'ConnectionRefused'; Node/undici uses 'ECONNREFUSED' (on err.cause).
+ */
+const CONNECT_PHASE_CODES = new Set([
+  'ECONNREFUSED',
+  'ConnectionRefused',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EACCES',
+  'EAFNOSUPPORT',
+]);
+
+/**
+ * Classifies a fetch failure from a spawn submission.
+ *
+ * Returns true only for connect-phase failures (DNS, refused, unreachable) —
+ * the request was never delivered, so no server can have acted on it and a
+ * local spawn cannot duplicate anything. Everything else (our abort timer
+ * firing after submission, a connection reset mid-flight, a body read cut
+ * short) is ambiguous: the server may have already accepted and spawned the
+ * session. Falling back locally in that window would duplicate the spawn or
+ * resurrect the phantom-success path, so ambiguous outcomes must surface as
+ * explicit errors instead.
+ *
+ * Exported for unit testing.
+ */
+export function isConnectPhaseFailure(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 4 && current && typeof current === 'object'; depth++) {
+    const candidate = current as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown };
+    if (typeof candidate.code === 'string' && CONNECT_PHASE_CODES.has(candidate.code)) {
+      return true;
+    }
+    // Our abort timer: the request may already have been submitted.
+    if (candidate.name === 'AbortError') {
+      return false;
+    }
+    // Last resort for runtimes that surface the OS error only in the message.
+    if (typeof candidate.message === 'string' && /ECONNREFUSED|ENOTFOUND|EAI_AGAIN/.test(candidate.message)) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
+}
+
+/** Shape of the spawn endpoints' (start and resume) JSON responses. */
+interface ServerSpawnResponse {
+  error?: { code?: string; message?: string };
+  session?: {
+    id?: string;
+    providerSessionId?: string;
+    status?: string;
+    mode?: string;
+    provider?: string;
+    model?: string;
+    pid?: number;
+  };
+  assignedTask?: { id?: string; title?: string };
+}
+
+/**
+ * A spawn submission to the orchestrator server.
+ */
+interface ServerSpawnRequest {
+  /** 'start' for a fresh session, 'resume' for --resume. */
+  kind: 'start' | 'resume';
+  /** JSON body for the endpoint. */
+  body: Record<string, unknown>;
+  /**
+   * Abort budget for the HTTP request. The server only answers after the
+   * spawn settles (init wait included), so this must cover the spawn timeout
+   * the server will apply — not a short fixed probe.
+   */
+  requestTimeoutMs: number;
+}
+
+/** Result of a spawn attempt through the server. */
+export interface ServerSpawnOutcome {
+  /** The CommandResult to return from the handler (success OR explicit failure). */
+  result: CommandResult;
+  /** Session ID when the spawn succeeded (used for post-spawn task assignment). */
+  sessionId?: string;
+}
+
+/**
+ * Submits a supervised spawn to the running orchestrator server
+ * (POST /api/agents/:id/start or /resume) instead of spawning locally.
+ *
+ * Why: a local spawn is owned by *this CLI process*. It prints "running",
+ * then the CLI exits and the session dies with it — the server never logs
+ * it, never updates agent metadata, and during a dispatch pause the whole
+ * thing looks like a silently dropped spawn (incident 2026-10-04). A
+ * server-owned spawn is supervised, logged by the session manager, and —
+ * critically — when the server refuses (e.g. the agent's account is
+ * rate-limited) the CLI surfaces the explicit error instead of a phantom
+ * success.
+ *
+ * Outcomes:
+ * - `{ result }` when the server answered (explicit success OR explicit
+ *   failure such as 429 RATE_LIMITED / AGENT_DISABLED / SESSION_EXISTS), or
+ *   when the submission outcome is ambiguous (timeout/connection loss after
+ *   submission — the spawn may be running; reported as an error, never
+ *   silently retried locally), or when a "successful" response carries no
+ *   valid session.
+ * - `undefined` ONLY when no server could be reached at all (connect-phase
+ *   failure: connection refused, DNS, unreachable) so the caller may fall
+ *   back to a local spawn without duplicating anything.
+ *
+ * Exported for unit testing the outcome classification.
+ */
+export async function trySpawnViaServer(
+  id: string,
+  request: ServerSpawnRequest,
+  options: GlobalOptions & { taskId?: string; server?: string }
+): Promise<ServerSpawnOutcome | undefined> {
+  const endpoint = request.kind === 'resume' ? 'resume' : 'start';
+  const url = `${getOrchestratorUrl(options)}/api/agents/${encodeURIComponent(id)}/${endpoint}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), request.requestTimeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request.body),
+      signal: controller.signal,
+    });
+
+    const data = (await response.json().catch(() => ({}))) as ServerSpawnResponse;
+
+    if (!response.ok) {
+      // The server answered — surface its explicit refusal. Never fall back
+      // to a local spawn here: that is exactly the phantom-success path.
+      const err = data.error;
+      const detail = err?.message ?? `Server returned ${response.status}`;
+      const code = err?.code ? ` (code: ${err.code})` : '';
+      return {
+        result: failure(
+          `Failed to ${request.kind} agent ${id}: ${detail}${code}`,
+          ExitCode.GENERAL_ERROR
+        ),
+      };
+    }
+
+    const session = data.session ?? {};
+    if (typeof session.id !== 'string' || session.id.length === 0) {
+      // The server answered "ok" but produced no session — a broken contract
+      // is an explicit error, never a success and never a local fallback
+      // (the server may still have spawned something).
+      return {
+        result: failure(
+          `Failed to ${request.kind} agent ${id}: the orchestrator server returned success but no session (HTTP ${response.status}). Check 'sf agent show ${id}' before retrying.`,
+          ExitCode.GENERAL_ERROR
+        ),
+      };
+    }
+
+    const outputMode = getOutputMode(options);
+
+    if (outputMode === 'json') {
+      return {
+        sessionId: session.id,
+        result: success({
+          sessionId: session.id,
+          providerSessionId: session.providerSessionId,
+          agentId: id,
+          status: session.status,
+          mode: session.mode,
+          provider: session.provider,
+          model: session.model,
+          pid: session.pid,
+          taskId: options.taskId,
+          spawnedVia: 'server',
+        }),
+      };
+    }
+
+    if (outputMode === 'quiet') {
+      return { sessionId: session.id, result: success(session.id) };
+    }
+
+    const lines = [
+      `Spawned agent ${id} (via orchestrator server)`,
+      `  Session ID:  ${session.id}`,
+      `  Provider ID: ${session.providerSessionId ?? '-'}`,
+      `  Status:      ${session.status ?? '-'}`,
+      `  Mode:        ${session.mode ?? '-'}`,
+    ];
+    if (session.provider || session.model) {
+      lines.push(`  Provider:    ${session.provider ?? '-'}`);
+      if (session.model) {
+        lines.push(`  Model:       ${session.model}`);
+      }
+    }
+    lines.push(`  PID:         ${session.pid ?? '-'}`);
+    if (options.taskId) {
+      lines.push(`  Task ID:     ${options.taskId}`);
+    }
+    return { sessionId: session.id, result: success(session, lines.join('\n')) };
+  } catch (err) {
+    if (isConnectPhaseFailure(err)) {
+      // The request was never delivered — no server is running, so a local
+      // spawn is legitimate. Signal the caller to fall back.
+      return undefined;
+    }
+    // Ambiguous: the request may have been submitted and the server may have
+    // accepted the spawn before the connection died or the timer fired.
+    // Report it explicitly; do NOT fall back (that could spawn a duplicate
+    // session alongside the possibly-running server one).
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      result: failure(
+        `Failed to ${request.kind} agent ${id}: the orchestrator server request outcome is unknown (${reason}). ` +
+          `The session may already be running server-side — check 'sf agent show ${id}' or GET /api/sessions?agentId=${encodeURIComponent(id)} ` +
+          `before retrying. No local spawn was attempted to avoid a duplicate session.`,
+        ExitCode.GENERAL_ERROR
+      ),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Streams output from a spawned session's event emitter
  * This is a long-running operation that continues until the session ends
  */
@@ -926,11 +1213,13 @@ interface AgentStartOptions {
   cols?: string;
   rows?: string;
   timeout?: string;
-  env?: string;
+  /** KEY=VALUE assignments; repeatable (array when parsed from argv). */
+  env?: string | string[];
   taskId?: string;
   stream?: boolean;
   provider?: string;
   model?: string;
+  server?: string;
 }
 
 const agentStartOptions: CommandOption[] = [
@@ -978,6 +1267,7 @@ const agentStartOptions: CommandOption[] = [
     short: 'e',
     description: 'Environment variables (KEY=VALUE, can repeat)',
     hasValue: true,
+    array: true,
   },
   {
     name: 'taskId',
@@ -998,6 +1288,12 @@ const agentStartOptions: CommandOption[] = [
     name: 'model',
     description:
       'Model for this session (overrides the agent default; format is provider-specific — opencode uses composite <provider>/<model> IDs)',
+    hasValue: true,
+  },
+  {
+    name: 'server',
+    short: 's',
+    description: `Orchestrator server URL (default: ${DEFAULT_ORCHESTRATOR_URL}, or \$STONEFORGE_API_URL)`,
     hasValue: true,
   },
 ];
@@ -1034,30 +1330,8 @@ async function agentStartHandler(
     const meta = getAgentMeta(agent);
     const agentRole = (meta.agentRole as AgentRole) ?? 'worker';
 
-    // Import the spawner service
-    const { createSpawnerService, getProviderRegistry } = await import('../../runtime/index.js');
-    const { findStoneforgeDir } = await import('@stoneforge/quarry');
-
-    // Parse environment variables
-    const environmentVariables: Record<string, string> = {};
-    if (options.env) {
-      const parts = options.env.split('=');
-      if (parts.length >= 2) {
-        const key = parts[0];
-        const value = parts.slice(1).join('=');
-        environmentVariables[key] = value;
-      }
-    }
-
-    const stoneforgeDir = findStoneforgeDir(process.cwd());
-    const spawner = createSpawnerService({
-      workingDirectory: options.workdir ?? process.cwd(),
-      stoneforgeRoot: stoneforgeDir ?? undefined,
-      timeout: options.timeout ? parseInt(options.timeout, 10) : undefined,
-      environmentVariables: Object.keys(environmentVariables).length > 0 ? environmentVariables : undefined,
-    });
-
-    // Determine spawn mode
+    // Determine spawn mode. Validated before any spawn attempt (server or
+    // local) so an invalid value fails deterministically.
     let spawnMode: 'headless' | 'interactive' | undefined;
     if (options.mode) {
       if (options.mode !== 'headless' && options.mode !== 'interactive') {
@@ -1071,7 +1345,8 @@ async function agentStartHandler(
 
     // Resolve provider/model: CLI flags win over the agent's registered
     // defaults; anything invalid fails loudly instead of being silently
-    // ignored (previously neither flag reached the spawner).
+    // ignored (previously neither flag reached the spawner). Validated
+    // before any spawn attempt (server or local).
     const overrides = resolveAgentStartOverrides(
       { provider: options.provider, model: options.model },
       meta
@@ -1080,7 +1355,22 @@ async function agentStartHandler(
       return failure(overrides.error, ExitCode.VALIDATION);
     }
 
+    const { getProviderRegistry } = await import('../../runtime/index.js');
     const registry = getProviderRegistry();
+
+    // Resolve the effective provider instance up front (flag > registered
+    // metadata > spawner default). Unknown or unavailable providers fail
+    // loudly here — before any spawn attempt (server or local) — instead of
+    // falling back silently. The instance is reused by the local spawn below.
+    let providerOverride: AgentProvider | undefined;
+    if (overrides.providerName) {
+      try {
+        providerOverride = await registry.getOrThrow(overrides.providerName);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return failure(`Failed to start agent ${id}: ${message}`, ExitCode.VALIDATION);
+      }
+    }
 
     // Format-validate the effective model against the effective provider
     // BEFORE the (slower) availability probe, so a malformed value fails
@@ -1101,15 +1391,119 @@ async function agentStartHandler(
       }
     }
 
-    let providerOverride: AgentProvider | undefined;
-    if (overrides.providerName) {
-      try {
-        providerOverride = await registry.getOrThrow(overrides.providerName);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return failure(`Failed to start agent ${id}: ${message}`, ExitCode.VALIDATION);
-      }
+    // Parse the remaining spawn-shaping flags up front so both spawn paths
+    // (supervised server spawn and local fallback) share validated values —
+    // an invalid value must fail before anything is spawned anywhere.
+    const timeoutParse = parsePositiveIntOption('--timeout', options.timeout);
+    if (timeoutParse.error) {
+      return failure(timeoutParse.error, ExitCode.VALIDATION);
     }
+    const timeoutMs = timeoutParse.value;
+
+    // --env is repeatable: parsed from argv it arrives as an array; direct
+    // handler invocation (tests, programmatic use) may pass a single string.
+    const envFlags = Array.isArray(options.env)
+      ? options.env
+      : options.env !== undefined
+        ? [options.env]
+        : [];
+    const environmentVariables: Record<string, string> = {};
+    for (const rawEnv of envFlags) {
+      const envParsed = parseEnvAssignment(rawEnv);
+      if (envParsed.error) {
+        return failure(envParsed.error, ExitCode.VALIDATION);
+      }
+      Object.assign(environmentVariables, envParsed.entry);
+    }
+
+    const colsParse = parsePositiveIntOption('--cols', options.cols);
+    if (colsParse.error) {
+      return failure(colsParse.error, ExitCode.VALIDATION);
+    }
+    const rowsParse = parsePositiveIntOption('--rows', options.rows);
+    if (rowsParse.error) {
+      return failure(rowsParse.error, ExitCode.VALIDATION);
+    }
+
+    // Prefer the orchestrator server for every non-streaming start: the
+    // session is then owned and supervised by the server (logged, metadata-
+    // tracked, visible to the dispatch daemon) and explicit refusals — e.g.
+    // 429 RATE_LIMITED during a dispatch pause — surface as CLI errors. A
+    // non-streaming local spawn is CLI-process-owned: it prints "running",
+    // the CLI exits, and the session dies with it, leaving no server-side
+    // trace — the phantom-success path (incident 2026-10-04). --stream keeps
+    // the local path on purpose: it is a foreground session whose output
+    // this process consumes until it ends, so nothing is silently dropped.
+    if (!options.stream) {
+      const request = options.resume !== undefined
+        ? {
+            kind: 'resume' as const,
+            body: {
+              providerSessionId: options.resume,
+              workingDirectory: options.workdir,
+              resumePrompt: options.prompt,
+              // Start-only options ride along so a reachable server can
+              // refuse them explicitly (400 UNSUPPORTED_FOR_RESUME) instead
+              // of the CLI silently dropping them. Without a server, the
+              // local spawn below still honours them.
+              ...(spawnMode !== undefined && { interactive: spawnMode === 'interactive' }),
+              ...(colsParse.value !== undefined && { cols: colsParse.value }),
+              ...(rowsParse.value !== undefined && { rows: rowsParse.value }),
+              ...(Object.keys(environmentVariables).length > 0 && { environmentVariables }),
+              ...(options.provider !== undefined && { provider: options.provider }),
+              ...(options.model !== undefined && { model: options.model }),
+              ...(timeoutMs !== undefined && { timeout: timeoutMs }),
+            },
+            requestTimeoutMs: DEFAULT_SPAWN_TIMEOUT_MS + SERVER_REQUEST_OVERHEAD_MS,
+          }
+        : {
+            kind: 'start' as const,
+            body: {
+              initialPrompt: options.prompt,
+              taskId: options.taskId,
+              workingDirectory: options.workdir,
+              // undefined (omitted) when --mode was not given: the server
+              // then picks the mode from the agent's role, like the local
+              // spawner does.
+              interactive: spawnMode !== undefined ? spawnMode === 'interactive' : undefined,
+              ...(colsParse.value !== undefined && { cols: colsParse.value }),
+              ...(rowsParse.value !== undefined && { rows: rowsParse.value }),
+              ...(Object.keys(environmentVariables).length > 0 && { environmentVariables }),
+              provider: overrides.providerName,
+              model: overrides.model,
+              ...(timeoutMs !== undefined && { timeout: timeoutMs }),
+            },
+            requestTimeoutMs: (timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS) + SERVER_REQUEST_OVERHEAD_MS,
+          };
+
+      const viaServer = await trySpawnViaServer(id, request, options);
+      if (viaServer) {
+        // The supervised resume endpoint does not assign tasks itself;
+        // mirror the local path so --resume --taskId behaves the same on
+        // both paths.
+        if (request.kind === 'resume' && options.taskId && viaServer.sessionId) {
+          await api.assignTaskToAgent(
+            options.taskId as ElementId,
+            id as EntityId,
+            { sessionId: viaServer.sessionId }
+          );
+        }
+        return viaServer.result; // server answered — real success or explicit failure
+      }
+      // Connect-phase failure (no server reachable) → local spawn below.
+    }
+
+    // Import the spawner service
+    const { createSpawnerService } = await import('../../runtime/index.js');
+    const { findStoneforgeDir } = await import('@stoneforge/quarry');
+
+    const stoneforgeDir = findStoneforgeDir(process.cwd());
+    const spawner = createSpawnerService({
+      workingDirectory: options.workdir ?? process.cwd(),
+      stoneforgeRoot: stoneforgeDir ?? undefined,
+      timeout: timeoutMs,
+      environmentVariables: Object.keys(environmentVariables).length > 0 ? environmentVariables : undefined,
+    });
 
     // Spawn the agent
     const result = await spawner.spawn(id as EntityId, agentRole, {
@@ -1117,8 +1511,8 @@ async function agentStartHandler(
       mode: spawnMode,
       resumeSessionId: options.resume,
       workingDirectory: options.workdir,
-      cols: options.cols ? parseInt(options.cols, 10) : undefined,
-      rows: options.rows ? parseInt(options.rows, 10) : undefined,
+      cols: colsParse.value,
+      rows: rowsParse.value,
       provider: providerOverride,
       model: overrides.model,
     });
@@ -1191,6 +1585,21 @@ export const agentStartCommand: Command = {
   usage: 'sf agent start <id> [options]',
   help: `Start a new agent process.
 
+When an orchestrator server is running (default ${DEFAULT_ORCHESTRATOR_URL}, override with
+--server or \$STONEFORGE_API_URL), the session is started through the server so it is
+supervised, logged and visible to the dispatch daemon — and refusals (e.g. a
+rate-limited account or a dispatch pause) are reported explicitly instead of a
+phantom success. All options except --stream are forwarded: --mode, --cols,
+--rows, --env, --provider, --model and --timeout shape the supervised spawn,
+and --resume routes through the server's resume endpoint (start-only options
+combined with --resume are refused explicitly by the server, not dropped).
+--stream always spawns locally in the foreground — the CLI stays attached and
+streams until the session ends. Without a reachable server the session is
+spawned locally instead; a non-streaming local spawn is owned by this CLI
+process and ends when it exits. If the server request outcome is unknown
+(timeout or connection loss after submission), the command reports an
+explicit error rather than risking a duplicate spawn.
+
 Arguments:
   id    Agent identifier
 
@@ -1202,9 +1611,10 @@ Options:
   --cols <n>               Terminal columns for interactive mode (default: 120)
   --rows <n>               Terminal rows for interactive mode (default: 30)
   --timeout <ms>           Timeout in milliseconds (default: 120000)
-  -e, --env <KEY=VALUE>    Environment variable to set
+  -e, --env <KEY=VALUE>    Environment variables to set (repeatable)
   -t, --taskId <id>        Task ID to assign to this agent
-  --stream                 Stream agent output after starting
+  --stream                 Stream agent output locally (foreground; keeps the
+                           CLI attached, never routed through the server)
   --provider <name>        Agent provider for this session. Overrides the
                            agent's registered provider; without it, the
                            registered provider (or the claude-code default)
@@ -1219,6 +1629,7 @@ Options:
                            are malformed for the effective provider fail with
                            a validation error instead of silently falling
                            back to the provider default.
+  -s, --server <url>       Orchestrator server URL (default: ${DEFAULT_ORCHESTRATOR_URL})
 
 Examples:
   sf agent start el-abc123

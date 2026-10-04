@@ -12,6 +12,7 @@ import { createTimestamp, ElementType } from '@stoneforge/core';
 import type { SessionFilter, SpawnedSessionEvent, AgentRole, WorkerMetadata, StewardMetadata } from '../../index.js';
 import { loadRolePrompt, buildWorkflowPresetSection, getAgentMetadata, generateSessionBranchName, generateSessionWorktreePath, trackListeners } from '../../index.js';
 import { isAgentDisabled } from '../../services/agent-registry.js';
+import { getProviderRegistry } from '../../providers/registry.js';
 import type { WorkflowPresetContext } from '../../prompts/index.js';
 import { getValue } from '@stoneforge/quarry';
 import type { WorkflowPreset, AgentPermissionModel } from '@stoneforge/quarry';
@@ -151,6 +152,37 @@ async function rateLimitRefusal(
   }
   const refusal = await evaluateRateLimitRefusal(services.dispatchDaemon, agent);
   return refusal ? rateLimitResponse(c, refusal) : undefined;
+}
+
+// ============================================================================
+// Spawn option validation (start route)
+// ============================================================================
+
+/**
+ * Validates a provider name for a supervised spawn (body override or the
+ * agent's registered provider). Returns the registry's user-friendly error
+ * ("not registered", "not available" + install instructions) or undefined.
+ */
+async function validateSpawnProvider(providerName: string): Promise<string | undefined> {
+  try {
+    await getProviderRegistry().getOrThrow(providerName);
+    return undefined;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * Validates a model override for a supervised spawn against the effective
+ * provider's optional format check (e.g. OpenCode requires composite
+ * '<provider>/<model>' IDs). Returns the provider's error message or
+ * undefined. Purely syntactic — no catalog lookup.
+ */
+function validateSpawnModel(model: string, effectiveProvider?: string): string | undefined {
+  const registry = getProviderRegistry();
+  const provider = effectiveProvider ? registry.get(effectiveProvider) : undefined;
+  const validator = provider ?? registry.getDefault();
+  return validator.validateModel?.(model);
 }
 
 type NotifyClientsCallback = (
@@ -361,11 +393,50 @@ export function createSessionRoutes(
         interactive?: boolean;
         cols?: number;
         rows?: number;
+        environmentVariables?: Record<string, string>;
+        model?: string;
+        provider?: string;
+        timeout?: number;
       };
+
+      // Validate spawn-shaping options before touching the rate-limit guard
+      // or the session manager, so bad values answer 400 instead of failing
+      // mid-spawn (or being silently dropped by the provider).
+      if (body.timeout !== undefined) {
+        if (typeof body.timeout !== 'number' || !Number.isFinite(body.timeout) || body.timeout <= 0) {
+          return c.json(
+            { error: { code: 'INVALID_TIMEOUT', message: 'timeout must be a positive number of milliseconds' } },
+            400
+          );
+        }
+      }
 
       const agent = await agentRegistry.getAgent(agentId);
       if (!agent) {
         return c.json({ error: { code: 'NOT_FOUND', message: 'Agent not found' } }, 404);
+      }
+
+      // Provider/model validation mirrors the CLI: the effective provider is
+      // the body override, then the agent's registered provider, then the
+      // default. Unknown providers and malformed model IDs answer 400 with
+      // the same messages the local spawn path produces.
+      {
+        const agentMetaForValidation = getAgentMetadata(agent) as
+          | { provider?: string; model?: string }
+          | undefined;
+        const effectiveProvider = body.provider ?? agentMetaForValidation?.provider;
+        if (body.provider !== undefined || effectiveProvider !== undefined) {
+          const providerError = await validateSpawnProvider(effectiveProvider!);
+          if (providerError) {
+            return c.json({ error: { code: 'INVALID_PROVIDER', message: providerError } }, 400);
+          }
+        }
+        if (body.model !== undefined) {
+          const modelError = validateSpawnModel(body.model, effectiveProvider);
+          if (modelError) {
+            return c.json({ error: { code: 'INVALID_MODEL', message: modelError } }, 400);
+          }
+        }
       }
 
       if (isAgentDisabled(agent)) {
@@ -544,6 +615,10 @@ Please begin working on this task. Use \`sf task get ${taskResult.id}\` to see f
         interactive: body.interactive,
         cols: body.cols,
         rows: body.rows,
+        environmentVariables: body.environmentVariables,
+        provider: body.provider,
+        model: body.model,
+        timeout: body.timeout,
       });
 
       // Attach event saver immediately to capture all events, including the first assistant response
@@ -705,11 +780,50 @@ Please begin working on this task. Use \`sf task get ${taskResult.id}\` to see f
         worktree?: string;
         resumePrompt?: string;
         checkReadyQueue?: boolean;
+        // Fields the start route accepts but resume deliberately does not
+        // (session continuity: a resumed session keeps its original spawn
+        // shape). Present values are rejected explicitly below instead of
+        // being silently dropped.
+        interactive?: boolean;
+        cols?: number;
+        rows?: number;
+        environmentVariables?: Record<string, string>;
+        provider?: string;
+        model?: string;
+        timeout?: number;
       };
 
       const agent = await agentRegistry.getAgent(agentId);
       if (!agent) {
         return c.json({ error: { code: 'NOT_FOUND', message: 'Agent not found' } }, 404);
+      }
+
+      // Explicit refusal for start-only options: silently ignoring them here
+      // would let a client believe its override was applied while the resumed
+      // session runs with its original provider/model/environment.
+      {
+        const unsupported: string[] = [];
+        if (body.interactive !== undefined) unsupported.push('interactive');
+        if (body.cols !== undefined) unsupported.push('cols');
+        if (body.rows !== undefined) unsupported.push('rows');
+        if (body.environmentVariables !== undefined) unsupported.push('environmentVariables');
+        if (body.provider !== undefined) unsupported.push('provider');
+        if (body.model !== undefined) unsupported.push('model');
+        if (body.timeout !== undefined) unsupported.push('timeout');
+        if (unsupported.length > 0) {
+          return c.json(
+            {
+              error: {
+                code: 'UNSUPPORTED_FOR_RESUME',
+                message:
+                  `Option(s) ${unsupported.join(', ')} are not supported when resuming a session — ` +
+                  'a resumed session keeps its original provider, model, environment and terminal shape. ' +
+                  'Drop them, or start a fresh session instead.',
+              },
+            },
+            400
+          );
+        }
       }
 
       if (isAgentDisabled(agent)) {

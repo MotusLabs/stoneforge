@@ -103,6 +103,18 @@ export interface StartSessionOptions {
   readonly rows?: number;
   /** LLM model to use for this session (overrides agent metadata) */
   readonly model?: string;
+  /**
+   * Provider name to use for this session (e.g. 'claude-code', 'opencode').
+   * Overrides the agent's registered provider for this spawn only — the same
+   * precedence `sf agent start --provider` applies on the CLI.
+   */
+  readonly provider?: string;
+  /**
+   * Timeout in milliseconds for process operations (init wait). Overrides the
+   * spawner default for this spawn only — the same semantics `sf agent start
+   * --timeout` applies on the CLI.
+   */
+  readonly timeout?: number;
   /** Executable path override for rate limit fallback (takes highest priority in path resolution) */
   readonly executablePathOverride?: string;
 }
@@ -569,9 +581,10 @@ export class SessionManagerImpl implements SessionManager {
       (meta.agentRole === 'worker' && (meta as { workerMode?: WorkerMode }).workerMode === 'persistent');
     const useInteractive = options?.interactive ?? isInteractiveByRole;
 
-    // Resolve provider from agent metadata, with executable path resolution.
-    // executablePathOverride (from rate limit fallback) takes highest priority.
-    const providerName = (meta as { provider?: string }).provider;
+    // Resolve provider from options override or agent metadata, with
+    // executable path resolution. executablePathOverride (from rate limit
+    // fallback) takes highest priority.
+    const providerName = options?.provider ?? (meta as { provider?: string }).provider;
     const agentExecutablePath = options?.executablePathOverride ?? (meta as { executablePath?: string }).executablePath;
     const providerOverride = await this.resolveProvider(providerName, agentExecutablePath);
 
@@ -595,6 +608,7 @@ export class SessionManagerImpl implements SessionManager {
       provider: providerOverride,
       model: modelOverride,
       claudePath: resolvedExecutablePath,
+      timeout: options?.timeout,
     };
 
     console.log('[session-manager] Starting session for agent', agentId, 'mode:', spawnOptions.mode, 'provider:', providerName ?? 'claude-code', 'model:', modelOverride ?? 'default', 'executablePath:', resolvedExecutablePath ?? 'default', 'prompt length:', options?.initialPrompt?.length ?? 0);

@@ -719,6 +719,22 @@ export class DispatchDaemonImpl implements DispatchDaemon {
    */
   private readonly providerReadinessCache = new Map<string, { checkedAt: number; issue: string | undefined }>();
 
+  /**
+   * When this daemon instance was created. Session-history entries whose
+   * `startedAt` predates this moment belong to a *previous* server
+   * incarnation: this daemon never observed those sessions, and their
+   * termination (typically the PID liveness check that runs right after
+   * server startup) reflects the workspace restart — not provider
+   * behaviour. Such entries are therefore excluded from rate-limit
+   * evidence (`getRateLimitPatternAccounts`).
+   *
+   * Construction time (rather than `start()`) is the anchor: the daemon is
+   * constructed during server boot, and in dev-mode hot reloads the whole
+   * service tree — spawner included — is rebuilt, which tears down every
+   * session just like a full process restart does.
+   */
+  private readonly incarnationStartedAtMs: number;
+
   /** TTL for {@link providerReadinessCache} entries (30 seconds). */
   private static readonly PROVIDER_READINESS_TTL_MS = 30 * 1000;
 
@@ -750,6 +766,7 @@ export class DispatchDaemonImpl implements DispatchDaemon {
     this.rateLimitTracker = createRateLimitTracker(settingsService);
     this.emitter = new EventEmitter();
     this.config = this.normalizeConfig(config);
+    this.incarnationStartedAtMs = Date.now();
   }
 
   // ----------------------------------------
@@ -2910,30 +2927,29 @@ export class DispatchDaemonImpl implements DispatchDaemon {
   /**
    * Attaches a rapid-exit detector to a recovered session's event emitter.
    *
-   * When a recovered worker session exits within RAPID_EXIT_THRESHOLD_MS, two
-   * scenarios are detected as rate limits:
+   * When a recovered worker session exits within RAPID_EXIT_THRESHOLD_MS:
    *
-   * 1. **Silent rate limit** (no assistant events): The session was rejected
-   *    before any stream output (e.g., HTTP 429). A conservative 1-hour
-   *    fallback is applied.
+   * 1. **Provider rate limit signature**: The session emitted an assistant
+   *    event whose content matches a known provider rate limit message
+   *    (e.g., "You've hit your limit · resets 11pm" or an HTTP 429 /
+   *    usage-cap error from the executable). The reset time is parsed from
+   *    the message when possible, falling back to a conservative default,
+   *    and the limit is recorded in the rate limit tracker — attributed to
+   *    `sessionExecutable`, the account key the session actually ran on.
+   *    `handleRateLimitDetected` widens it to the fallback chain only when
+   *    the key is itself a chain entry.
    *
-   * 2. **Assistant rate limit message**: The session emitted an assistant event
-   *    whose content matches a known rate limit pattern (e.g., "You've hit your
-   *    limit · resets 11pm"). The reset time is parsed from the message when
-   *    possible, falling back to a conservative default.
+   * 2. **Silent rapid exit** (no assistant events): The cause cannot be
+   *    determined — it may be a provider rejection before any stream
+   *    output, a crashed executable, or a killed process. Rapid exits are
+   *    NOT provider error signatures, so no rate limit is recorded
+   *    (incident 2026-10-04: restart-loop kills were recorded as provider
+   *    limits and paused dispatch while the provider was healthy). The
+   *    exit is logged for observability only.
    *
-   * In both cases:
-   * - The resumeCount is rolled back (decremented)
-   * - A warning is logged
-   * - A rate limit reset time is applied to the rate limit tracker, attributed
-   *   to `sessionExecutable` — the account key the session actually ran on
-   *   (the same value recorded on its session-history entry). The limit is
-   *   never charged to a fixed default executable or to unrelated accounts;
-   *   `handleRateLimitDetected` widens it to the fallback chain only when the
-   *   key is itself a chain entry.
-   *
-   * This prevents the resume budget from being burned by sessions that never
-   * actually ran or that were immediately rate-limited.
+   * In both cases the resumeCount is rolled back (decremented): sessions
+   * that terminated this quickly never did work, and the resume budget
+   * must not be burned by them.
    *
    * @param events - The session's event emitter
    * @param task - The task the session was recovered for
@@ -2968,20 +2984,20 @@ export class DispatchDaemonImpl implements DispatchDaemon {
         return;
       }
 
-      // Determine if this rapid exit is a rate limit
-      const isSilentRateLimit = !hasAssistantEvent;
+      // Determine if this rapid exit carries a provider rate limit signature
+      const isSilentExit = !hasAssistantEvent;
       const isAssistantRateLimit = hasAssistantEvent
         && lastAssistantContent != null
         && isRateLimitMessage(lastAssistantContent);
 
-      if (!isSilentRateLimit && !isAssistantRateLimit) return;
+      if (!isSilentExit && !isAssistantRateLimit) return;
 
-      const reason = isSilentRateLimit
-        ? 'silent rate limit (no output)'
-        : 'rate limit assistant message';
+      const reason = isSilentExit
+        ? 'undetermined cause (no output, no provider error signature)'
+        : 'provider rate limit message';
 
       logger.warn(
-        `Session exited rapidly — suspected ${reason} (task=${task.id}, worker=${worker.name}, duration=${sessionDuration}ms)`
+        `Session exited rapidly — ${reason} (task=${task.id}, worker=${worker.name}, duration=${sessionDuration}ms)`
       );
 
       // Roll back the resumeCount that was incremented before recovery
@@ -3006,30 +3022,32 @@ export class DispatchDaemonImpl implements DispatchDaemon {
         logger.warn(`Failed to roll back resumeCount for task ${task.id}:`, error);
       }
 
-      // Determine the reset time:
-      // - For assistant rate limit messages, try to parse the reset time from the message
-      // - For silent rate limits (or if parsing fails), use the conservative 1-hour fallback
-      let resetTime: Date;
+      // Determine the reset time. Only a provider error signature (an
+      // assistant/provider message matching the rate limit patterns) justifies
+      // recording a limit; silent exits record nothing — they are not
+      // evidence of a provider limit.
       if (isAssistantRateLimit && lastAssistantContent) {
-        resetTime = parseRateLimitResetTime(lastAssistantContent)
+        const resetTime = parseRateLimitResetTime(lastAssistantContent)
           ?? getFallbackResetTime(lastAssistantContent);
         logger.info(
-          `Parsed rate limit reset time from assistant message for task ${task.id}: ${resetTime.toISOString()}`
+          `Parsed rate limit reset time from provider message for task ${task.id}: ${resetTime.toISOString()}`
+        );
+
+        this.handleRateLimitDetected(sessionExecutable, resetTime);
+
+        logger.info(
+          `Recorded provider rate limit for task ${task.id} (account ${sessionExecutable}), resets at ${resetTime.toISOString()}`
         );
       } else {
-        resetTime = new Date(Date.now() + RAPID_EXIT_FALLBACK_RESET_MS);
+        // Silent rapid exit: no provider error signature. Log for
+        // observability; the rate limit tracker is deliberately untouched.
+        this.operationLog?.write(
+          'warn',
+          'session',
+          `Rapid session exit with undetermined cause for task ${task.id} (worker ${worker.name}, ${sessionDuration}ms, no provider output). No rate limit recorded — a provider error signature is required.`,
+          { taskId: task.id, agentId: worker.id, sessionDurationMs: sessionDuration, accountKey: sessionExecutable }
+        );
       }
-
-      // Attribute the limit to the account this session actually ran on
-      // (recorded on its session-history entry at spawn). The hard-coded
-      // default and unconditional chain marking are gone: a wrapper account
-      // is limited on its own, and chain widening happens only inside
-      // handleRateLimitDetected when the key is itself a chain entry.
-      this.handleRateLimitDetected(sessionExecutable, resetTime);
-
-      logger.info(
-        `Applied rate limit (${reason}) for task ${task.id}, resets at ${resetTime.toISOString()}`
-      );
     };
 
     events.on('event', onEvent);
@@ -3037,26 +3055,34 @@ export class DispatchDaemonImpl implements DispatchDaemon {
   }
 
   /**
-   * Checks a task's session history for a rate limit pattern and returns the
+   * Checks a task's session history for a rapid-exit pattern and returns the
    * accounts that produced it.
    *
    * The last N sessions (RATE_LIMIT_SESSION_PATTERN_COUNT) all appear to be
    * rapid exits — sessions that started in quick succession (within
    * RATE_LIMIT_SESSION_GAP_MS of each other) and none completed properly (no
-   * endedAt set). This pattern indicates the task is stuck due to rate
-   * limiting rather than a genuine bug requiring recovery steward
-   * intervention.
+   * endedAt set). This pattern indicates the task is stuck in a
+   * spawn/exit loop rather than making progress.
+   *
+   * Sessions that predate the current daemon incarnation are excluded: they
+   * were terminated by the workspace/server restart (the PID liveness check
+   * that runs right after server startup kills everything the previous
+   * incarnation owned), not by the provider. During a container restart
+   * loop, counting them made the pattern fire on every bounce and paused
+   * dispatch indefinitely (incident 2026-10-04, task el-3hxa0i).
    *
    * The returned keys are the `executable` recorded on the pattern's
-   * session-history entries — the accounts those sessions actually ran on —
-   * so the recorded limit is charged to the producing account only. Entries
-   * from before the per-session executable existed fall back to the
-   * assignee's current account key (`resolveAccountKey`).
+   * session-history entries — the accounts those sessions actually ran on.
+   * Note that the pattern alone is *not* rate-limit evidence anymore: the
+   * caller skips the recovery steward but never records a provider limit
+   * from it. Limits are only recorded from actual provider error
+   * signatures (see `attachRapidExitDetector` and the `rate_limited`
+   * forwarding in the server's session-started callback).
    *
    * @param taskMeta - The task's orchestrator metadata
    * @param assignee - The worker the task is assigned to (fallback attribution)
    * @returns The distinct account keys behind the pattern, or undefined when
-   *          the history does not show a rate limit pattern
+   *          the history does not show a rapid-exit pattern
    */
   private getRateLimitPatternAccounts(
     taskMeta: import('../types/task-meta.js').OrchestratorTaskMeta | undefined,
@@ -3069,6 +3095,17 @@ export class DispatchDaemonImpl implements DispatchDaemon {
 
     // Get the last N entries
     const recentSessions = sessionHistory.slice(-RATE_LIMIT_SESSION_PATTERN_COUNT);
+
+    // Sessions started before this daemon existed belong to a previous
+    // server incarnation — this daemon never observed them, and their death
+    // reflects the workspace restart, not provider behaviour. They are not
+    // evidence of anything and void the pattern for the whole window.
+    const predatesIncarnation = recentSessions.some(
+      (entry) => new Date(entry.startedAt).getTime() < this.incarnationStartedAtMs
+    );
+    if (predatesIncarnation) {
+      return undefined;
+    }
 
     // All recent sessions must lack a proper endedAt (i.e., the session exited
     // without the agent calling task complete or handoff)
@@ -3995,30 +4032,32 @@ export class DispatchDaemonImpl implements DispatchDaemon {
   ): Promise<boolean> {
     const workerId = asEntityId(worker.id);
 
-    // 0. Check session history for rate limit pattern.
+    // 0. Check session history for a rapid-exit pattern.
     // If the last N sessions were all very short-lived (started in rapid succession
-    // without proper completion), the task is likely stuck due to rate limiting.
-    // Don't spawn a recovery steward — leave the task for retry when limits expire.
+    // without proper completion), the task is stuck in a spawn/exit loop — spawning
+    // a recovery steward into the same loop wastes a steward, so skip it.
+    //
+    // This is NOT rate-limit evidence. Rapid exits alone never prove a provider
+    // limit (incident 2026-10-04: workspace restart loops produced exactly this
+    // pattern while the provider was healthy, and recording a +1h limit per
+    // bounce made the dispatch pause effectively permanent). Provider limits are
+    // recorded only from actual provider error signatures — see the
+    // `rate_limited` event forwarding and `attachRapidExitDetector`.
     const patternAccounts = this.getRateLimitPatternAccounts(taskMeta, worker);
     if (patternAccounts) {
-      logger.info(
-        `Task ${task.id} shows rate limit pattern in session history ` +
-        `(last ${RATE_LIMIT_SESSION_PATTERN_COUNT} sessions were rapid exits on ` +
-        `${patternAccounts.join(', ')}). ` +
-        `Skipping recovery steward spawn and recording rate limit.`
-      );
-
-      // Record the rate limit so the daemon pauses dispatch and the dashboard banner shows.
-      // Without this, the orphan recovery loop would repeatedly detect the pattern every
-      // poll cycle without ever pausing — causing infinite log spam.
-      // Attribution: only the accounts the rapid-exit sessions actually ran on
-      // (their session-history `executable`), never a fixed default executable
-      // or the whole fallback chain.
-      const resetTime = new Date(Date.now() + RAPID_EXIT_FALLBACK_RESET_MS);
-      for (const account of patternAccounts) {
-        this.handleRateLimitDetected(account, resetTime);
+      const emitted = this.emitWarningOnce(`rapid-exit-pattern:${task.id}`, {
+        type: 'warning' as const,
+        title: 'Task stuck in rapid-exit loop',
+        message: `Task ${task.id} shows a rapid-exit pattern in session history (last ${RATE_LIMIT_SESSION_PATTERN_COUNT} sessions on ${patternAccounts.join(', ')} started within ${Math.round(RATE_LIMIT_SESSION_GAP_MS / 1000)}s of each other without completing). Recovery steward spawn skipped; no provider rate limit recorded without a provider error signature.`,
+      });
+      if (emitted) {
+        this.operationLog?.write(
+          'warn',
+          'recovery',
+          `Task ${task.id} stuck in rapid-exit loop on ${patternAccounts.join(', ')} — skipping recovery steward spawn (no provider error signature, no rate limit recorded)`,
+          { taskId: task.id, agentId: worker.id, accounts: patternAccounts }
+        );
       }
-
       return false;
     }
 

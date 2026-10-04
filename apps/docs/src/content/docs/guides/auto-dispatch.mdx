@@ -230,10 +230,20 @@ If the pool is at capacity, the daemon skips that task and logs the reason. The 
 The daemon automatically detects and handles provider rate limits:
 
 1. **Detection** — when a provider session reports a rate limit, the daemon parses the reset time
-2. **Tracking** — rate limit state is tracked in memory per provider executable
+2. **Tracking** — rate limit state is tracked per provider executable (and persisted, so it survives restarts)
 3. **Fallback** — if a fallback chain is configured, the daemon tries the next provider
 4. **Auto-pause** — if all providers are limited, the daemon pauses dispatch
 5. **Auto-resume** — dispatch resumes automatically at the soonest reset time
+
+### Recording requires a provider error signature
+
+A rate limit is only recorded when the provider actually said so — a rate-limit message from the executable (e.g. *"You've hit your limit · resets 11pm"*, an HTTP 429 / `rate_limit_exceeded` API error, or a usage-cap message). Heuristics that merely *look like* rate limiting are deliberately **not** recorded:
+
+- **Rapid exits** — a session that dies within seconds without output is logged (and doesn't burn the resume budget), but nothing is marked limited: the cause is undetermined.
+- **Rapid-exit patterns** — a task whose last sessions all exited quickly still skips the recovery steward (no point spawning into the same loop), but no limit is recorded.
+- **Restart-killed sessions** — session-history entries that predate the current server incarnation were killed by the workspace/server restart (the PID check after startup), not by the provider. They are excluded from pattern detection entirely.
+
+This matters during workspace restart loops: before these rules, every pod bounce looked like three rapid exits, recorded a +1h provider limit, and rolled the dispatch pause forward on each bounce — even while the provider was healthy. If you suspect a stale limit, probe the provider directly and clear state with `sf daemon wake`.
 
 Manual control is also available:
 
@@ -241,6 +251,8 @@ Manual control is also available:
 sf daemon sleep --duration 3600   # Pause dispatch for 1 hour
 sf daemon wake                    # Resume immediately
 ```
+
+Manual spawns get explicit answers, never phantom successes: the start/resume HTTP routes (and therefore `sf agent start`'s server path) return `429 RATE_LIMITED` with a `Retry-After` when dispatch is paused — including by a manual sleep; `sf daemon wake` clears it — or when the target agent's own account is limited. When the account is free, the spawn executes normally. Every `sf agent start` option except `--stream` goes through this path (including `--mode`, `--resume`, `--provider`, `--model`, `--env` and `--timeout`); the CLI only falls back to a local spawn when no server was reachable at all, and reports an explicit error when a request's outcome is unknown instead of risking a duplicate spawn.
 
 ## Message triage
 

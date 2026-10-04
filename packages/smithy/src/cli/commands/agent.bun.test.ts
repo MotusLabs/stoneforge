@@ -33,6 +33,7 @@ import {
   agentEnableCommand,
   agentSetTierCommand,
   resolveAgentStartOverrides,
+  isConnectPhaseFailure,
 } from './agent.js';
 
 describe('Agent Command Structure', () => {
@@ -214,7 +215,7 @@ describe('Agent Command Structure', () => {
 
     it('should have all start options', () => {
       expect(agentStartCommand.options).toBeDefined();
-      expect(agentStartCommand.options!.length).toBe(12);
+      expect(agentStartCommand.options!.length).toBe(13);
       expect(agentStartCommand.options![0].name).toBe('prompt');
       expect(agentStartCommand.options![1].name).toBe('mode');
       expect(agentStartCommand.options![2].name).toBe('resume');
@@ -227,6 +228,7 @@ describe('Agent Command Structure', () => {
       expect(agentStartCommand.options![9].name).toBe('stream');
       expect(agentStartCommand.options![10].name).toBe('provider');
       expect(agentStartCommand.options![11].name).toBe('model');
+      expect(agentStartCommand.options![12].name).toBe('server');
     });
 
     it('should have --model option with correct properties', () => {
@@ -772,6 +774,556 @@ describe('agent tier behavioural', () => {
 });
 
 // ============================================================================
+// agent start — orchestrator server preference (task el-3hxa0i)
+//
+// 'sf agent start' must not report a phantom success when a dispatch pause is
+// active. When an orchestrator server is reachable, the spawn goes through it
+// (server-owned session, explicit refusals); its answers — success OR error —
+// are surfaced verbatim. Only a server that was never reached (connect-phase
+// failure: refused, DNS, unreachable) falls back to a local spawn. These
+// tests stub globalThis.fetch so no real process is spawned.
+// ============================================================================
+
+/**
+ * Stubs globalThis.fetch to fail in the connect phase (Bun's shape for a
+ * refused connection), i.e. "no orchestrator server is running". Returns a
+ * restore function. Used to exercise the local-spawn fallback without a
+ * server — and to keep tests deterministic on machines where a real
+ * orchestrator IS listening on the default port.
+ */
+function stubServerUnreachable(): () => void {
+  const originalFetch = globalThis.fetch;
+  const err = new TypeError('Unable to connect. Is the computer able to access the url?') as
+    TypeError & { code?: string };
+  err.code = 'ConnectionRefused';
+  globalThis.fetch = (() => Promise.reject(err)) as unknown as typeof fetch;
+  return () => {
+    globalThis.fetch = originalFetch;
+  };
+}
+
+/**
+ * Captures fetch calls and answers them with a canned Response. Returns the
+ * capture list plus a restore function.
+ */
+function stubServerResponse(
+  respond: (url: string, init: RequestInit | undefined) => Response
+): { calls: { url: string; method: string; body: unknown }[]; restore: () => void } {
+  const originalFetch = globalThis.fetch;
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    calls.push({
+      url,
+      method: init?.method ?? 'GET',
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+    });
+    return respond(url, init);
+  }) as unknown as typeof fetch;
+  return { calls, restore: () => { globalThis.fetch = originalFetch; } };
+}
+
+/** A 429 RATE_LIMITED refusal shaped like the live route's response. */
+function rateLimitedResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: 'RATE_LIMITED',
+        message:
+          "Account 'claude-glm' is currently rate-limited until 2026-10-04T14:00:00.000Z. The session was NOT started. If the limit is stale, clear it with 'sf daemon wake'.",
+        accountKey: 'claude-glm',
+        resetsAt: '2026-10-04T14:00:00.000Z',
+      },
+    }),
+    { status: 429, headers: { 'Content-Type': 'application/json' } }
+  );
+}
+
+describe('agent start via orchestrator server', () => {
+  const CREATOR = 'el-0000' as EntityId;
+
+  /**
+   * Creates a tmp workspace with a real .stoneforge DB and one enabled
+   * ephemeral worker, chdirs into it, and returns the cleanup handles.
+   */
+  async function setupWorkspace(): Promise<{
+    agentId: string;
+    dbPath: string;
+    cleanup: () => void;
+  }> {
+    const tmpRoot = mkdtempSync(join(tmpdir(), 'sf-agent-start-server-'));
+    mkdirSync(join(tmpRoot, '.stoneforge'), { recursive: true });
+    const dbPath = join(tmpRoot, '.stoneforge', 'stoneforge.db');
+    const backend = createStorage({ path: dbPath, create: true });
+    initializeSchema(backend);
+    const api = createOrchestratorAPI(backend);
+    const registered = await api.registerWorker({
+      name: 'server-start-worker',
+      workerMode: 'ephemeral',
+      createdBy: CREATOR,
+    });
+
+    const cwdBefore = process.cwd();
+    process.chdir(tmpRoot);
+    return {
+      agentId: registered.id as unknown as string,
+      dbPath,
+      cleanup: () => {
+        process.chdir(cwdBefore);
+        rmSync(tmpRoot, { recursive: true, force: true });
+      },
+    };
+  }
+
+  test('surfaces the server 429 RATE_LIMITED refusal instead of a phantom success', async () => {
+    const ws = await setupWorkspace();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: 'RATE_LIMITED',
+            message:
+              "Account 'claude-glm' is currently rate-limited until 2026-10-04T14:00:00.000Z. The session was NOT started. If the limit is stale, clear it with 'sf daemon wake'.",
+            accountKey: 'claude-glm',
+            resetsAt: '2026-10-04T14:00:00.000Z',
+          },
+        }),
+        { status: 429, headers: { 'Content-Type': 'application/json' } }
+      )) as typeof fetch;
+
+    try {
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+      } as never);
+
+      expect(result.exitCode).not.toBe(0);
+      const errMsg = String(result.error ?? '');
+      expect(errMsg).toContain('RATE_LIMITED');
+      expect(errMsg).toContain('rate-limited');
+      expect(errMsg).toContain('NOT started');
+    } finally {
+      globalThis.fetch = originalFetch;
+      ws.cleanup();
+    }
+  });
+
+  test('reports the server-owned session on success', async () => {
+    const ws = await setupWorkspace();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          session: {
+            id: 'session-server-1',
+            providerSessionId: 'provider-1',
+            status: 'running',
+            mode: 'headless',
+            pid: 1234,
+          },
+        }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } }
+      )) as typeof fetch;
+
+    try {
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+      } as never);
+
+      expect(result.exitCode).toBe(0);
+      const out = String(result.message ?? '');
+      expect(out).toContain('via orchestrator server');
+      expect(out).toContain('session-server-1');
+      expect(out).toContain('running');
+    } finally {
+      globalThis.fetch = originalFetch;
+      ws.cleanup();
+    }
+  });
+
+  test('surfaces other explicit server errors (e.g. SESSION_EXISTS) without spawning locally', async () => {
+    const ws = await setupWorkspace();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          error: { code: 'SESSION_EXISTS', message: 'Agent already has an active session' },
+        }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } }
+      )) as typeof fetch;
+
+    try {
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+      } as never);
+
+      expect(result.exitCode).not.toBe(0);
+      expect(String(result.error ?? '')).toContain('already has an active session');
+    } finally {
+      globalThis.fetch = originalFetch;
+      ws.cleanup();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Non-streaming options must route through the supervised server spawn.
+  // Regression for the review finding: --mode/--resume/--provider/--model/
+  // --env/--timeout/--cols/--rows used to bypass the server and keep the
+  // CLI-owned spawn that dies when the CLI exits — never checking the live
+  // dispatch pause.
+  // -------------------------------------------------------------------------
+
+  test('paused server + --mode headless surfaces the 429 instead of a phantom success', async () => {
+    const ws = await setupWorkspace();
+    const { calls, restore } = stubServerResponse(() => rateLimitedResponse());
+    try {
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+        mode: 'headless',
+      } as never);
+
+      // The exact incident shape: an explicit refusal, never "running".
+      expect(result.exitCode).not.toBe(0);
+      const errMsg = String(result.error ?? '');
+      expect(errMsg).toContain('RATE_LIMITED');
+      expect(errMsg).toContain('NOT started');
+      // The request actually went to the server with the mode mapped to the
+      // route's body shape (headless => interactive: false).
+      expect(calls.length).toBe(1);
+      expect(calls[0]!.url).toContain(`/api/agents/${ws.agentId}/start`);
+      expect(calls[0]!.body).toMatchObject({ interactive: false });
+    } finally {
+      restore();
+      ws.cleanup();
+    }
+  });
+
+  test('forwards spawn-shaping options (--mode interactive, --cols, --rows, --env, --timeout) in the server request', async () => {
+    const ws = await setupWorkspace();
+    const { calls, restore } = stubServerResponse(() =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          session: { id: 'session-shaped-1', status: 'running', mode: 'interactive' },
+        }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    try {
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+        mode: 'interactive',
+        cols: '160',
+        rows: '40',
+        env: 'MY_VAR=some=value',
+        timeout: '300000',
+      } as never);
+
+      expect(result.exitCode).toBe(0);
+      expect(calls.length).toBe(1);
+      expect(calls[0]!.body).toMatchObject({
+        interactive: true,
+        cols: 160,
+        rows: 40,
+        environmentVariables: { MY_VAR: 'some=value' },
+        timeout: 300000,
+      });
+    } finally {
+      restore();
+      ws.cleanup();
+    }
+  });
+
+  test('repeated --env flags accumulate into environmentVariables', async () => {
+    const ws = await setupWorkspace();
+    const { calls, restore } = stubServerResponse(() =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          session: { id: 'session-env-1', status: 'running', mode: 'headless' },
+        }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    try {
+      // Array form is what the arg parser produces for repeated --env flags.
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+        env: ['FIRST=1', 'SECOND=two=values'],
+      } as never);
+
+      expect(result.exitCode).toBe(0);
+      expect(calls[0]!.body).toMatchObject({
+        environmentVariables: { FIRST: '1', SECOND: 'two=values' },
+      });
+    } finally {
+      restore();
+      ws.cleanup();
+    }
+  });
+
+  test('forwards --provider/--model (flag form) in the server request', async () => {
+    const ws = await setupWorkspace();
+    const { calls, restore } = stubServerResponse(() =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          session: { id: 'session-pm-1', status: 'running', mode: 'headless' },
+        }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    try {
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+        provider: 'opencode',
+        model: 'anthropic/claude-sonnet-4-5-20250929',
+      } as never);
+
+      expect(result.exitCode).toBe(0);
+      expect(calls[0]!.body).toMatchObject({
+        provider: 'opencode',
+        model: 'anthropic/claude-sonnet-4-5-20250929',
+      });
+    } finally {
+      restore();
+      ws.cleanup();
+    }
+  });
+
+  test('--resume routes through the server resume endpoint (paused server refuses it too)', async () => {
+    const ws = await setupWorkspace();
+    const { calls, restore } = stubServerResponse(() => rateLimitedResponse());
+    try {
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+        resume: 'prev-provider-session',
+        prompt: 'continue where you left off',
+      } as never);
+
+      expect(result.exitCode).not.toBe(0);
+      expect(String(result.error ?? '')).toContain('RATE_LIMITED');
+      expect(calls.length).toBe(1);
+      expect(calls[0]!.url).toContain(`/api/agents/${ws.agentId}/resume`);
+      expect(calls[0]!.body).toMatchObject({
+        providerSessionId: 'prev-provider-session',
+        resumePrompt: 'continue where you left off',
+      });
+    } finally {
+      restore();
+      ws.cleanup();
+    }
+  });
+
+  test('--resume success reports the server-owned session', async () => {
+    const ws = await setupWorkspace();
+    const { calls, restore } = stubServerResponse(() =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          session: { id: 'session-resumed-1', providerSessionId: 'prev-provider-session', status: 'running' },
+        }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    try {
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+        resume: 'prev-provider-session',
+      } as never);
+
+      expect(result.exitCode).toBe(0);
+      expect(String(result.message ?? '')).toContain('session-resumed-1');
+      expect(calls[0]!.url).toContain('/resume');
+    } finally {
+      restore();
+      ws.cleanup();
+    }
+  });
+
+  test('--resume combined with start-only options surfaces the server refusal instead of dropping them', async () => {
+    const ws = await setupWorkspace();
+    const { calls, restore } = stubServerResponse(() =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: 'UNSUPPORTED_FOR_RESUME',
+            message:
+              "Option(s) model are not supported when resuming a session — a resumed session keeps its original provider, model, environment and terminal shape. Drop them, or start a fresh session instead.",
+          },
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    try {
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+        resume: 'prev-provider-session',
+        model: 'anthropic/claude-sonnet-4-5-20250929',
+      } as never);
+
+      expect(result.exitCode).not.toBe(0);
+      const errMsg = String(result.error ?? '');
+      expect(errMsg).toContain('UNSUPPORTED_FOR_RESUME');
+      expect(errMsg).toContain('not supported when resuming');
+      // The option rode along so the server (not the CLI) could refuse it.
+      expect(calls[0]!.body).toMatchObject({ model: 'anthropic/claude-sonnet-4-5-20250929' });
+    } finally {
+      restore();
+      ws.cleanup();
+    }
+  });
+
+  test('a "successful" server response without a session is an explicit error, never success', async () => {
+    const ws = await setupWorkspace();
+    const { restore } = stubServerResponse(() =>
+      new Response(JSON.stringify({ success: true }), {
+        status: 201,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    try {
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+      } as never);
+
+      expect(result.exitCode).not.toBe(0);
+      expect(String(result.error ?? '')).toContain('no session');
+    } finally {
+      restore();
+      ws.cleanup();
+    }
+  });
+
+  test('an ambiguous outcome (abort after submission) is an explicit error and never falls back locally', async () => {
+    const ws = await setupWorkspace();
+    const originalFetch = globalThis.fetch;
+    // The CLI's abort timer firing after the request was submitted surfaces
+    // as an AbortError DOMException — ambiguous: the server may have spawned.
+    globalThis.fetch = (() =>
+      Promise.reject(new DOMException('The operation was aborted', 'AbortError'))) as typeof fetch;
+    try {
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+        mode: 'headless',
+      } as never);
+
+      expect(result.exitCode).not.toBe(0);
+      const errMsg = String(result.error ?? '');
+      expect(errMsg).toContain('outcome is unknown');
+      expect(errMsg).toContain('No local spawn was attempted');
+      expect(errMsg).toContain(`sf agent show ${ws.agentId}`);
+    } finally {
+      globalThis.fetch = originalFetch;
+      ws.cleanup();
+    }
+  });
+
+  test.each([
+    ['--timeout', 'timeout', 'abc'], ['--timeout', 'timeout', '0'], ['--timeout', 'timeout', '-5'],
+    ['--cols', 'cols', 'x'], ['--rows', 'rows', '1.5'],
+  ])('invalid %s %s fails validation before any spawn attempt', async (flag, optionKey, value) => {
+    const ws = await setupWorkspace();
+    const { calls, restore } = stubServerResponse(() => rateLimitedResponse());
+    try {
+      const result = await agentStartCommand.handler!(
+        [ws.agentId],
+        { db: ws.dbPath, server: 'http://localhost:3457', [optionKey]: value } as never
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(String(result.error ?? '')).toContain(`Invalid ${flag}`);
+      // Validation precedes the server attempt — nothing was submitted.
+      expect(calls.length).toBe(0);
+    } finally {
+      restore();
+      ws.cleanup();
+    }
+  });
+
+  test('invalid --env fails validation instead of being silently dropped', async () => {
+    const ws = await setupWorkspace();
+    const { calls, restore } = stubServerResponse(() => rateLimitedResponse());
+    try {
+      const result = await agentStartCommand.handler!([ws.agentId], {
+        db: ws.dbPath,
+        server: 'http://localhost:3457',
+        env: 'NO_EQUALS_SIGN',
+      } as never);
+
+      expect(result.exitCode).not.toBe(0);
+      expect(String(result.error ?? '')).toContain('Invalid --env');
+      expect(String(result.error ?? '')).toContain('KEY=VALUE');
+      expect(calls.length).toBe(0);
+    } finally {
+      restore();
+      ws.cleanup();
+    }
+  });
+});
+
+// ============================================================================
+// isConnectPhaseFailure — the connect-phase vs ambiguous-outcome classifier
+// used by trySpawnViaServer. Connect-phase failures prove the request was
+// never delivered (safe local fallback); everything else may have been
+// submitted and must surface as an explicit error.
+// ============================================================================
+
+describe('isConnectPhaseFailure', () => {
+  it('classifies Bun-style connection refusal (code: ConnectionRefused)', () => {
+    const err = Object.assign(
+      new TypeError('Unable to connect. Is the computer able to access the url?'),
+      { code: 'ConnectionRefused' }
+    );
+    expect(isConnectPhaseFailure(err)).toBe(true);
+  });
+
+  it('classifies Node/undici-style refusal via the cause chain (code: ECONNREFUSED)', () => {
+    const err = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3457'), {
+        code: 'ECONNREFUSED',
+      }),
+    });
+    expect(isConnectPhaseFailure(err)).toBe(true);
+  });
+
+  it('classifies DNS failures (ENOTFOUND / EAI_AGAIN) as connect-phase', () => {
+    expect(isConnectPhaseFailure(Object.assign(new TypeError('getaddrinfo ENOTFOUND host'), { code: 'ENOTFOUND' }))).toBe(true);
+    expect(isConnectPhaseFailure(Object.assign(new TypeError('dns'), { code: 'EAI_AGAIN' }))).toBe(true);
+  });
+
+  it('classifies abort after submission (AbortError) as ambiguous — never safe to fall back', () => {
+    expect(isConnectPhaseFailure(new DOMException('The operation was aborted', 'AbortError'))).toBe(false);
+  });
+
+  it('classifies a mid-flight connection reset (ECONNRESET) as ambiguous', () => {
+    expect(isConnectPhaseFailure(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }))).toBe(false);
+  });
+
+  it('falls back to the message when no code is set', () => {
+    expect(isConnectPhaseFailure(new TypeError('connect ECONNREFUSED 127.0.0.1:3457'))).toBe(true);
+    expect(isConnectPhaseFailure(new TypeError('getaddrinfo ENOTFOUND no-such-host'))).toBe(true);
+  });
+
+  it('treats unrelated errors as ambiguous', () => {
+    expect(isConnectPhaseFailure(new Error('something else'))).toBe(false);
+    expect(isConnectPhaseFailure(undefined)).toBe(false);
+  });
+});
+
+// ============================================================================
 // agent start --provider / --model propagation
 //
 // 'sf agent start' advertises --provider and --model overrides. Historically
@@ -1168,6 +1720,10 @@ describe('agent start provider/model behavioural', () => {
 
     const { tmpRoot, dbPath, api } = await makeWorkspace('sf-start-propagation-');
     const cwdBefore = process.cwd();
+    // --provider now routes through the orchestrator server when one is
+    // reachable; simulate "no server" so this test exercises the local
+    // fallback path the assertions were written for.
+    const restoreFetch = stubServerUnreachable();
     try {
       const registered = await api.registerWorker({
         name: 'propagation-w',
@@ -1203,6 +1759,7 @@ describe('agent start provider/model behavioural', () => {
       // Let the background message loop (init -> result -> close) finish.
       await new Promise((resolve) => setTimeout(resolve, 200));
     } finally {
+      restoreFetch();
       process.chdir(cwdBefore);
       rmSync(tmpRoot, { recursive: true, force: true });
     }
@@ -1216,6 +1773,8 @@ describe('agent start provider/model behavioural', () => {
 
     const { tmpRoot, dbPath, api } = await makeWorkspace('sf-start-propagation-json-');
     const cwdBefore = process.cwd();
+    // Same as above: no server reachable -> local fallback path.
+    const restoreFetch = stubServerUnreachable();
     try {
       const registered = await api.registerWorker({
         name: 'propagation-json-w',
@@ -1240,6 +1799,7 @@ describe('agent start provider/model behavioural', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 200));
     } finally {
+      restoreFetch();
       process.chdir(cwdBefore);
       rmSync(tmpRoot, { recursive: true, force: true });
     }

@@ -115,6 +115,14 @@ Agents carry an optional `disabled: boolean` flag on `BaseAgentMetadata`. When `
 
 The flag does NOT terminate in-flight sessions: an agent disabled while running keeps its session until it completes or is explicitly stopped. Only future work is blocked.
 
+### Rate-limited accounts on manual spawn routes
+
+The same two routes also refuse manual spawns when dispatch is paused or the target agent's account is currently rate-limited, returning `429 RATE_LIMITED` with a `Retry-After` header. The per-agent refusal names the limited `accountKey` and its `resetsAt`; the global refusal fires during a manual sleep (`sf daemon sleep` — clear it with `sf daemon wake`) or when every enabled worker account is limited (`soonestReset`). The spawn is not attempted — this is the explicit refusal that replaced sessions that were started and immediately rejected by the provider. See [Rate limit handling](/guides/auto-dispatch/#rate-limit-handling) for what may record a limit in the first place (only actual provider error signatures — never rapid exits or restart kills).
+
+`POST /api/agents/:id/start` accepts spawn-shaping fields that `sf agent start` forwards: `interactive` (boolean; `--mode headless`/`interactive`), `cols`, `rows`, `environmentVariables` (object), `provider` (name — same precedence as the CLI flag: body value > the agent's registered provider > default), `model` (same precedence) and `timeout` (milliseconds). Invalid values are rejected with `400` before anything is spawned: unknown or unavailable providers (`INVALID_PROVIDER`, listing the registered ones), models malformed for the effective provider such as non-composite IDs for opencode (`INVALID_MODEL`), and non-positive timeouts (`INVALID_TIMEOUT`).
+
+`POST /api/agents/:id/resume` keeps a resumed session's original spawn shape: `providerSessionId`, `workingDirectory`, `worktree`, `resumePrompt` and `checkReadyQueue` are accepted, while any start-only field (`interactive`, `cols`, `rows`, `environmentVariables`, `provider`, `model`, `timeout`) is refused with `400 UNSUPPORTED_FOR_RESUME` naming the offending fields — never silently ignored.
+
 Read the flag through helpers rather than touching metadata directly:
 
 ```typescript
