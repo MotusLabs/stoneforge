@@ -7,6 +7,7 @@
  *
  * globalSetup focuses on seeding test data (e.g., the operator entity).
  */
+import { spawnSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,7 +20,31 @@ const PROJECT_ROOT = resolve(__dirname, '../../..');
 const TEST_STONEFORGE_DIR = resolve(PROJECT_ROOT, '.stoneforge-test');
 const TEST_DB_PATH = resolve(TEST_STONEFORGE_DIR, 'stoneforge.db');
 
+/**
+ * Block until the Playwright headless-shell build this suite spawns is fully
+ * provisioned in the shared browsers directory. After a pod restart the build
+ * is absent (the browsers directory lives on the container overlay) and the
+ * first run must re-install it; without this gate a suite can spawn the
+ * browser while another process is still extracting it and die with ETXTBSY
+ * or V8 snapshot errors before any test executes. See
+ * scripts/ensure-playwright-browsers.mjs and runbook doc el-2423ix.
+ */
+function ensureBrowsers(): void {
+  const result = spawnSync(
+    process.execPath,
+    [resolve(PROJECT_ROOT, 'scripts/ensure-playwright-browsers.mjs'), '--only-shell'],
+    { cwd: resolve(PROJECT_ROOT, 'apps/smithy-web'), encoding: 'utf8', timeout: 20 * 60_000 }
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `Browser provisioning failed (exit ${result.status}):\n${result.stderr || result.error}`
+    );
+  }
+}
+
 export default async function globalSetup() {
+  ensureBrowsers();
+
   // Ensure directory exists (may already be created by setup-test-db.ts)
   mkdirSync(TEST_STONEFORGE_DIR, { recursive: true });
 
