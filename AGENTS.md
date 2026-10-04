@@ -137,11 +137,13 @@ sf stats              # View progress stats
 ### Running Apps
 
 ```bash
-bun run --filter @stoneforge/quarry-server dev       # Platform server (port 3456)
-bun run --filter @stoneforge/quarry-web dev          # Platform web (port 5173)
-bun run --filter @stoneforge/smithy-server dev  # Orchestrator (port 3457)
-bun run --filter @stoneforge/smithy-web dev     # Orchestrator UI (port 5174)
+pnpm --filter @stoneforge/quarry-server dev       # Platform server (port 3456)
+pnpm --filter @stoneforge/quarry-web dev          # Platform web (port 5173)
+pnpm --filter @stoneforge/smithy-server dev       # Orchestrator (port 3457)
+pnpm --filter @stoneforge/smithy-web dev          # Orchestrator UI (port 5174)
 ```
+
+> **Package manager is pnpm.** Workspaces are declared in `pnpm-workspace.yaml`; the root `package.json` deliberately has no `workspaces` field, so `bun run --filter <pkg>` fails with `FileNotFound` — don't use it from the workspace root. Filter with `pnpm --filter <pkg> <script>`, or run Bun without workspace discovery: `bun run --cwd apps/<app> <script>`.
 
 ---
 

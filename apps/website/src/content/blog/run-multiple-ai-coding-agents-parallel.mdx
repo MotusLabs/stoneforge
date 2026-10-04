@@ -115,8 +115,8 @@ Here's how to go from zero to three agents running in parallel on your codebase.
 ```bash
 git clone https://github.com/stoneforge-ai/stoneforge.git
 cd stoneforge
-bun install
-bun link
+pnpm install
+pnpm link --global --filter @stoneforge/quarry
 ```
 
 Then, in your project:
