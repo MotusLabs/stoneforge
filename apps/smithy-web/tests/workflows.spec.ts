@@ -1260,8 +1260,9 @@ test.describe('TB-O32: Workflows Page', () => {
           }
         });
 
-        await page.route('**/api/workflows*', async (route) => {
-          // Handle POST for creating workflow
+        // Workflow creation posts to the instantiate endpoint
+        // (see useCreateFromPlaybook in packages/ui/src/workflows/hooks)
+        await page.route('**/api/playbooks/pb-1/instantiate', async (route) => {
           if (route.request().method() === 'POST') {
             route.fulfill({
               status: 201,
@@ -1284,7 +1285,11 @@ test.describe('TB-O32: Workflows Page', () => {
             });
             return;
           }
-          // Handle GET for listing workflows
+          await route.continue();
+        });
+
+        // Handle GET for listing workflows
+        await page.route('**/api/workflows*', async (route) => {
           route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -1378,7 +1383,9 @@ test.describe('TB-O32: Workflows Page', () => {
           }
         });
 
-        await page.route('**/api/workflows', async (route) => {
+        // Workflow creation posts to the instantiate endpoint
+        // (see useCreateFromPlaybook in packages/ui/src/workflows/hooks)
+        await page.route('**/api/playbooks/pb-1/instantiate', async (route) => {
           if (route.request().method() === 'POST') {
             route.fulfill({
               status: 500,
