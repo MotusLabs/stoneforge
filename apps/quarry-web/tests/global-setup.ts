@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { FullConfig } from '@playwright/test';
 import { createStorageAsync, initializeSchema } from '@stoneforge/storage';
 import { createQuarryAPI } from '@stoneforge/quarry';
 import {
@@ -12,6 +13,7 @@ import {
   createMessage,
   DocumentCategory,
 } from '@stoneforge/core';
+import { warmViteDevServer } from './warm-vite';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '../../..');
@@ -69,7 +71,7 @@ export const PLAYBOOK_FIXTURE_DIR = resolve(
   'apps/quarry-server/.stoneforge/playbooks'
 );
 
-export default async function globalSetup() {
+export default async function globalSetup(config: FullConfig) {
   mkdirSync(TEST_STONEFORGE_DIR, { recursive: true });
 
   const backend = await createStorageAsync({ path: TEST_DB_PATH, create: true });
@@ -150,4 +152,15 @@ export default async function globalSetup() {
   for (const [filename, content] of Object.entries(PLAYBOOK_FIXTURES)) {
     writeFileSync(resolve(PLAYBOOK_FIXTURE_DIR, filename), content, 'utf8');
   }
+
+  // Warm the Vite dev server's transform cache before workers spawn, so the
+  // first parallel page.goto() per worker is not racing the cold first
+  // transform of the route module graph (30s navigation-timeout flake family).
+  const baseURL =
+    config.projects.map((p) => p.use?.baseURL).find((u): u is string => !!u) ??
+    config.use?.baseURL;
+  if (!baseURL) {
+    throw new Error('globalSetup: no project defines use.baseURL; cannot warm Vite dev server');
+  }
+  await warmViteDevServer(baseURL, __dirname);
 }

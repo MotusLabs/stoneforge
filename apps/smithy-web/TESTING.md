@@ -69,3 +69,40 @@ CI=1 bun run --cwd apps/smithy-web test:e2e scaffold.spec.ts --workers=1
 Playwright starts its own API and Vite servers by default. `CI=1` also enables
 CI retries and a single worker. To verify the browser download too,
 set `PLAYWRIGHT_BROWSERS_PATH` to an empty directory for the test command.
+
+## Vite dev-server warmup (first-navigation timeouts)
+
+Both apps statically import every route component in `src/router.tsx`, so the
+first `page.goto()` of a run fetches the entire unbundled module graph through
+Vite's on-demand transform pipeline. Under the default worker count (half the
+CPUs) every worker hits that cold first transform at the same moment; the
+single Vite process serializes the transforms and the `load` event can exceed
+Playwright's default 30s navigation timeout. Four recorded flakes share this
+signature — an initial `page.goto` timing out under parallel load and passing
+on isolated retry: `playbooks.spec.ts:193`, `workspaces.spec.ts:755`/`:873`,
+`helpers/create-workflow-modal.ts:339` (`goto('/dashboard')`), and
+`onboarding.spec.ts:521` (task el-1pjuwe).
+
+To keep that from recurring, each app's `tests/global-setup.ts` calls
+`warmViteDevServer()` from `tests/warm-vite.ts` after seeding test data.
+It scans `tests/` for every `page.goto('/…')` literal (helpers included) and
+loads each route once in a throwaway Chromium page before any worker spawns,
+populating Vite's in-memory transform cache. A cold full-graph warmup takes
+roughly 25–35s on this hardware; every worker navigation afterwards is a
+warm-cache load measured in seconds.
+
+Consequences for writing specs:
+
+- Navigate with `page.goto('/route')` against the configured `baseURL`. Routes
+  reached that way are warmed automatically, including routes added by future
+  specs — the list is discovered from the specs, not maintained by hand.
+- Do not reach for per-test retries or inflated per-test navigation timeouts
+  to paper over a slow first navigation; report a warmup gap instead (for
+  example a route built from a template literal, which the scanner cannot see).
+- `E2E_SKIP_WARMUP=1` disables the warmup for A/B comparisons and
+  emergencies. With it set, cold-cache first navigations under parallel load
+  can time out again — that is the old behavior, not a bug in your test.
+
+This applies identically to `apps/quarry-web` (same helper, same global-setup
+call). The convention is also recorded in the Test Runner Convention document
+(el-50x1).
