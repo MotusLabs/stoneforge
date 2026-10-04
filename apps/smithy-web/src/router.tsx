@@ -236,6 +236,10 @@ const popoutTerminalRoute = createRoute({
       name: typeof search.name === 'string' ? search.name : undefined,
       role: typeof search.role === 'string' ? search.role : undefined,
       mode: typeof search.mode === 'string' ? search.mode : undefined,
+      // `osc52=0` disables OSC 52 clipboard copy for this terminal mount.
+      // The default search parser JSON-parses values, so `0` arrives as a
+      // number — accept both forms and normalize to the string `'0'`.
+      osc52: search.osc52 === '0' || search.osc52 === 0 ? '0' : undefined,
     };
   },
 });

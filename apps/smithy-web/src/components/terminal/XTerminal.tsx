@@ -10,6 +10,7 @@ import { useEffect, useRef, useCallback, useState, useImperativeHandle, forwardR
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { createOsc52ClipboardHandler } from './osc52';
 import '@xterm/xterm/css/xterm.css';
 
 export type TerminalStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -64,6 +65,11 @@ export interface XTerminalProps {
   controlsResize?: boolean;
   /** Whether to enable file drag and drop (default: true for interactive terminals) */
   enableFileDrop?: boolean;
+  /** Whether programs in the terminal may set the system clipboard via
+   * OSC 52 escape sequences (default: true). Refuses clipboard reads,
+   * caps payloads at 100,000 decoded bytes, and falls back to a legacy
+   * copy mechanism on non-secure (plain HTTP) contexts. */
+  enableOsc52Copy?: boolean;
   /** Test ID for testing */
   'data-testid'?: string;
 }
@@ -137,6 +143,7 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
   autoFocus = false,
   controlsResize = true,
   enableFileDrop,
+  enableOsc52Copy = true,
   'data-testid': testId = 'xterminal',
 }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -204,6 +211,18 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
     terminal.loadAddon(webLinksAddon);
     terminal.open(containerRef.current);
 
+    // OSC 52 clipboard copy: programs running inside the terminal (claude's
+    // TUI, tmux with `set-clipboard on`, ...) emit `ESC ] 52 ; <selection> ;
+    // <base64> ST/BEL` to copy a selection to the system clipboard. xterm.js
+    // ignores OSC 52 by default, so route it through our helper: read
+    // requests (`?`) and malformed/oversized payloads are ignored, valid
+    // text goes to the clipboard (with a non-secure-context fallback).
+    // Registered in this init effect — the handler's lifetime follows the
+    // Terminal instance (dispose clears registered OSC handlers).
+    if (enableOsc52Copy) {
+      terminal.parser.registerOscHandler(52, createOsc52ClipboardHandler());
+    }
+
     if (autoFit) {
       fitAddon.fit();
     }
@@ -230,7 +249,7 @@ export const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(function XT
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [theme, fontSize, fontFamily, autoFit, interactive, autoFocus, sendToServer, onData]);
+  }, [theme, fontSize, fontFamily, autoFit, interactive, autoFocus, enableOsc52Copy, sendToServer, onData]);
 
   // Handle resize
   useEffect(() => {
