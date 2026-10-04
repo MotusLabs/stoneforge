@@ -234,23 +234,32 @@ test.describe('TB70: Deep-Link Navigation', () => {
   // ============================================================================
   test.describe('Workflows Page', () => {
     test('navigating to /workflows?selected=<id> opens workflow detail', async ({ page }) => {
-      // First get a workflow ID
-      const response = await page.request.get('/api/workflows?limit=1');
-      const data = await response.json();
-
-      if (!data.items || data.items.length === 0) {
-        test.skip();
-        return;
-      }
-
-      const workflowId = data.items[0].id;
+      // Create a workflow to deep-link to
+      const createResponse = await page.request.post('/api/workflows', {
+        data: {
+          title: `Deep Link Workflow ${Date.now()}`,
+          createdBy: 'el-0000',
+          initialTask: { title: 'Deep link task' },
+        },
+      });
+      expect(createResponse.ok()).toBe(true);
+      const created = await createResponse.json();
+      const workflowId = created.workflow.id;
 
       // Navigate directly with selected param
       await page.goto(`/workflows?selected=${workflowId}`);
-      await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
-      // Workflow detail should be visible
-      await expect(page.getByTestId('workflow-detail-panel')).toBeVisible({ timeout: 10000 });
+      // The detail view replaces the list page when a workflow is selected
+      await expect(page.getByTestId('workflow-detail-page')).toBeVisible({ timeout: 10000 });
+      const detail = page.getByTestId('workflow-progress-dashboard');
+      await expect(detail).toBeVisible({ timeout: 10000 });
+      await expect(detail.getByRole('heading', { name: created.workflow.title })).toBeVisible();
+
+      // The workflow's tasks render in the detail view
+      await expect(page.getByTestId(`workflow-task-${created.initialTask.id}`)).toBeVisible();
+
+      // Cleanup
+      await page.request.delete(`/api/workflows/${workflowId}?force=true`);
     });
 
     test('navigating to non-existent workflow shows Not Found', async ({ page }) => {

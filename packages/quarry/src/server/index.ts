@@ -23,6 +23,7 @@ import {
   createMessage,
   createWorkflowFromPlaybook,
   createWorkflow,
+  updateWorkflowStatus,
   discoverPlaybookFiles,
   loadPlaybookFromFile,
   createPlaybook,
@@ -50,6 +51,7 @@ import type {
   CreateWorkflowInput,
   CreateWorkflowFromPlaybookInput,
   Playbook,
+  PlaybookId,
   DiscoveredPlaybook,
   CreateLibraryInput,
   CreateGroupChannelInput,
@@ -2327,10 +2329,83 @@ app.get('/api/events/count', async (c) => {
 // Workflows Endpoints (TB25)
 // ============================================================================
 
+/**
+ * Terminal workflow statuses (no further transitions possible)
+ */
+const WORKFLOW_TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
+
+/**
+ * Computes workflow progress metrics from a workflow's tasks.
+ *
+ * Returns the numeric shape consumed by the shared @stoneforge/ui workflow
+ * components (total/completed/inProgress/blocked/open/percentage) plus the
+ * statusCounts breakdown for clients that prefer it.
+ */
+function computeWorkflowTaskProgress(
+  tasks: { status: string }[]
+): {
+  total: number;
+  completed: number;
+  inProgress: number;
+  blocked: number;
+  open: number;
+  percentage: number;
+  statusCounts: Record<string, number>;
+} {
+  const statusCounts: Record<string, number> = {};
+  for (const task of tasks) {
+    statusCounts[task.status] = (statusCounts[task.status] ?? 0) + 1;
+  }
+
+  const total = tasks.length;
+  const completed = statusCounts['closed'] ?? 0;
+  const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+  return {
+    total,
+    completed,
+    inProgress: statusCounts['in_progress'] ?? 0,
+    blocked: statusCounts['blocked'] ?? 0,
+    open: statusCounts['open'] ?? 0,
+    percentage,
+    statusCounts,
+  };
+}
+
+/**
+ * Collects the `blocks` dependencies between tasks of the same workflow.
+ *
+ * These are the edges the workflow graph views render: a dependency is only
+ * reported when both ends are tasks of the workflow in question.
+ */
+async function getInternalTaskDependencies(
+  taskIds: ElementId[]
+): Promise<{ blockedId: ElementId; blockerId: ElementId; type: string }[]> {
+  const taskIdSet = new Set(taskIds);
+  const internal: { blockedId: ElementId; blockerId: ElementId; type: string }[] = [];
+
+  for (const taskId of taskIds) {
+    // getDependencies returns dependencies where taskId is the blocked element
+    const taskDeps = await api.getDependencies(taskId, ['blocks']);
+    for (const dep of taskDeps) {
+      if (taskIdSet.has(dep.blockerId)) {
+        internal.push({
+          blockedId: dep.blockedId,
+          blockerId: dep.blockerId,
+          type: dep.type,
+        });
+      }
+    }
+  }
+
+  return internal;
+}
+
 app.get('/api/workflows', async (c) => {
   try {
     const url = new URL(c.req.url);
     const statusParam = url.searchParams.get('status');
+    const playbookIdParam = url.searchParams.get('playbookId');
     const ephemeralParam = url.searchParams.get('ephemeral');
     const limitParam = url.searchParams.get('limit');
     const offsetParam = url.searchParams.get('offset');
@@ -2341,21 +2416,44 @@ app.get('/api/workflows', async (c) => {
       orderDir: 'desc',
     };
 
-    if (statusParam) {
+    // 'active' and 'terminal' are virtual statuses that span several real
+    // statuses, so they are resolved after listing instead of in the filter.
+    if (
+      statusParam &&
+      statusParam !== 'all' &&
+      statusParam !== 'active' &&
+      statusParam !== 'terminal'
+    ) {
       filter.status = statusParam;
     }
-    if (ephemeralParam !== null) {
-      filter.ephemeral = ephemeralParam === 'true';
-    }
-    if (limitParam) {
-      filter.limit = parseInt(limitParam, 10);
-    }
-    if (offsetParam) {
-      filter.offset = parseInt(offsetParam, 10);
+
+    let workflows = (await api.list(filter as Parameters<typeof api.list>[0])) as Workflow[];
+
+    if (statusParam === 'active') {
+      workflows = workflows.filter((w) => w.status === 'pending' || w.status === 'running');
+    } else if (statusParam === 'terminal') {
+      workflows = workflows.filter((w) => WORKFLOW_TERMINAL_STATUSES.includes(w.status));
     }
 
-    const workflows = await api.list(filter as Parameters<typeof api.list>[0]);
-    return c.json(workflows);
+    if (playbookIdParam) {
+      workflows = workflows.filter((w) => w.playbookId === playbookIdParam);
+    }
+
+    if (ephemeralParam !== null) {
+      const isEphemeral = ephemeralParam === 'true';
+      workflows = workflows.filter((w) => (w.ephemeral ?? false) === isEphemeral);
+    }
+
+    const total = workflows.length;
+    const offset = offsetParam ? Math.max(0, parseInt(offsetParam, 10) || 0) : 0;
+    if (limitParam) {
+      workflows = workflows.slice(offset, offset + (parseInt(limitParam, 10) || 0));
+    } else if (offset > 0) {
+      workflows = workflows.slice(offset);
+    }
+
+    // Envelope shape expected by the shared @stoneforge/ui workflow hooks
+    return c.json({ workflows, total });
   } catch (error) {
     console.error('[stoneforge] Failed to get workflows:', error);
     return c.json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to get workflows' } }, 500);
@@ -2381,10 +2479,10 @@ app.get('/api/workflows/:id', async (c) => {
     // Optionally hydrate progress
     if (hydrateProgress) {
       const progress = await api.getWorkflowProgress(id);
-      return c.json({ ...workflow, _progress: progress });
+      return c.json({ workflow: { ...workflow, _progress: progress } });
     }
 
-    return c.json(workflow);
+    return c.json({ workflow });
   } catch (error) {
     console.error('[stoneforge] Failed to get workflow:', error);
     return c.json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to get workflow' } }, 500);
@@ -2395,7 +2493,7 @@ app.get('/api/workflows/:id/tasks', async (c) => {
   try {
     const id = c.req.param('id') as ElementId;
     const url = new URL(c.req.url);
-    const statusParam = url.searchParams.get('status');
+    const statusParams = url.searchParams.getAll('status');
     const limitParam = url.searchParams.get('limit');
     const offsetParam = url.searchParams.get('offset');
 
@@ -2408,21 +2506,27 @@ app.get('/api/workflows/:id/tasks', async (c) => {
       return c.json({ error: { code: 'NOT_FOUND', message: 'Workflow not found' } }, 404);
     }
 
-    // Build filter for getTasksInWorkflow
-    const filter: Record<string, unknown> = {};
+    // Progress and dependencies are computed over the full task set so that
+    // filtering the returned tasks does not skew the metrics.
+    const allTasks = await api.getTasksInWorkflow(id);
+    const progress = computeWorkflowTaskProgress(allTasks);
+    const dependencies = await getInternalTaskDependencies(allTasks.map((t) => t.id));
 
-    if (statusParam) {
-      filter.status = statusParam;
+    let tasks = allTasks;
+    if (statusParams.length > 0) {
+      const statuses = statusParams.flatMap((param) => param.split(',')).filter(Boolean);
+      tasks = tasks.filter((t) => statuses.includes(t.status));
     }
+
+    const offset = offsetParam ? Math.max(0, parseInt(offsetParam, 10) || 0) : 0;
     if (limitParam) {
-      filter.limit = parseInt(limitParam, 10);
-    }
-    if (offsetParam) {
-      filter.offset = parseInt(offsetParam, 10);
+      tasks = tasks.slice(offset, offset + (parseInt(limitParam, 10) || 0));
+    } else if (offset > 0) {
+      tasks = tasks.slice(offset);
     }
 
-    const tasks = await api.getTasksInWorkflow(id, filter as Parameters<typeof api.getTasksInWorkflow>[1]);
-    return c.json(tasks);
+    // Envelope shape expected by the shared @stoneforge/ui workflow hooks
+    return c.json({ tasks, total: allTasks.length, progress, dependencies });
   } catch (error) {
     console.error('[stoneforge] Failed to get workflow tasks:', error);
     return c.json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to get workflow tasks' } }, 500);
@@ -2589,7 +2693,7 @@ app.post('/api/workflows', async (c) => {
 
     // Return the workflow along with the initial task info
     return c.json({
-      ...created,
+      workflow: created,
       initialTask: createdTask || { id: taskId }
     }, 201);
   } catch (error) {
@@ -2604,6 +2708,85 @@ app.post('/api/workflows', async (c) => {
   }
 });
 
+/**
+ * Shared workflow instantiation logic.
+ *
+ * Used by POST /api/workflows/instantiate (inline playbook object) and
+ * POST /api/playbooks/:name/instantiate (playbook discovered on disk).
+ *
+ * Returns the response body, or a Response to short-circuit with an error.
+ */
+async function instantiateWorkflowFromPlaybook(
+  playbook: Playbook,
+  input: {
+    createdBy: EntityId;
+    title?: string;
+    variables?: Record<string, unknown>;
+    ephemeral?: boolean;
+    tags?: string[];
+    metadata?: Record<string, unknown>;
+  },
+  playbookLoader?: Parameters<typeof createWorkflowFromPlaybook>[0]['playbookLoader']
+): Promise<Response> {
+  // TB122: Validate playbook has at least one step
+  if (!playbook.steps || !Array.isArray(playbook.steps) || playbook.steps.length === 0) {
+    return Response.json({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Cannot instantiate workflow: playbook has no steps defined. Workflows must have at least one task.'
+      }
+    }, { status: 400 });
+  }
+
+  const createInput: CreateWorkflowFromPlaybookInput = {
+    // Inline playbook objects may omit optional collections; defaulting them
+    // here keeps instantiation working without a complete Playbook element
+    playbook: { ...playbook, variables: playbook.variables ?? [], steps: playbook.steps ?? [] },
+    playbookLoader,
+    variables: input.variables || {},
+    createdBy: input.createdBy,
+    title: input.title,
+    ephemeral: input.ephemeral ?? false,
+    tags: input.tags || [],
+    metadata: input.metadata || {},
+  };
+
+  // Instantiate the workflow from playbook
+  const result = await createWorkflowFromPlaybook(createInput, { idConfig: api.getIdGeneratorConfig() });
+
+  // TB122: Verify at least one task was created (steps may have been filtered by conditions)
+  if (result.tasks.length === 0) {
+    return Response.json({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Cannot instantiate workflow: all playbook steps were filtered by conditions. At least one task must be created.'
+      }
+    }, { status: 400 });
+  }
+
+  // Create the workflow and all tasks in the database
+  const createdWorkflow = await api.create(result.workflow as unknown as Element & Record<string, unknown>);
+
+  // Create all tasks
+  const createdTasks = [];
+  for (const task of result.tasks) {
+    const createdTask = await api.create(task.task as unknown as Element & Record<string, unknown>);
+    createdTasks.push(createdTask);
+  }
+
+  // Create all dependencies
+  for (const dep of [...result.blocksDependencies, ...result.parentChildDependencies]) {
+    await api.addDependency(dep);
+  }
+
+  return Response.json({
+    workflow: createdWorkflow,
+    tasks: createdTasks,
+    skippedSteps: result.skippedSteps,
+    resolvedVariables: result.resolvedVariables,
+  }, { status: 201 });
+}
+
 app.post('/api/workflows/instantiate', async (c) => {
   try {
     const body = await c.req.json();
@@ -2617,62 +2800,14 @@ app.post('/api/workflows/instantiate', async (c) => {
       return c.json({ error: { code: 'VALIDATION_ERROR', message: 'createdBy is required and must be a string' } }, 400);
     }
 
-    // TB122: Validate playbook has at least one step
-    const playbook = body.playbook as Playbook;
-    if (!playbook.steps || !Array.isArray(playbook.steps) || playbook.steps.length === 0) {
-      return c.json({
-        error: {
-          code: 'VALIDATION_ERROR',
-          message: 'Cannot instantiate workflow: playbook has no steps defined. Workflows must have at least one task.'
-        }
-      }, 400);
-    }
-
-    // Build instantiation input
-    const createInput: CreateWorkflowFromPlaybookInput = {
-      playbook: body.playbook as Playbook,
-      variables: body.variables || {},
+    return await instantiateWorkflowFromPlaybook(body.playbook as Playbook, {
       createdBy: body.createdBy as EntityId,
       title: body.title,
-      ephemeral: body.ephemeral ?? false,
-      tags: body.tags || [],
-      metadata: body.metadata || {},
-    };
-
-    // Instantiate the workflow from playbook
-    const result = await createWorkflowFromPlaybook(createInput, { idConfig: api.getIdGeneratorConfig() });
-
-    // TB122: Verify at least one task was created (steps may have been filtered by conditions)
-    if (result.tasks.length === 0) {
-      return c.json({
-        error: {
-          code: 'VALIDATION_ERROR',
-          message: 'Cannot instantiate workflow: all playbook steps were filtered by conditions. At least one task must be created.'
-        }
-      }, 400);
-    }
-
-    // Create the workflow and all tasks in the database
-    const createdWorkflow = await api.create(result.workflow as unknown as Element & Record<string, unknown>);
-
-    // Create all tasks
-    const createdTasks = [];
-    for (const task of result.tasks) {
-      const createdTask = await api.create(task.task as unknown as Element & Record<string, unknown>);
-      createdTasks.push(createdTask);
-    }
-
-    // Create all dependencies
-    for (const dep of [...result.blocksDependencies, ...result.parentChildDependencies]) {
-      await api.addDependency(dep);
-    }
-
-    return c.json({
-      workflow: createdWorkflow,
-      tasks: createdTasks,
-      skippedSteps: result.skippedSteps,
-      resolvedVariables: result.resolvedVariables,
-    }, 201);
+      variables: body.variables,
+      ephemeral: body.ephemeral,
+      tags: body.tags,
+      metadata: body.metadata,
+    });
   } catch (error) {
     if ((error as { code?: string }).code === 'VALIDATION_ERROR') {
       return c.json({ error: { code: 'VALIDATION_ERROR', message: (error as Error).message } }, 400);
@@ -2722,7 +2857,7 @@ app.patch('/api/workflows/:id', async (c) => {
     }
 
     const updated = await api.update(id, updates);
-    return c.json(updated);
+    return c.json({ workflow: updated });
   } catch (error) {
     if ((error as { code?: string }).code === 'NOT_FOUND') {
       return c.json({ error: { code: 'NOT_FOUND', message: 'Workflow not found' } }, 404);
@@ -2732,6 +2867,76 @@ app.patch('/api/workflows/:id', async (c) => {
     }
     console.error('[stoneforge] Failed to update workflow:', error);
     return c.json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to update workflow' } }, 500);
+  }
+});
+
+// Start workflow (transition pending -> running)
+app.post('/api/workflows/:id/start', async (c) => {
+  try {
+    const id = c.req.param('id') as ElementId;
+
+    const workflow = await api.get(id);
+    if (!workflow || workflow.type !== 'workflow') {
+      return c.json({ error: { code: 'NOT_FOUND', message: 'Workflow not found' } }, 404);
+    }
+
+    const existing = workflow as Workflow;
+    if (existing.status !== 'pending') {
+      return c.json({
+        error: { code: 'INVALID_STATUS', message: `Cannot start workflow in status '${existing.status}'` }
+      }, 400);
+    }
+
+    const updated = updateWorkflowStatus(existing, { status: 'running' });
+    const saved = await api.update(id, updated);
+
+    return c.json({ workflow: saved });
+  } catch (error) {
+    if ((error as { code?: string }).code === 'NOT_FOUND') {
+      return c.json({ error: { code: 'NOT_FOUND', message: 'Workflow not found' } }, 404);
+    }
+    if ((error as { code?: string }).code === 'VALIDATION_ERROR') {
+      return c.json({ error: { code: 'VALIDATION_ERROR', message: (error as Error).message } }, 400);
+    }
+    console.error('[stoneforge] Failed to start workflow:', error);
+    return c.json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to start workflow' } }, 500);
+  }
+});
+
+// Cancel workflow (transition to cancelled from any non-terminal status)
+app.post('/api/workflows/:id/cancel', async (c) => {
+  try {
+    const id = c.req.param('id') as ElementId;
+    const body = await c.req.json().catch(() => ({}));
+
+    const workflow = await api.get(id);
+    if (!workflow || workflow.type !== 'workflow') {
+      return c.json({ error: { code: 'NOT_FOUND', message: 'Workflow not found' } }, 404);
+    }
+
+    const existing = workflow as Workflow;
+    if (WORKFLOW_TERMINAL_STATUSES.includes(existing.status)) {
+      return c.json({
+        error: { code: 'INVALID_STATUS', message: `Cannot cancel workflow in status '${existing.status}'` }
+      }, 400);
+    }
+
+    const updated = updateWorkflowStatus(existing, {
+      status: 'cancelled',
+      cancelReason: typeof body?.reason === 'string' ? body.reason : undefined,
+    });
+    const saved = await api.update(id, updated);
+
+    return c.json({ workflow: saved });
+  } catch (error) {
+    if ((error as { code?: string }).code === 'NOT_FOUND') {
+      return c.json({ error: { code: 'NOT_FOUND', message: 'Workflow not found' } }, 404);
+    }
+    if ((error as { code?: string }).code === 'VALIDATION_ERROR') {
+      return c.json({ error: { code: 'VALIDATION_ERROR', message: (error as Error).message } }, 400);
+    }
+    console.error('[stoneforge] Failed to cancel workflow:', error);
+    return c.json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to cancel workflow' } }, 500);
   }
 });
 
@@ -2764,7 +2969,7 @@ app.delete('/api/workflows/:id', async (c) => {
     // Delete the workflow and its tasks
     const result = await api.deleteWorkflow(id);
 
-    return c.json(result);
+    return c.json({ success: true, ...result });
   } catch (error) {
     if ((error as { code?: string }).code === 'NOT_FOUND') {
       return c.json({ error: { code: 'NOT_FOUND', message: 'Workflow not found' } }, 404);
@@ -2801,7 +3006,7 @@ app.post('/api/workflows/:id/promote', async (c) => {
     // Promote to durable by setting ephemeral to false
     const updated = await api.update(id, { ephemeral: false } as unknown as Partial<Element>);
 
-    return c.json(updated);
+    return c.json({ workflow: updated });
   } catch (error) {
     if ((error as { code?: string }).code === 'NOT_FOUND') {
       return c.json({ error: { code: 'NOT_FOUND', message: 'Workflow not found' } }, 404);
@@ -2824,18 +3029,105 @@ const PLAYBOOK_SEARCH_PATHS = [
   resolve(PROJECT_ROOT, 'playbooks'),
 ];
 
+/**
+ * Entity credited as the creator of playbooks discovered on disk.
+ */
+const PLAYBOOK_CREATED_BY = 'system' as EntityId;
+
+/**
+ * A playbook loaded from a discovered file.
+ *
+ * File-based playbooks are not stored as elements, so the playbook name is
+ * used as its stable identifier: it is what the API exposes as `id` and what
+ * the playbook endpoints accept to reference a playbook.
+ */
+type FilePlaybook = Playbook & { id: string; filePath: string; directory: string };
+
+/**
+ * Finds a discovered playbook file by playbook name (case-insensitive).
+ */
+function findDiscoveredPlaybook(name: string): DiscoveredPlaybook | undefined {
+  const discovered = discoverPlaybookFiles(PLAYBOOK_SEARCH_PATHS, { recursive: true });
+  return discovered.find((p) => p.name.toLowerCase() === name.toLowerCase());
+}
+
+/**
+ * Loads a discovered playbook file into the API playbook shape.
+ *
+ * @throws if the file cannot be parsed or violates the playbook schema
+ */
+async function loadDiscoveredPlaybook(found: DiscoveredPlaybook): Promise<FilePlaybook> {
+  const playbookInput = loadPlaybookFromFile(found.path, PLAYBOOK_CREATED_BY);
+  const playbook = await createPlaybook(playbookInput);
+
+  return {
+    ...playbook,
+    // File-based playbooks are addressed by name; the generated element id
+    // would change on every request, so the name stands in as the identifier.
+    id: found.name as PlaybookId,
+    filePath: found.path,
+    directory: found.directory,
+  };
+}
+
+/**
+ * Playbook loader resolving parents by name from the playbook search paths.
+ *
+ * Used when instantiating a playbook so that `extends` inheritance works for
+ * file-based playbooks too.
+ */
+async function filePlaybookLoader(name: string): Promise<Playbook | undefined> {
+  const found = findDiscoveredPlaybook(name);
+  if (!found) {
+    return undefined;
+  }
+  try {
+    return await loadDiscoveredPlaybook(found);
+  } catch (error) {
+    console.error(`[stoneforge] Failed to load parent playbook '${name}':`, error);
+    return undefined;
+  }
+}
+
 app.get('/api/playbooks', async (c) => {
   try {
+    const url = new URL(c.req.url);
+    const nameFilter = url.searchParams.get('name');
+    const limitParam = url.searchParams.get('limit');
+
     const discovered = discoverPlaybookFiles(PLAYBOOK_SEARCH_PATHS, { recursive: true });
 
-    // Return basic info about discovered playbooks
-    const playbooks = discovered.map((p: DiscoveredPlaybook) => ({
-      name: p.name,
-      path: p.path,
-      directory: p.directory,
-    }));
+    // Load the full playbooks; files that fail to parse are skipped so a
+    // single broken template does not take down the whole listing
+    const playbooks: FilePlaybook[] = [];
+    for (const discoveredPlaybook of discovered) {
+      try {
+        playbooks.push(await loadDiscoveredPlaybook(discoveredPlaybook));
+      } catch (error) {
+        console.error(
+          `[stoneforge] Skipping invalid playbook file ${discoveredPlaybook.path}:`,
+          error
+        );
+      }
+    }
 
-    return c.json(playbooks);
+    // Apply name filter (case-insensitive partial match on name or title)
+    let filtered = playbooks;
+    if (nameFilter) {
+      const lowerFilter = nameFilter.toLowerCase();
+      filtered = filtered.filter(
+        (p) => p.name.toLowerCase().includes(lowerFilter) || p.title.toLowerCase().includes(lowerFilter)
+      );
+    }
+
+    // Sort by name ascending for a stable listing
+    const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name));
+
+    const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+    const limited = limit && limit > 0 ? sorted.slice(0, limit) : sorted;
+
+    // Envelope shape expected by the shared @stoneforge/ui workflow hooks
+    return c.json({ playbooks: limited, total: sorted.length });
   } catch (error) {
     console.error('[stoneforge] Failed to list playbooks:', error);
     return c.json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to list playbooks' } }, 500);
@@ -2845,29 +3137,77 @@ app.get('/api/playbooks', async (c) => {
 app.get('/api/playbooks/:name', async (c) => {
   try {
     const name = c.req.param('name');
-    const discovered = discoverPlaybookFiles(PLAYBOOK_SEARCH_PATHS, { recursive: true });
 
     // Find the playbook by name
-    const found = discovered.find((p: DiscoveredPlaybook) => p.name.toLowerCase() === name.toLowerCase());
+    const found = findDiscoveredPlaybook(name);
 
     if (!found) {
       return c.json({ error: { code: 'NOT_FOUND', message: 'Playbook not found' } }, 404);
     }
 
     // Load the full playbook
-    const playbookInput = loadPlaybookFromFile(found.path, 'system' as EntityId);
+    const playbook = await loadDiscoveredPlaybook(found);
 
-    // Create a Playbook object to return (without actually storing it)
-    const playbook = createPlaybook(playbookInput);
-
-    return c.json({
-      ...playbook,
-      filePath: found.path,
-      directory: found.directory,
-    });
+    // Envelope shape expected by the shared @stoneforge/ui workflow hooks
+    return c.json({ playbook });
   } catch (error) {
     console.error('[stoneforge] Failed to get playbook:', error);
     return c.json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to get playbook' } }, 500);
+  }
+});
+
+// Instantiate a discovered playbook as a workflow.
+// The playbook is referenced by its identifier (the playbook name), matching
+// the POST /api/playbooks/:id/instantiate contract of the shared UI hooks.
+app.post('/api/playbooks/:name/instantiate', async (c) => {
+  try {
+    const name = c.req.param('name');
+    const body = await c.req.json().catch(() => ({}));
+
+    const found = findDiscoveredPlaybook(name);
+    if (!found) {
+      return c.json({ error: { code: 'NOT_FOUND', message: 'Playbook not found' } }, 404);
+    }
+
+    let playbook: Playbook;
+    try {
+      playbook = await loadDiscoveredPlaybook(found);
+    } catch (error) {
+      console.error(`[stoneforge] Failed to load playbook '${name}':`, error);
+      return c.json({
+        error: { code: 'VALIDATION_ERROR', message: `Playbook '${name}' is invalid: ${(error as Error).message}` }
+      }, 400);
+    }
+
+    const createdBy =
+      typeof body?.createdBy === 'string' && body.createdBy
+        ? (body.createdBy as EntityId)
+        : PLAYBOOK_CREATED_BY;
+
+    return await instantiateWorkflowFromPlaybook(
+      playbook,
+      {
+        createdBy,
+        title: body?.title,
+        variables: body?.variables,
+        ephemeral: body?.ephemeral ?? false,
+        tags: body?.tags,
+        metadata: body?.metadata,
+      },
+      filePlaybookLoader
+    );
+  } catch (error) {
+    if ((error as { code?: string }).code === 'NOT_FOUND') {
+      return c.json({ error: { code: 'NOT_FOUND', message: (error as Error).message } }, 404);
+    }
+    if ((error as { code?: string }).code === 'VALIDATION_ERROR') {
+      return c.json({ error: { code: 'VALIDATION_ERROR', message: (error as Error).message } }, 400);
+    }
+    if ((error as { code?: string }).code === 'CYCLE_DETECTED') {
+      return c.json({ error: { code: 'CYCLE_DETECTED', message: (error as Error).message } }, 400);
+    }
+    console.error('[stoneforge] Failed to instantiate playbook:', error);
+    return c.json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to instantiate playbook' } }, 500);
   }
 });
 

@@ -15,14 +15,18 @@ test.describe('TB26: Playbook Browser', () => {
   test('GET /api/playbooks returns list of playbooks', async ({ page }) => {
     const response = await page.request.get('/api/playbooks');
     expect(response.ok()).toBe(true);
-    const playbooks = await response.json();
-    expect(Array.isArray(playbooks)).toBe(true);
+    const body = await response.json();
+    expect(Array.isArray(body.playbooks)).toBe(true);
+    expect(typeof body.total).toBe('number');
+    expect(body.total).toBe(body.playbooks.length);
 
     // Check each playbook has required fields
-    for (const playbook of playbooks) {
+    for (const playbook of body.playbooks) {
+      expect(playbook.id).toBeDefined();
       expect(playbook.name).toBeDefined();
-      expect(playbook.path).toBeDefined();
-      expect(playbook.directory).toBeDefined();
+      expect(playbook.title).toBeDefined();
+      expect(Array.isArray(playbook.steps)).toBe(true);
+      expect(Array.isArray(playbook.variables)).toBe(true);
     }
   });
 
@@ -36,25 +40,104 @@ test.describe('TB26: Playbook Browser', () => {
   test('GET /api/playbooks/:name returns playbook details when exists', async ({ page }) => {
     // First check if any playbooks exist
     const listResponse = await page.request.get('/api/playbooks');
-    const playbooks = await listResponse.json();
+    const list = await listResponse.json();
 
-    if (playbooks.length === 0) {
+    if (list.playbooks.length === 0) {
       test.skip();
       return;
     }
 
     // Get the first playbook's details
-    const response = await page.request.get(`/api/playbooks/${playbooks[0].name}`);
+    const response = await page.request.get(`/api/playbooks/${list.playbooks[0].name}`);
     expect(response.ok()).toBe(true);
-    const playbook = await response.json();
+    const body = await response.json();
 
-    expect(playbook.name).toBe(playbooks[0].name);
-    expect(playbook.title).toBeDefined();
-    expect(playbook.version).toBeDefined();
-    expect(Array.isArray(playbook.steps)).toBe(true);
-    expect(Array.isArray(playbook.variables)).toBe(true);
-    expect(playbook.filePath).toBeDefined();
-    expect(playbook.directory).toBeDefined();
+    expect(body.playbook.name).toBe(list.playbooks[0].name);
+    expect(body.playbook.title).toBeDefined();
+    expect(body.playbook.version).toBeDefined();
+    expect(Array.isArray(body.playbook.steps)).toBe(true);
+    expect(Array.isArray(body.playbook.variables)).toBe(true);
+  });
+
+  test('POST /api/playbooks/:name/instantiate creates a workflow from the playbook', async ({ page }) => {
+    const listResponse = await page.request.get('/api/playbooks');
+    const list = await listResponse.json();
+
+    // The global setup seeds the e2e-release-flow fixture
+    const playbook = list.playbooks.find((p: { id: string }) => p.id === 'e2e-release-flow');
+    if (!playbook) {
+      test.skip();
+      return;
+    }
+
+    const workflowTitle = `E2E Instantiated ${Date.now()}`;
+    const response = await page.request.post(`/api/playbooks/${playbook.id}/instantiate`, {
+      data: { title: workflowTitle },
+    });
+
+    expect(response.status()).toBe(201);
+    const result = await response.json();
+
+    expect(result.workflow.type).toBe('workflow');
+    expect(result.workflow.title).toBe(workflowTitle);
+    expect(result.workflow.playbookId).toBe(playbook.id);
+    expect(Array.isArray(result.tasks)).toBe(true);
+    // The deploy step is conditional on environment=production and the
+    // variable defaults to staging, so only the test suite step is created
+    expect(result.tasks.map((t: { title: string }) => t.title)).toEqual(['Run test suite']);
+    expect(result.skippedSteps).toEqual(['deploy']);
+
+    // The workflow is listed once created
+    const workflowsResponse = await page.request.get('/api/workflows?playbookId=' + playbook.id);
+    const workflows = await workflowsResponse.json();
+    expect(workflows.workflows.some((w: { id: string }) => w.id === result.workflow.id)).toBe(true);
+
+    // Its tasks come back with progress metrics
+    const tasksResponse = await page.request.get(`/api/workflows/${result.workflow.id}/tasks`);
+    const tasksBody = await tasksResponse.json();
+    expect(tasksBody.tasks.length).toBe(result.tasks.length);
+    expect(tasksBody.progress.total).toBe(result.tasks.length);
+    expect(tasksBody.progress.percentage).toBe(0);
+
+    // Cleanup
+    await page.request.delete(`/api/workflows/${result.workflow.id}?force=true`);
+  });
+
+  test('POST /api/playbooks/:name/instantiate honours variables that satisfy step conditions', async ({ page }) => {
+    const workflowTitle = `E2E Production ${Date.now()}`;
+    const response = await page.request.post('/api/playbooks/e2e-release-flow/instantiate', {
+      data: { title: workflowTitle, variables: { environment: 'production' } },
+    });
+
+    expect(response.status()).toBe(201);
+    const result = await response.json();
+
+    expect(result.workflow.title).toBe(workflowTitle);
+    expect(result.resolvedVariables).toEqual({ environment: 'production' });
+    expect(result.tasks.map((t: { title: string }) => t.title)).toEqual([
+      'Run test suite',
+      'Deploy to environment',
+    ]);
+    expect(result.skippedSteps).toEqual([]);
+
+    // Both steps are linked to the workflow, and deploy is blocked by the
+    // test suite step
+    const tasksResponse = await page.request.get(`/api/workflows/${result.workflow.id}/tasks`);
+    const tasksBody = await tasksResponse.json();
+    expect(tasksBody.dependencies).toHaveLength(1);
+    expect(tasksBody.dependencies[0].type).toBe('blocks');
+
+    // Cleanup
+    await page.request.delete(`/api/workflows/${result.workflow.id}?force=true`);
+  });
+
+  test('POST /api/playbooks/:name/instantiate returns 404 for unknown playbook', async ({ page }) => {
+    const response = await page.request.post('/api/playbooks/nonexistent-playbook-12345/instantiate', {
+      data: {},
+    });
+    expect(response.status()).toBe(404);
+    const body = await response.json();
+    expect(body.error.code).toBe('NOT_FOUND');
   });
 
   // ============================================================================
@@ -62,10 +145,11 @@ test.describe('TB26: Playbook Browser', () => {
   //
   // Creation is playbook-only: the modal has no quick mode, requires a
   // playbook to be selected before submitting, and instantiates the selected
-  // playbook. The playbook endpoints are mocked because the Quarry server
-  // only discovers playbooks from the filesystem and does not serve the
-  // CRUD/instantiate API the shared modal uses.
+  // playbook. The first tests mock the playbook endpoints to exercise the
+  // modal UI with a known dataset; the remaining ones run against the Quarry
+  // server and the playbook fixtures seeded by the global setup.
   // ============================================================================
+
 
   test('create modal shows playbook picker and no quick mode', async ({ page }) => {
     const playbook = makePlaybook();
@@ -219,5 +303,103 @@ test.describe('TB26: Playbook Browser', () => {
     expect(calls[0].playbookId).toBe(playbook.id);
     expect(calls[0].title).toBe(workflowTitle);
     expect(calls[0].ephemeral).toBe(true);
+  });
+
+  test('create modal opened from a template card arrives preselected', async ({ page }) => {
+    await page.goto('/workflows');
+    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+
+    await page.getByTestId('playbook-create-e2e-release-flow').click();
+
+    const dialog = page.getByRole('dialog', { name: 'Create Workflow', exact: true });
+    await expect(dialog).toBeVisible({ timeout: 5000 });
+
+    // The playbook is preselected, so its details load immediately
+    await expect(page.getByTestId('create-title-input')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByTestId('create-title-input')).toHaveValue('E2E Release Flow');
+    await expect(page.getByTestId('steps-preview')).toContainText('Run test suite');
+    await expect(page.getByTestId('steps-preview')).toContainText('Deploy to environment');
+    await expect(page.getByTestId('variable-input-environment')).toBeVisible();
+  });
+
+  test('playbook picker lists the server playbooks and selects one', async ({ page }) => {
+    // Open the modal without a preselected playbook (dashboard quick action)
+    await page.goto('/dashboard');
+    await expect(page.getByTestId('dashboard-page')).toBeVisible({ timeout: 30000 });
+    await page.getByTestId('quick-action-create-workflow').click();
+
+    const dialog = page.getByRole('dialog', { name: 'Create Workflow', exact: true });
+    await expect(dialog).toBeVisible({ timeout: 5000 });
+
+    // No playbook selected yet: submission is gated on the selection
+    await expect(page.getByTestId('create-submit-button')).toBeDisabled();
+
+    await page.getByTestId('playbook-picker-trigger').click();
+    await expect(page.getByTestId('playbook-picker-dropdown')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('playbook-option-e2e-release-flow')).toBeVisible();
+    await expect(page.getByTestId('playbook-option-e2e-required-vars')).toBeVisible();
+
+    await page.getByTestId('playbook-option-e2e-release-flow').click();
+
+    // Selecting a playbook loads its details from the playbook endpoint
+    await expect(page.getByTestId('create-title-input')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByTestId('create-title-input')).toHaveValue('E2E Release Flow');
+    await expect(page.getByTestId('create-submit-button')).toBeEnabled();
+  });
+
+  test('required playbook variables gate submission until filled', async ({ page }) => {
+    await page.goto('/workflows');
+    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+
+    await page.getByTestId('playbook-create-e2e-required-vars').click();
+    await expect(page.getByTestId('create-title-input')).toBeVisible({ timeout: 10000 });
+
+    // The required variable has no default, so submission stays disabled
+    await expect(page.getByTestId('variable-input-project')).toBeVisible();
+    await expect(page.getByTestId('create-submit-button')).toBeDisabled();
+
+    await page.getByTestId('variable-input-project').fill('stoneforge');
+    await expect(page.getByTestId('create-submit-button')).toBeEnabled();
+  });
+
+  test('creating a workflow from a playbook creates the playbook steps', async ({ page }) => {
+    await page.goto('/workflows');
+    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+
+    await page.getByTestId('playbook-create-e2e-release-flow').click();
+    await expect(page.getByTestId('create-title-input')).toBeVisible({ timeout: 10000 });
+
+    const workflowTitle = `E2E Playbook Workflow ${Date.now()}`;
+    await page.getByTestId('create-title-input').fill(workflowTitle);
+    await page.getByTestId('create-submit-button').click();
+
+    await expect(
+      page.getByRole('dialog', { name: 'Create Workflow', exact: true })
+    ).not.toBeVisible({ timeout: 10000 });
+
+    // Verify the workflow exists with the (non-conditional) playbook step
+    const listResponse = await page.request.get('/api/workflows?playbookId=e2e-release-flow');
+    const workflows = (await listResponse.json()).workflows;
+    const created = workflows.find((w: { title: string }) => w.title === workflowTitle);
+    expect(created).toBeDefined();
+
+    const tasksResponse = await page.request.get(`/api/workflows/${created.id}/tasks`);
+    const tasksBody = await tasksResponse.json();
+    expect(tasksBody.tasks.map((t: { title: string }) => t.title)).toEqual(['Run test suite']);
+
+    // Cleanup
+    await page.request.delete(`/api/workflows/${created.id}?force=true`);
+  });
+
+  test('create modal can be closed via backdrop click', async ({ page }) => {
+    await page.goto('/workflows');
+    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+
+    await page.getByTestId('playbook-create-e2e-release-flow').click();
+    const dialog = page.getByRole('dialog', { name: 'Create Workflow', exact: true });
+    await expect(dialog).toBeVisible({ timeout: 5000 });
+
+    await page.getByTestId('create-workflow-backdrop').click({ position: { x: 10, y: 10 } });
+    await expect(dialog).not.toBeVisible({ timeout: 5000 });
   });
 });

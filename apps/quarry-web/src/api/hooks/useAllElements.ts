@@ -320,7 +320,7 @@ export function useAllWorkflows() {
       const response = await fetch('/api/workflows?limit=10000');
       if (!response.ok) throw new Error('Failed to fetch workflows');
       const result = await response.json();
-      return result.items as Workflow[];
+      return result.workflows as Workflow[];
     },
     staleTime: Infinity,
     gcTime: Infinity,
