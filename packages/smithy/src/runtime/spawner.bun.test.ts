@@ -1575,3 +1575,158 @@ describe('rate_limited event carries correct executablePath', () => {
     expect(rateLimitEvents[0]!.executablePath).toBe('claude');
   });
 });
+
+// ============================================================================
+// Provider / model override propagation (sf agent start --provider/--model)
+//
+// Pins the spawn-side half of the flag-to-spawner propagation path:
+// SpawnOptions.provider must select the provider that actually runs the
+// session, SpawnOptions.model must reach the provider spawn call, and both
+// must be recorded on the session metadata so callers can verify the
+// effective values.
+// ============================================================================
+
+describe('provider and model override propagation', () => {
+  /** Headless session that emits init, then a result, then ends. */
+  function createInitThenResultSession(): HeadlessSession {
+    let sentInit = false;
+    let sentResult = false;
+    return {
+      sendMessage: () => {},
+      [Symbol.asyncIterator]() {
+        return {
+          async next(): Promise<IteratorResult<AgentMessage>> {
+            if (!sentInit) {
+              sentInit = true;
+              return {
+                done: false,
+                value: {
+                  type: 'system',
+                  subtype: 'init',
+                  sessionId: 'provider-session-override-test',
+                  content: 'Session initialized',
+                  raw: { type: 'system', subtype: 'init', session_id: 'provider-session-override-test' },
+                },
+              };
+            }
+            if (!sentResult) {
+              sentResult = true;
+              await new Promise((resolve) => setTimeout(resolve, 50));
+              return {
+                done: false,
+                value: {
+                  type: 'result',
+                  content: 'Task completed',
+                  raw: { type: 'result', result: 'Task completed' },
+                },
+              };
+            }
+            return { done: true, value: undefined };
+          },
+        };
+      },
+      interrupt: async () => {},
+      close: () => {},
+    };
+  }
+
+  /** Creates a provider whose headless.spawn records the options it receives. */
+  function createRecordingProvider(name: string, calls: HeadlessSpawnOptions[]): AgentProvider {
+    return {
+      name,
+      headless: {
+        name: `${name}-headless`,
+        spawn: async (options: HeadlessSpawnOptions) => {
+          calls.push(options);
+          return createInitThenResultSession();
+        },
+        isAvailable: async () => true,
+      },
+      interactive: createMockInteractiveProvider(),
+      isAvailable: async () => true,
+      getInstallInstructions: () => 'No install needed for mock',
+      listModels: async (): Promise<ModelInfo[]> => [],
+    };
+  }
+
+  test('SpawnOptions.provider runs the session and model reaches the provider spawn call', async () => {
+    const defaultCalls: HeadlessSpawnOptions[] = [];
+    const overrideCalls: HeadlessSpawnOptions[] = [];
+    const defaultProvider = createRecordingProvider('default-mock', defaultCalls);
+    const overrideProvider = createRecordingProvider('override-mock', overrideCalls);
+
+    const spawner = new SpawnerServiceImpl({
+      provider: defaultProvider,
+      workingDirectory: '/tmp',
+      timeout: 5000,
+    });
+
+    const result = await spawner.spawn(testAgentId, 'worker', {
+      mode: 'headless',
+      provider: overrideProvider,
+      model: 'claude-opus-4-6',
+    });
+
+    // The override provider actually ran the session; the default did not.
+    expect(overrideCalls.length).toBe(1);
+    expect(defaultCalls.length).toBe(0);
+
+    // Session metadata reflects the effective overrides.
+    expect(result.session.provider).toBe('override-mock');
+    expect(result.session.model).toBe('claude-opus-4-6');
+
+    // The model reached the provider spawn call.
+    expect(overrideCalls[0].model).toBe('claude-opus-4-6');
+
+    // Let processProviderMessages finish before the test ends.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+
+  test('session records default provider name and no model when no override is set', async () => {
+    const defaultCalls: HeadlessSpawnOptions[] = [];
+    const defaultProvider = createRecordingProvider('default-mock', defaultCalls);
+
+    const spawner = new SpawnerServiceImpl({
+      provider: defaultProvider,
+      workingDirectory: '/tmp',
+      timeout: 5000,
+    });
+
+    const result = await spawner.spawn(testAgentId, 'worker', { mode: 'headless' });
+
+    expect(defaultCalls.length).toBe(1);
+    expect(result.session.provider).toBe('default-mock');
+    expect(result.session.model).toBeUndefined();
+    // No model in the provider spawn call either.
+    expect(defaultCalls[0].model).toBeUndefined();
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+
+  test('public session queries expose provider and model', async () => {
+    const calls: HeadlessSpawnOptions[] = [];
+    const provider = createRecordingProvider('public-mock', calls);
+
+    const spawner = new SpawnerServiceImpl({
+      provider,
+      workingDirectory: '/tmp',
+      timeout: 5000,
+    });
+
+    await spawner.spawn(testAgentId, 'worker', {
+      mode: 'headless',
+      model: 'claude-sonnet-4-5-20250929',
+    });
+
+    const active = spawner.listActiveSessions(testAgentId);
+    expect(active.length).toBe(1);
+    expect(active[0].provider).toBe('public-mock');
+    expect(active[0].model).toBe('claude-sonnet-4-5-20250929');
+
+    const viaGet = spawner.getSession(active[0].id);
+    expect(viaGet?.provider).toBe('public-mock');
+    expect(viaGet?.model).toBe('claude-sonnet-4-5-20250929');
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+});

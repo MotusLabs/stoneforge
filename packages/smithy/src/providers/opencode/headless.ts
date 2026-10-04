@@ -24,8 +24,16 @@ import type { OpencodeClient, ModelSpec } from './server-manager.js';
 /**
  * Parse a composite model ID (e.g., 'anthropic/claude-sonnet-4-5-20250929')
  * into separate providerID and modelID.
+ *
+ * Returns undefined when the ID contains no '/' and cannot be a composite
+ * OpenCode model ID. Note that either segment may still be empty
+ * ('/model' or 'provider/'); callers that need to reject those use the
+ * provider's validateModel() instead.
+ *
+ * Exported so OpenCodeAgentProvider.validateModel() shares this parsing
+ * instead of duplicating the format rules.
  */
-function parseModelId(model: string): ModelSpec | undefined {
+export function parseModelId(model: string): ModelSpec | undefined {
   const slashIndex = model.indexOf('/');
   if (slashIndex === -1) {
     // No slash found - cannot parse as composite ID

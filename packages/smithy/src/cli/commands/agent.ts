@@ -17,6 +17,7 @@ import type { AgentRole, WorkerMode, StewardFocus, AgentMetadata } from '../../t
 import { isValidAgentTier } from '../../types/index.js';
 import type { OrchestratorAPI, AgentEntity } from '../../api/index.js';
 import { isAgentDisabled } from '../../services/agent-registry.js';
+import type { AgentProvider } from '../../providers/types.js';
 
 // ============================================================================
 // Shared Helpers
@@ -87,6 +88,61 @@ function parseTierArgument(raw: string): ParsedTier {
     };
   }
   return { tier: parseInt(value, 10) };
+}
+
+/**
+ * Result of resolving the effective provider/model for `sf agent start`.
+ */
+export interface AgentStartOverrides {
+  /** Effective provider name (--provider flag wins over agent metadata). Undefined = spawner default. */
+  readonly providerName?: string;
+  /** Effective model (--model flag wins over agent metadata). Undefined = provider default. */
+  readonly model?: string;
+  /** Validation error message when a flag value is invalid. */
+  readonly error?: string;
+}
+
+/**
+ * Resolves the effective provider and model for an `sf agent start` spawn.
+ *
+ * Precedence (matching SessionManager.startSession on the server side):
+ *   CLI flag > agent's registered metadata > provider/spawner default.
+ *
+ * Flag values that are empty or whitespace-only are rejected with an error so
+ * the command fails loudly instead of silently falling back. Metadata values
+ * that are empty/whitespace are treated as unset.
+ *
+ * Exported for unit testing the flag-to-spawner propagation path.
+ */
+export function resolveAgentStartOverrides(
+  flags: { provider?: string; model?: string },
+  agentMeta: Record<string, unknown>
+): AgentStartOverrides {
+  const providerFlag = flags.provider?.trim();
+  if (flags.provider !== undefined && !providerFlag) {
+    return {
+      error:
+        'Invalid provider: value must be a non-empty provider name (e.g., claude-code, opencode).',
+    };
+  }
+
+  const modelFlag = flags.model?.trim();
+  if (flags.model !== undefined && !modelFlag) {
+    return {
+      error:
+        'Invalid model: value must be a non-empty model identifier (e.g., claude-sonnet-4-5-20250929).',
+    };
+  }
+
+  const metaProvider =
+    typeof agentMeta.provider === 'string' ? agentMeta.provider.trim() : undefined;
+  const metaModel =
+    typeof agentMeta.model === 'string' ? agentMeta.model.trim() : undefined;
+
+  return {
+    providerName: providerFlag ?? (metaProvider || undefined),
+    model: modelFlag ?? (metaModel || undefined),
+  };
 }
 
 /**
@@ -935,12 +991,13 @@ const agentStartOptions: CommandOption[] = [
   },
   {
     name: 'provider',
-    description: 'Override agent provider for this session',
+    description: 'Agent provider for this session (overrides the agent default; e.g., claude-code, opencode)',
     hasValue: true,
   },
   {
     name: 'model',
-    description: 'Override model for this session (e.g., claude-opus-4-6)',
+    description:
+      'Model for this session (overrides the agent default; format is provider-specific — opencode uses composite <provider>/<model> IDs)',
     hasValue: true,
   },
 ];
@@ -978,7 +1035,7 @@ async function agentStartHandler(
     const agentRole = (meta.agentRole as AgentRole) ?? 'worker';
 
     // Import the spawner service
-    const { createSpawnerService } = await import('../../runtime/index.js');
+    const { createSpawnerService, getProviderRegistry } = await import('../../runtime/index.js');
     const { findStoneforgeDir } = await import('@stoneforge/quarry');
 
     // Parse environment variables
@@ -1012,6 +1069,48 @@ async function agentStartHandler(
       spawnMode = options.mode as 'headless' | 'interactive';
     }
 
+    // Resolve provider/model: CLI flags win over the agent's registered
+    // defaults; anything invalid fails loudly instead of being silently
+    // ignored (previously neither flag reached the spawner).
+    const overrides = resolveAgentStartOverrides(
+      { provider: options.provider, model: options.model },
+      meta
+    );
+    if (overrides.error) {
+      return failure(overrides.error, ExitCode.VALIDATION);
+    }
+
+    const registry = getProviderRegistry();
+
+    // Format-validate the effective model against the effective provider
+    // BEFORE the (slower) availability probe, so a malformed value fails
+    // deterministically with a clear error instead of being silently
+    // dropped by the provider at runtime — where the session would report
+    // the requested model while actually running the provider default
+    // (e.g. a bare model name for opencode, which only understands
+    // composite '<provider>/<model>' IDs). An unknown provider name skips
+    // this and surfaces through getOrThrow's richer error below.
+    if (overrides.model) {
+      const modelProvider = overrides.providerName
+        ? registry.get(overrides.providerName)
+        : undefined;
+      const validator = modelProvider ?? registry.getDefault();
+      const modelError = validator.validateModel?.(overrides.model);
+      if (modelError) {
+        return failure(modelError, ExitCode.VALIDATION);
+      }
+    }
+
+    let providerOverride: AgentProvider | undefined;
+    if (overrides.providerName) {
+      try {
+        providerOverride = await registry.getOrThrow(overrides.providerName);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return failure(`Failed to start agent ${id}: ${message}`, ExitCode.VALIDATION);
+      }
+    }
+
     // Spawn the agent
     const result = await spawner.spawn(id as EntityId, agentRole, {
       initialPrompt: options.prompt,
@@ -1020,6 +1119,8 @@ async function agentStartHandler(
       workingDirectory: options.workdir,
       cols: options.cols ? parseInt(options.cols, 10) : undefined,
       rows: options.rows ? parseInt(options.rows, 10) : undefined,
+      provider: providerOverride,
+      model: overrides.model,
     });
 
     // If task ID is provided, assign the task to this agent
@@ -1052,6 +1153,8 @@ async function agentStartHandler(
         agentId: id,
         status: result.session.status,
         mode: result.session.mode,
+        provider: result.session.provider,
+        model: result.session.model,
         pid: result.session.pid,
         taskId: options.taskId,
       });
@@ -1067,6 +1170,8 @@ async function agentStartHandler(
       `  Provider ID: ${result.session.providerSessionId ?? '-'}`,
       `  Status:      ${result.session.status}`,
       `  Mode:        ${result.session.mode}`,
+      `  Provider:    ${result.session.provider}`,
+      `  Model:       ${result.session.model ?? '(provider default)'}`,
       `  PID:         ${result.session.pid ?? '-'}`,
     ];
     if (options.taskId) {
@@ -1100,8 +1205,20 @@ Options:
   -e, --env <KEY=VALUE>    Environment variable to set
   -t, --taskId <id>        Task ID to assign to this agent
   --stream                 Stream agent output after starting
-  --provider <name>        Override agent provider for this session
-  --model <model>          Override model for this session
+  --provider <name>        Agent provider for this session. Overrides the
+                           agent's registered provider; without it, the
+                           registered provider (or the claude-code default)
+                           is used. Unknown or unavailable providers fail
+                           with an error instead of falling back silently.
+  --model <model>          Model for this session. Overrides the agent's
+                           registered model; without it, the registered model
+                           (or the provider default) is used. Model IDs are
+                           provider-specific: opencode expects composite
+                           '<provider>/<model>' IDs (e.g.,
+                           anthropic/claude-sonnet-4-5-20250929). Values that
+                           are malformed for the effective provider fail with
+                           a validation error instead of silently falling
+                           back to the provider default.
 
 Examples:
   sf agent start el-abc123
@@ -1113,7 +1230,8 @@ Examples:
   sf agent start el-abc123 --taskId el-task456
   sf agent start el-abc123 --stream
   sf agent start el-abc123 --provider opencode
-  sf agent start el-abc123 --model claude-opus-4-6`,
+  sf agent start el-abc123 --model claude-opus-4-6
+  sf agent start el-abc123 --provider opencode --model anthropic/claude-sonnet-4-5-20250929`,
   options: agentStartOptions,
   handler: agentStartHandler as Command['handler'],
 };

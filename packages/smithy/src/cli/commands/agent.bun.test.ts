@@ -9,8 +9,16 @@ import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createStorage, initializeSchema } from '@stoneforge/quarry';
+import { ExitCode } from '@stoneforge/quarry/cli';
 import { createOrchestratorAPI } from '../../api/index.js';
 import { isAgentDisabled } from '../../services/agent-registry.js';
+import { getProviderRegistry } from '../../providers/registry.js';
+import type {
+  AgentProvider,
+  AgentMessage,
+  HeadlessSession,
+  HeadlessSpawnOptions,
+} from '../../providers/types.js';
 import type { EntityId } from '@stoneforge/core';
 import type { AgentMetadata } from '../../types/index.js';
 import {
@@ -24,6 +32,7 @@ import {
   agentDisableCommand,
   agentEnableCommand,
   agentSetTierCommand,
+  resolveAgentStartOverrides,
 } from './agent.js';
 
 describe('Agent Command Structure', () => {
@@ -224,7 +233,7 @@ describe('Agent Command Structure', () => {
       const modelOption = agentStartCommand.options!.find(opt => opt.name === 'model');
       expect(modelOption).toBeDefined();
       expect(modelOption!.hasValue).toBe(true);
-      expect(modelOption!.description).toContain('model');
+      expect(modelOption!.description!.toLowerCase()).toContain('model');
     });
   });
 
@@ -755,6 +764,481 @@ describe('agent tier behavioural', () => {
       expect(tieredLine!).toContain(tiered.id);
       expect(untieredLine!).toMatch(/(^|\s)-(\s|$)/);
       expect(untieredLine!).not.toMatch(/(^|\s)1(\s|$)/);
+    } finally {
+      process.chdir(cwdBefore);
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ============================================================================
+// agent start --provider / --model propagation
+//
+// 'sf agent start' advertises --provider and --model overrides. Historically
+// neither flag reached the local spawner — they were parsed and silently
+// dropped, so spawned agents ran with the wrong provider/model defaults.
+// These tests pin the flag-to-spawner propagation path:
+//   1. resolveAgentStartOverrides() — flag precedence + loud validation
+//   2. the real handler — flags reach provider resolution and invalid values
+//      fail with a clear error (no silent fallback, no spawn)
+//   3. the spawner — SpawnOptions.provider/model reach the provider spawn
+//      call and are recorded on the session (see spawner.bun.test.ts)
+// ============================================================================
+
+describe('resolveAgentStartOverrides', () => {
+  it('returns undefined overrides when no flags and no metadata are set', () => {
+    const result = resolveAgentStartOverrides({}, {});
+    expect(result.error).toBeUndefined();
+    expect(result.providerName).toBeUndefined();
+    expect(result.model).toBeUndefined();
+  });
+
+  it('CLI flags win over agent metadata', () => {
+    const result = resolveAgentStartOverrides(
+      { provider: 'opencode', model: 'gpt-4o' },
+      { provider: 'claude-code', model: 'claude-sonnet-4-5-20250929' }
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.providerName).toBe('opencode');
+    expect(result.model).toBe('gpt-4o');
+  });
+
+  it('falls back to agent metadata when flags are absent', () => {
+    const result = resolveAgentStartOverrides(
+      {},
+      { provider: 'opencode', model: 'claude-opus-4-6' }
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.providerName).toBe('opencode');
+    expect(result.model).toBe('claude-opus-4-6');
+  });
+
+  it('lets a flag override one dimension while metadata supplies the other', () => {
+    const result = resolveAgentStartOverrides(
+      { model: 'claude-opus-4-6' },
+      { provider: 'opencode', model: 'claude-sonnet-4-5-20250929' }
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.providerName).toBe('opencode');
+    expect(result.model).toBe('claude-opus-4-6');
+  });
+
+  it('trims whitespace from flag and metadata values', () => {
+    const result = resolveAgentStartOverrides(
+      { provider: '  opencode  ', model: '  claude-opus-4-6  ' },
+      {}
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.providerName).toBe('opencode');
+    expect(result.model).toBe('claude-opus-4-6');
+  });
+
+  it.each([
+    [''], ['   '], ['\t'],
+  ])('rejects an empty provider flag %j loudly', (badProvider) => {
+    const result = resolveAgentStartOverrides({ provider: badProvider }, {});
+    expect(result.error).toContain('Invalid provider');
+    expect(result.error).toContain('non-empty');
+  });
+
+  it.each([
+    [''], ['   '], ['\t'],
+  ])('rejects an empty model flag %j loudly', (badModel) => {
+    const result = resolveAgentStartOverrides({ model: badModel }, {});
+    expect(result.error).toContain('Invalid model');
+    expect(result.error).toContain('non-empty');
+  });
+
+  it('treats empty metadata values as unset instead of failing', () => {
+    const result = resolveAgentStartOverrides(
+      {},
+      { provider: '   ', model: '' }
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.providerName).toBeUndefined();
+    expect(result.model).toBeUndefined();
+  });
+
+  it('ignores non-string metadata values', () => {
+    const result = resolveAgentStartOverrides(
+      {},
+      { provider: 42, model: { id: 'x' } }
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.providerName).toBeUndefined();
+    expect(result.model).toBeUndefined();
+  });
+});
+
+describe('agent start provider/model behavioural', () => {
+  const CREATOR = 'el-0000' as EntityId;
+
+  /** Creates a tmp workspace with a .stoneforge/stoneforge.db. */
+  async function makeWorkspace(prefix: string) {
+    const tmpRoot = mkdtempSync(join(tmpdir(), prefix));
+    mkdirSync(join(tmpRoot, '.stoneforge'), { recursive: true });
+    const dbPath = join(tmpRoot, '.stoneforge', 'stoneforge.db');
+    const backend = createStorage({ path: dbPath, create: true });
+    initializeSchema(backend);
+    return { tmpRoot, dbPath, api: createOrchestratorAPI(backend) };
+  }
+
+  test('start fails loudly on an unknown --provider instead of ignoring it', async () => {
+    const { tmpRoot, dbPath, api } = await makeWorkspace('sf-start-badprovider-');
+    const cwdBefore = process.cwd();
+    try {
+      const registered = await api.registerWorker({
+        name: 'provider-test-w',
+        workerMode: 'ephemeral',
+        createdBy: CREATOR,
+      });
+      process.chdir(tmpRoot);
+
+      const result = await agentStartCommand.handler!(
+        [registered.id as unknown as string],
+        { db: dbPath, provider: 'not-a-real-provider' } as never
+      );
+      expect(result.exitCode).not.toBe(0);
+      // The error must name the bad provider and list what IS available —
+      // the opposite of the old behaviour where the flag was silently dropped.
+      expect(result.error).toContain("Provider 'not-a-real-provider' is not registered");
+      expect(result.error).toContain('claude-code');
+      // A validation failure, not a generic crash.
+      expect(result.exitCode).toBe(ExitCode.VALIDATION);
+    } finally {
+      process.chdir(cwdBefore);
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  test.each([[''], ['   ']])(
+    'start rejects an empty --provider flag %j before spawning',
+    async (badProvider) => {
+      const { tmpRoot, dbPath, api } = await makeWorkspace('sf-start-emptyprovider-');
+      const cwdBefore = process.cwd();
+      try {
+        const registered = await api.registerWorker({
+          name: 'empty-provider-w',
+          workerMode: 'ephemeral',
+          createdBy: CREATOR,
+        });
+        process.chdir(tmpRoot);
+
+        const result = await agentStartCommand.handler!(
+          [registered.id as unknown as string],
+          { db: dbPath, provider: badProvider } as never
+        );
+        expect(result.exitCode).not.toBe(0);
+        expect(result.error).toContain('Invalid provider');
+      } finally {
+        process.chdir(cwdBefore);
+        rmSync(tmpRoot, { recursive: true, force: true });
+      }
+    }
+  );
+
+  test.each([[''], ['   ']])(
+    'start rejects an empty --model flag %j before spawning',
+    async (badModel) => {
+      const { tmpRoot, dbPath, api } = await makeWorkspace('sf-start-emptymodel-');
+      const cwdBefore = process.cwd();
+      try {
+        const registered = await api.registerWorker({
+          name: 'empty-model-w',
+          workerMode: 'ephemeral',
+          createdBy: CREATOR,
+        });
+        process.chdir(tmpRoot);
+
+        const result = await agentStartCommand.handler!(
+          [registered.id as unknown as string],
+          { db: dbPath, model: badModel } as never
+        );
+        expect(result.exitCode).not.toBe(0);
+        expect(result.error).toContain('Invalid model');
+      } finally {
+        process.chdir(cwdBefore);
+        rmSync(tmpRoot, { recursive: true, force: true });
+      }
+    }
+  );
+
+  test('start resolves the agent metadata provider when no flag is given', async () => {
+    // An agent registered with a bogus provider must fail loudly even
+    // WITHOUT --provider: the metadata default now reaches resolution too
+    // (previously the CLI spawner ignored it entirely and always ran claude).
+    const { tmpRoot, dbPath, api } = await makeWorkspace('sf-start-metaprovider-');
+    const cwdBefore = process.cwd();
+    try {
+      const registered = await api.registerWorker({
+        name: 'bogus-meta-w',
+        workerMode: 'ephemeral',
+        createdBy: CREATOR,
+        provider: 'bogus-meta-provider',
+      });
+      process.chdir(tmpRoot);
+
+      const result = await agentStartCommand.handler!(
+        [registered.id as unknown as string],
+        { db: dbPath } as never
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(result.error).toContain("Provider 'bogus-meta-provider' is not registered");
+    } finally {
+      process.chdir(cwdBefore);
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Malformed model IDs must fail loudly. OpenCode only understands composite
+  // '<provider>/<model>' IDs; its headless provider silently DROPS a model it
+  // cannot parse (parseModelId -> undefined -> sendMessage omits the model),
+  // so without this guard 'sf agent start --provider opencode --model bogus'
+  // would spawn on the provider default while still reporting 'bogus' as the
+  // session model.
+  // -------------------------------------------------------------------------
+
+  test('start rejects a non-composite --model for opencode loudly instead of dropping it', async () => {
+    const { tmpRoot, dbPath, api } = await makeWorkspace('sf-start-badmodel-');
+    const cwdBefore = process.cwd();
+    try {
+      const registered = await api.registerWorker({
+        name: 'bad-model-w',
+        workerMode: 'ephemeral',
+        createdBy: CREATOR,
+      });
+      process.chdir(tmpRoot);
+
+      const result = await agentStartCommand.handler!(
+        [registered.id as unknown as string],
+        { db: dbPath, provider: 'opencode', model: 'claude-sonnet-4' } as never
+      );
+      expect(result.exitCode).toBe(ExitCode.VALIDATION);
+      // The error names the rejected value, the expected format and an example.
+      expect(result.error).toContain('claude-sonnet-4');
+      expect(result.error).toContain("provider 'opencode'");
+      expect(result.error).toContain("'<provider>/<model>'");
+      expect(result.error).toContain('anthropic/claude-sonnet-4-5-20250929');
+    } finally {
+      process.chdir(cwdBefore);
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  test.each([['anthropic/'], ['/claude-sonnet-4'], ['/']])(
+    'start rejects an OpenCode --model %j with empty segments',
+    async (badModel) => {
+      const { tmpRoot, dbPath, api } = await makeWorkspace('sf-start-emptysegment-');
+      const cwdBefore = process.cwd();
+      try {
+        const registered = await api.registerWorker({
+          name: 'empty-segment-w',
+          workerMode: 'ephemeral',
+          createdBy: CREATOR,
+        });
+        process.chdir(tmpRoot);
+
+        const result = await agentStartCommand.handler!(
+          [registered.id as unknown as string],
+          { db: dbPath, provider: 'opencode', model: badModel } as never
+        );
+        expect(result.exitCode).toBe(ExitCode.VALIDATION);
+        expect(result.error).toContain('non-empty');
+      } finally {
+        process.chdir(cwdBefore);
+        rmSync(tmpRoot, { recursive: true, force: true });
+      }
+    }
+  );
+
+  test('a malformed model stored in agent metadata also fails loudly', async () => {
+    // Same silent-fallback risk when the bad value comes from
+    // 'sf agent register --model' instead of the start flag.
+    const { tmpRoot, dbPath, api } = await makeWorkspace('sf-start-badmetamodel-');
+    const cwdBefore = process.cwd();
+    try {
+      const registered = await api.registerWorker({
+        name: 'bad-meta-model-w',
+        workerMode: 'ephemeral',
+        createdBy: CREATOR,
+        provider: 'opencode',
+        model: 'bogus',
+      });
+      process.chdir(tmpRoot);
+
+      const result = await agentStartCommand.handler!(
+        [registered.id as unknown as string],
+        { db: dbPath } as never
+      );
+      expect(result.exitCode).toBe(ExitCode.VALIDATION);
+      expect(result.error).toContain("Invalid model 'bogus'");
+    } finally {
+      process.chdir(cwdBefore);
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Full flag-to-spawner propagation (happy path).
+  //
+  // A recording fake provider is registered in the REAL provider registry so
+  // the actual handler code path runs end to end:
+  //   CLI flags -> resolveAgentStartOverrides -> registry lookup ->
+  //   spawner.spawn(provider, model) -> provider headless.spawn(model) ->
+  //   SpawnedSession + command output metadata.
+  // The assertions fail if the provider/model arguments are removed from the
+  // handler's spawn call (the original bug) or if the spawner stops
+  // forwarding SpawnOptions.model to the provider.
+  // -------------------------------------------------------------------------
+
+  /** Headless session that emits init, then a result, then ends. */
+  function createInitThenResultSession(providerSessionId: string): HeadlessSession {
+    let sentInit = false;
+    let sentResult = false;
+    return {
+      sendMessage: () => {},
+      [Symbol.asyncIterator]() {
+        return {
+          async next(): Promise<IteratorResult<AgentMessage>> {
+            if (!sentInit) {
+              sentInit = true;
+              return {
+                done: false,
+                value: {
+                  type: 'system',
+                  subtype: 'init',
+                  sessionId: providerSessionId,
+                  raw: { type: 'system', subtype: 'init', session_id: providerSessionId },
+                },
+              };
+            }
+            if (!sentResult) {
+              sentResult = true;
+              await new Promise((resolve) => setTimeout(resolve, 50));
+              return {
+                done: false,
+                value: {
+                  type: 'result',
+                  content: 'Task completed',
+                  raw: { type: 'result', result: 'Task completed' },
+                },
+              };
+            }
+            return { done: true, value: undefined };
+          },
+        };
+      },
+      interrupt: async () => {},
+      close: () => {},
+    };
+  }
+
+  /** Registers a provider whose headless.spawn records the options it receives. */
+  function registerRecordingProvider(name: string, calls: HeadlessSpawnOptions[]): void {
+    const provider: AgentProvider = {
+      name,
+      headless: {
+        name: `${name}-headless`,
+        spawn: async (options: HeadlessSpawnOptions) => {
+          calls.push(options);
+          return createInitThenResultSession(`${name}-provider-session`);
+        },
+        isAvailable: async () => true,
+      },
+      interactive: {
+        name: `${name}-interactive`,
+        spawn: async () => {
+          throw new Error('interactive spawn not expected in this test');
+        },
+        isAvailable: async () => true,
+      },
+      isAvailable: async () => true,
+      getInstallInstructions: () => 'No install needed for recording test provider',
+      listModels: async () => [],
+    };
+    getProviderRegistry().register(provider);
+  }
+
+  test('start forwards --provider/--model through the spawner to the provider spawn call', async () => {
+    const FAKE_PROVIDER = 'recording-fake-provider';
+    const FAKE_MODEL = 'fake-vendor/fake-model-1';
+    const calls: HeadlessSpawnOptions[] = [];
+    registerRecordingProvider(FAKE_PROVIDER, calls);
+
+    const { tmpRoot, dbPath, api } = await makeWorkspace('sf-start-propagation-');
+    const cwdBefore = process.cwd();
+    try {
+      const registered = await api.registerWorker({
+        name: 'propagation-w',
+        workerMode: 'ephemeral',
+        createdBy: CREATOR,
+      });
+      process.chdir(tmpRoot);
+
+      const result = await agentStartCommand.handler!(
+        [registered.id as unknown as string],
+        { db: dbPath, provider: FAKE_PROVIDER, model: FAKE_MODEL } as never
+      );
+
+      expect(result.exitCode).toBe(0);
+
+      // The registered fake provider actually ran the session exactly once...
+      expect(calls.length).toBe(1);
+      // ...and the --model flag reached its spawn call verbatim. This fails
+      // if the handler or spawner drops the model override.
+      expect(calls[0]!.model).toBe(FAKE_MODEL);
+
+      // The session record reflects both overrides.
+      const session = result.data as { provider?: string; model?: string; providerSessionId?: string };
+      expect(session.provider).toBe(FAKE_PROVIDER);
+      expect(session.model).toBe(FAKE_MODEL);
+      expect(session.providerSessionId).toBe(`${FAKE_PROVIDER}-provider-session`);
+
+      // And so does the human-readable output.
+      const out = String(result.message ?? '');
+      expect(out).toContain(`Provider:    ${FAKE_PROVIDER}`);
+      expect(out).toContain(`Model:       ${FAKE_MODEL}`);
+
+      // Let the background message loop (init -> result -> close) finish.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    } finally {
+      process.chdir(cwdBefore);
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('start --json output reports the effective provider and model', async () => {
+    const FAKE_PROVIDER = 'recording-fake-provider-json';
+    const FAKE_MODEL = 'fake-vendor/fake-model-json';
+    const calls: HeadlessSpawnOptions[] = [];
+    registerRecordingProvider(FAKE_PROVIDER, calls);
+
+    const { tmpRoot, dbPath, api } = await makeWorkspace('sf-start-propagation-json-');
+    const cwdBefore = process.cwd();
+    try {
+      const registered = await api.registerWorker({
+        name: 'propagation-json-w',
+        workerMode: 'ephemeral',
+        createdBy: CREATOR,
+      });
+      process.chdir(tmpRoot);
+
+      const result = await agentStartCommand.handler!(
+        [registered.id as unknown as string],
+        { db: dbPath, json: true, provider: FAKE_PROVIDER, model: FAKE_MODEL } as never
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(calls.length).toBe(1);
+      expect(calls[0]!.model).toBe(FAKE_MODEL);
+
+      const payload = result.data as Record<string, unknown>;
+      expect(payload.provider).toBe(FAKE_PROVIDER);
+      expect(payload.model).toBe(FAKE_MODEL);
+      expect(payload.status).toBe('running');
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
     } finally {
       process.chdir(cwdBefore);
       rmSync(tmpRoot, { recursive: true, force: true });
