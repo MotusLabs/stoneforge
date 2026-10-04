@@ -240,9 +240,11 @@ test.describe('TB29: Create Library', () => {
     const finalResponse = await page.request.get('/api/libraries');
     const finalLibraries = await finalResponse.json();
     expect(finalLibraries.length).toBe(initialCount + 1);
-    expect(finalLibraries.find((record: { name: string }) => record.name === uniqueName)).toMatchObject({
-      createdBy: 'el-0000',
-    });
+    // The dialog assigns the app's current user (first human entity); do not
+    // pin createdBy to a specific id, just assert a creator was recorded.
+    const createdLibrary = finalLibraries.find((record: { name: string }) => record.name === uniqueName);
+    expect(createdLibrary).toBeDefined();
+    expect(createdLibrary?.createdBy).toMatch(/^el-/);
   });
 
   test('submit button is disabled without required fields', async ({ page }) => {

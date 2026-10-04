@@ -234,23 +234,33 @@ test.describe('TB70: Deep-Link Navigation', () => {
   // ============================================================================
   test.describe('Workflows Page', () => {
     test('navigating to /workflows?selected=<id> opens workflow detail', async ({ page }) => {
-      // First get a workflow ID
+      // Create a workflow so the deep link has a real target. Workflows require
+      // an initial task (TB122); POST /api/workflows accepts initialTask details.
+      const created = await page.request.post('/api/workflows', {
+        data: {
+          title: `Deep Link Workflow ${Date.now()}`,
+          createdBy: 'el-0000',
+          initialTask: { title: `Deep Link Task ${Date.now()}`, createdBy: 'el-0000' },
+        },
+      });
+      expect(created.ok()).toBe(true);
+      const workflow = await created.json();
+
+      // The quarry workflows endpoint currently returns a bare array (see
+      // workflows.spec.ts). It does NOT use the { items } pagination envelope
+      // of tasks/entities/documents — guard so a shape change fails loudly
+      // instead of silently skipping.
       const response = await page.request.get('/api/workflows?limit=1');
-      const data = await response.json();
+      const workflows = await response.json();
+      expect(Array.isArray(workflows), 'GET /api/workflows must return an array').toBe(true);
+      expect(workflows.some((w: { id: string }) => w.id === workflow.id)).toBe(true);
 
-      if (!data.items || data.items.length === 0) {
-        test.skip();
-        return;
-      }
-
-      const workflowId = data.items[0].id;
-
-      // Navigate directly with selected param
-      await page.goto(`/workflows?selected=${workflowId}`);
-      await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
-
-      // Workflow detail should be visible
-      await expect(page.getByTestId('workflow-detail-panel')).toBeVisible({ timeout: 10000 });
+      // Navigate directly with selected param. NOTE: this currently renders the
+      // ElementNotFound state instead, because useWorkflowDetail expects
+      // { workflow } while the quarry endpoint returns a bare object — tracked
+      // by el-3qfp8e. The assertion below states the intended behavior.
+      await page.goto(`/workflows?selected=${workflow.id}`);
+      await expect(page.getByTestId('workflow-detail-page')).toBeVisible({ timeout: 10000 });
     });
 
     test('navigating to non-existent workflow shows Not Found', async ({ page }) => {

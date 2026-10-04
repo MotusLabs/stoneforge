@@ -1,5 +1,21 @@
 import { test, expect } from '@playwright/test';
 
+/**
+ * The graph toolbar and legend only render when at least one ready or blocked
+ * task exists. Tests that assert on the toolbar/legend without their own data
+ * guard call this to seed a task in the otherwise-empty test database.
+ */
+async function ensureGraphHasTasks(page: import('@playwright/test').Page) {
+  const readyResponse = await page.request.get('/api/tasks/ready');
+  const readyTasks = await readyResponse.json();
+  if (Array.isArray(readyTasks) && readyTasks.length > 0) return;
+
+  const created = await page.request.post('/api/tasks', {
+    data: { title: `Graph fixture task ${Date.now()}`, createdBy: 'el-0000' },
+  });
+  expect(created.ok()).toBe(true);
+}
+
 test.describe('TB8: Dependency Graph Lens', () => {
   test('dependency tree endpoint is accessible', async ({ page }) => {
     // First get a task to test with
@@ -156,8 +172,9 @@ test.describe('TB43: Dependency Graph - Filter & Search', () => {
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByText('Loading tasks...')).not.toBeVisible({ timeout: 10000 });
 
-    // Check placeholder text
-    await expect(page.getByTestId('graph-search-input')).toHaveAttribute('placeholder', 'Search by title or ID...');
+    // Check placeholder text (toolbar was simplified during the responsive
+    // graph rework — the input now uses a short placeholder)
+    await expect(page.getByTestId('graph-search-input')).toHaveAttribute('placeholder', 'Search...');
   });
 
   test('status filter button is displayed', async ({ page }) => {
@@ -604,6 +621,7 @@ test.describe('TB44: Dependency Graph - API Endpoints', () => {
 test.describe('TB133: Dependency Graph - Read-Only Mode', () => {
   // Helper function to wait for the dependency graph page to stabilize
   async function waitForGraphPageReady(page: import('@playwright/test').Page) {
+    await ensureGraphHasTasks(page);
     await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     // Wait for toolbar to be visible (indicates loading is complete)
@@ -770,6 +788,7 @@ test.describe('TB133: Dependency Graph - Read-Only Mode', () => {
 test.describe('TB115a: Edge Type Labels', () => {
   // Helper function to wait for the dependency graph page to stabilize
   async function waitForGraphPageReady(page: import('@playwright/test').Page) {
+    await ensureGraphHasTasks(page);
     await page.goto('/dependencies');
     await expect(page.getByTestId('dependency-graph-page')).toBeVisible({ timeout: 10000 });
     // Wait for toolbar to be visible (indicates loading is complete)
