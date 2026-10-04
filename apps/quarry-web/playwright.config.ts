@@ -29,6 +29,12 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   workers: process.env.CI ? 1 : undefined,
+  // 60s per test: even with the global-setup Vite warmup (tests/warm-vite.ts),
+  // a fresh browser context's first navigation re-fetches the whole dev-mode
+  // module graph through Vite, and when sibling suites saturate the pod those
+  // loads can exceed the 30s default (observed as `page.goto: Test timeout`).
+  // 60s absorbs the spike; the warmup keeps the typical first load at ~1-5s.
+  timeout: 60_000,
   reporter: 'list',
   globalSetup: './tests/global-setup.ts',
   globalTeardown: './tests/global-teardown.ts',

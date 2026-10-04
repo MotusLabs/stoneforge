@@ -91,17 +91,27 @@ populating Vite's in-memory transform cache. A cold full-graph warmup takes
 roughly 25–35s on this hardware; every worker navigation afterwards is a
 warm-cache load measured in seconds.
 
+The warmup removes the dominant cost (the on-demand transforms), but a fresh
+browser context still re-fetches the whole dev-mode module graph through Vite
+on its first navigation, roughly a thousand small requests. When sibling test
+suites saturate the pod, even those cache-hit loads can exceed a 30s test
+budget (observed as `page.goto: Test timeout of 30000ms exceeded`). Both app
+configs therefore also set `timeout: 60_000`. Note the binding constraint is
+the per-test timeout, not `navigationTimeout` — raising only
+`navigationTimeout` does nothing for this family.
+
 Consequences for writing specs:
 
 - Navigate with `page.goto('/route')` against the configured `baseURL`. Routes
   reached that way are warmed automatically, including routes added by future
   specs — the list is discovered from the specs, not maintained by hand.
-- Do not reach for per-test retries or inflated per-test navigation timeouts
-  to paper over a slow first navigation; report a warmup gap instead (for
-  example a route built from a template literal, which the scanner cannot see).
+- Do not reach for per-test retries or further timeout inflation to paper over
+  a slow first navigation; report a warmup gap instead (for example a route
+  built from a template literal, which the scanner cannot see).
 - `E2E_SKIP_WARMUP=1` disables the warmup for A/B comparisons and
-  emergencies. With it set, cold-cache first navigations under parallel load
-  can time out again — that is the old behavior, not a bug in your test.
+  emergencies. With it set, cold-cache first navigations take the full
+  25–50s again under parallel load — that is the old behavior, not a bug in
+  your test.
 
 This applies identically to `apps/quarry-web` (same helper, same global-setup
 call). The convention is also recorded in the Test Runner Convention document
