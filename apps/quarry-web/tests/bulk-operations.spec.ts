@@ -11,7 +11,7 @@ test.describe('TB15: Bulk Operations', () => {
   // Helper to get first entity
   async function getFirstEntity(page: import('@playwright/test').Page): Promise<{ id: string } | null> {
     const response = await page.request.get('/api/entities');
-    const entities = (await response.json()).items;
+    const { items: entities } = await response.json();
     return entities.length > 0 ? entities[0] : null;
   }
 
@@ -173,6 +173,11 @@ test.describe('TB15: Bulk Operations', () => {
     // Open status dropdown and select "In Progress"
     await page.getByTestId('bulk-status-button').click();
     await expect(page.getByTestId('bulk-status-options')).toBeVisible();
+    // Check every option receives pointer events above the sticky table header.
+    const statusOptions = page.getByTestId('bulk-status-options').getByRole('button');
+    for (const option of await statusOptions.all()) {
+      await option.click({ trial: true });
+    }
     await page.getByTestId('bulk-status-option-in_progress').click();
 
     // Wait for update to complete

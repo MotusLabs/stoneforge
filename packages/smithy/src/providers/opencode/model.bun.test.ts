@@ -1,22 +1,12 @@
 /**
  * OpenCode Model Tests
  *
- * Tests for model listing and passthrough functionality.
+ * Tests for model listing, composite-ID parsing and format validation.
  */
 
 import { describe, it, expect } from 'bun:test';
-
-// Test the parseModelId utility logic (inline since it's not exported)
-function parseModelId(model: string): { providerID: string; modelID: string } | undefined {
-  const slashIndex = model.indexOf('/');
-  if (slashIndex === -1) {
-    return undefined;
-  }
-  return {
-    providerID: model.slice(0, slashIndex),
-    modelID: model.slice(slashIndex + 1),
-  };
-}
+import { parseModelId } from './headless.js';
+import { OpenCodeAgentProvider } from './index.js';
 
 describe('OpenCode Model ID Parsing', () => {
   it('should parse valid composite model ID', () => {
@@ -59,6 +49,45 @@ describe('OpenCode Model ID Parsing', () => {
   it('should handle empty string', () => {
     const result = parseModelId('');
     expect(result).toBeUndefined();
+  });
+});
+
+describe('OpenCodeAgentProvider.validateModel', () => {
+  const provider = new OpenCodeAgentProvider();
+
+  it('accepts a composite <provider>/<model> ID', () => {
+    expect(provider.validateModel?.('anthropic/claude-sonnet-4-5-20250929')).toBeUndefined();
+  });
+
+  it('accepts a multi-slash ID (model segment may contain slashes)', () => {
+    expect(provider.validateModel?.('opencode/gpt-5/nano')).toBeUndefined();
+  });
+
+  it('rejects a bare model name without a provider segment', () => {
+    const error = provider.validateModel?.('claude-sonnet-4');
+    expect(error).toBeDefined();
+    expect(error).toContain("claude-sonnet-4");
+    expect(error).toContain("'<provider>/<model>'");
+    // The message must be actionable on its own.
+    expect(error).toContain('anthropic/claude-sonnet-4-5-20250929');
+  });
+
+  it.each([
+    ['/model-name'],            // empty provider segment
+    ['provider/'],              // empty model segment
+    ['   /model-name'],         // whitespace-only provider segment
+    ['provider/   '],           // whitespace-only model segment
+    ['/'],                      // both segments empty
+  ])('rejects %j with empty segments', (badModel) => {
+    const error = provider.validateModel?.(badModel);
+    expect(error).toBeDefined();
+    expect(error).toContain(badModel!);
+    expect(error).toContain('non-empty');
+  });
+
+  it('error messages name the provider so CLI failures are self-explanatory', () => {
+    const error = provider.validateModel?.('bogus');
+    expect(error).toContain("provider 'opencode'");
   });
 });
 

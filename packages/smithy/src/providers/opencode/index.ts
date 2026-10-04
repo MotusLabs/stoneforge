@@ -8,11 +8,11 @@
  */
 
 import type { AgentProvider, HeadlessProvider, InteractiveProvider, ModelInfo } from '../types.js';
-import { OpenCodeHeadlessProvider } from './headless.js';
+import { OpenCodeHeadlessProvider, parseModelId } from './headless.js';
 import { OpenCodeInteractiveProvider } from './interactive.js';
 import { serverManager } from './server-manager.js';
 
-export { OpenCodeHeadlessProvider } from './headless.js';
+export { OpenCodeHeadlessProvider, parseModelId } from './headless.js';
 export { OpenCodeInteractiveProvider } from './interactive.js';
 export { OpenCodeEventMapper } from './event-mapper.js';
 export type { OpenCodeEvent } from './event-mapper.js';
@@ -51,5 +51,32 @@ export class OpenCodeAgentProvider implements AgentProvider {
 
   async listModels(): Promise<ModelInfo[]> {
     return serverManager.listModels({ port: this.config?.port });
+  }
+
+  /**
+   * OpenCode model IDs are composite '<providerID>/<modelID>' strings
+   * (e.g., 'anthropic/claude-sonnet-4-5-20250929'). The headless provider
+   * cannot apply a model it cannot parse into those two segments — it
+   * silently drops it and the session runs on the server's default model —
+   * so structurally invalid IDs are rejected here for callers that want to
+   * fail loudly before spawning. This does NOT check the model actually
+   * exists in any catalog.
+   */
+  validateModel(model: string): string | undefined {
+    const example = "e.g., 'anthropic/claude-sonnet-4-5-20250929'";
+    const spec = parseModelId(model);
+    if (!spec) {
+      return (
+        `Invalid model '${model}' for provider 'opencode': OpenCode models are ` +
+        `composite '<provider>/<model>' IDs (${example}).`
+      );
+    }
+    if (!spec.providerID.trim() || !spec.modelID.trim()) {
+      return (
+        `Invalid model '${model}' for provider 'opencode': both segments of ` +
+        `the '<provider>/<model>' ID must be non-empty (${example}).`
+      );
+    }
+    return undefined;
   }
 }

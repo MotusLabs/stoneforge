@@ -1,4 +1,10 @@
 import { test, expect } from '@playwright/test';
+import {
+  makePlaybook,
+  mockPlaybookRoutes,
+  mockWorkflowRoutes,
+  openCreateWorkflowModalFromTemplate,
+} from './helpers/create-workflow-modal';
 
 /**
  * TB122: Workflows Must Have Task Children
@@ -268,128 +274,125 @@ test.describe('TB122: Workflows Must Have Task Children', () => {
 
   // ============================================================================
   // UI Tests
+  //
+  // Creation is playbook-only: a workflow always gets its tasks from the
+  // selected playbook's steps. The modal previews those steps and the server
+  // rejects playbooks with no steps. Playbook endpoints are mocked because the
+  // Quarry server only serves filesystem discovery for playbooks, not the
+  // CRUD/instantiate API the shared modal uses.
   // ============================================================================
 
   test.describe('UI - Create Workflow Modal', () => {
-    test('Create Workflow button is visible on workflows page', async ({ page }) => {
+    test('Create Workflow button is visible on playbook cards', async ({ page }) => {
+      const playbook = makePlaybook();
+      await mockPlaybookRoutes(page, { playbooks: [playbook] });
+
       await page.goto('/workflows');
       await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
-      await expect(page.getByTestId('create-workflow-button')).toBeVisible();
+      await expect(page.getByTestId(`playbook-create-${playbook.id}`)).toBeVisible();
     });
 
-    test('clicking Create button opens modal', async ({ page }) => {
-      await page.goto('/workflows');
-      await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+    test('clicking Create Workflow on a playbook opens the modal', async ({ page }) => {
+      const playbook = makePlaybook();
+      await mockPlaybookRoutes(page, { playbooks: [playbook] });
 
-      await page.getByTestId('create-workflow-button').click();
-      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
+      await openCreateWorkflowModalFromTemplate(page, playbook);
+      await expect(page.getByTestId('create-title-input')).toBeVisible();
     });
 
-    test('Quick Create mode allows creating workflow with 3 default tasks', async ({ page }) => {
-      await page.goto('/workflows');
-      await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+    test('create modal previews the playbook steps that become tasks', async ({ page }) => {
+      const playbook = makePlaybook({
+        steps: [
+          { id: 'step-1', title: 'First Step' },
+          { id: 'step-2', title: 'Second Step' },
+          { id: 'step-3', title: 'Third Step' },
+        ],
+      });
+      await mockPlaybookRoutes(page, { playbooks: [playbook] });
 
-      await page.getByTestId('create-workflow-button').click();
-      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
+      await openCreateWorkflowModalFromTemplate(page, playbook);
 
-      const workflowTitle = `UI Quick Workflow ${Date.now()}`;
-      await page.getByTestId('create-title-input').fill(workflowTitle);
+      // Every step is listed — these become the workflow's tasks
+      const stepsPreview = page.getByTestId('steps-preview');
+      await expect(stepsPreview).toBeVisible();
+      await expect(stepsPreview).toContainText('Steps (3)');
+      await expect(stepsPreview).toContainText('First Step');
+      await expect(stepsPreview).toContainText('Second Step');
+      await expect(stepsPreview).toContainText('Third Step');
+    });
 
-      // Quick mode should be default and have submit enabled
-      await expect(page.getByTestId('mode-quick')).toHaveClass(/bg-white/);
-      await expect(page.getByTestId('create-submit-button')).toBeEnabled();
+    test('instantiating a playbook with no steps is rejected', async ({ page }) => {
+      const playbook = makePlaybook({ steps: [] });
+      await mockPlaybookRoutes(page, {
+        playbooks: [playbook],
+        // Mirrors the TB122 server guard: workflows must have at least one task
+        instantiateError: {
+          status: 400,
+          code: 'VALIDATION_ERROR',
+          message:
+            'Cannot instantiate workflow: playbook has no steps defined. Workflows must have at least one task.',
+        },
+      });
 
-      // Submit
+      await openCreateWorkflowModalFromTemplate(page, playbook);
       await page.getByTestId('create-submit-button').click();
 
-      // Modal should close
-      await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible({ timeout: 5000 });
-
-      // Workflow should appear in list
-      await expect(page.getByText(workflowTitle)).toBeVisible({ timeout: 5000 });
-
-      // Cleanup
-      const workflowsResponse = await page.request.get('/api/workflows');
-      const workflows = await workflowsResponse.json();
-      const createdWorkflow = workflows.find((w: { title: string }) => w.title === workflowTitle);
-      if (createdWorkflow) {
-        await page.request.delete(`/api/workflows/${createdWorkflow.id}?force=true`);
-      }
+      // The error is surfaced in the modal, which stays open
+      await expect(
+        page.getByText('Workflows must have at least one task.')
+      ).toBeVisible({ timeout: 5000 });
+      await expect(
+        page.getByRole('dialog', { name: 'Create Workflow', exact: true })
+      ).toBeVisible();
     });
   });
 
-  test.describe('UI - Workflow Detail Panel', () => {
-    let workflowId: string;
-    let workflowTitle: string;
+  test.describe('UI - Workflow Detail View', () => {
+    // The workflows page renders an inline detail view for the selected
+    // workflow, listing its tasks. The last-task deletion guard itself is
+    // enforced by the API (see the can-delete-task tests above). The workflow
+    // endpoints are mocked because the shared UI hooks expect envelope
+    // responses the Quarry server does not serve.
 
-    test.beforeEach(async ({ page }) => {
-      // Create a workflow with one task via API
-      workflowTitle = `Test Workflow ${Date.now()}`;
-      const response = await page.request.post('/api/workflows', {
-        data: {
-          title: workflowTitle,
-          createdBy: 'system',
-          initialTask: { title: 'Only Task' },
-        },
-      });
-      const created = await response.json();
-      workflowId = created.id;
-    });
+    test('detail view shows the workflow task', async ({ page }) => {
+      const workflow = {
+        id: 'wf-single-task',
+        title: 'Single Task Workflow',
+        tasks: [{ id: 'task-only', title: 'Only Task' }],
+      };
+      await mockWorkflowRoutes(page, { workflows: [workflow] });
 
-    test.afterEach(async ({ page }) => {
-      // Cleanup
-      await page.request.delete(`/api/workflows/${workflowId}?force=true`);
-    });
-
-    test('shows last-task warning when workflow has only one task', async ({ page }) => {
-      await page.goto('/workflows');
+      await page.goto('/workflows?tab=active');
       await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
-      // Click on the workflow to open detail panel
-      await page.getByText(workflowTitle).first().click();
-
-      // Wait for detail panel
-      await expect(page.getByTestId('workflow-detail-panel')).toBeVisible({ timeout: 5000 });
-
-      // Should show the last task warning
-      await expect(page.getByTestId('last-task-warning')).toBeVisible();
-      await expect(page.getByText('Only one task remaining')).toBeVisible();
+      // Click on the workflow card to open the detail view
+      await page.getByTestId(`workflow-card-${workflow.id}`).click();
+      await expect(page.getByTestId('workflow-detail-page')).toBeVisible({ timeout: 5000 });
+      await expect(page.getByTestId('workflow-progress-dashboard')).toBeVisible();
+      await expect(page.getByTestId('workflow-task-task-only')).toBeVisible();
     });
 
-    test('does not show warning when workflow has multiple tasks', async ({ page }) => {
-      // Create a workflow with two tasks
-      const multiResponse = await page.request.post('/api/workflows/instantiate', {
-        data: {
-          playbook: {
-            name: 'two-step-playbook',
-            version: '1.0.0',
-            variables: [],
-            steps: [
-              { id: 'step-1', title: 'First Step' },
-              { id: 'step-2', title: 'Second Step' },
-            ],
-          },
-          createdBy: 'system',
-          title: `Multi-Task Workflow ${Date.now()}`,
-        },
-      });
-      const result = await multiResponse.json();
-      const multiWorkflowId = result.workflow.id;
-      const multiWorkflowTitle = result.workflow.title;
+    test('detail view shows every task of a multi-task workflow', async ({ page }) => {
+      const workflow = {
+        id: 'wf-multi-task',
+        title: 'Multi Task Workflow',
+        tasks: [
+          { id: 'task-first', title: 'First Step' },
+          { id: 'task-second', title: 'Second Step' },
+        ],
+      };
+      await mockWorkflowRoutes(page, { workflows: [workflow] });
 
-      await page.goto('/workflows');
+      await page.goto('/workflows?tab=active');
       await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
 
-      // Click on the multi-task workflow
-      await page.getByText(multiWorkflowTitle).first().click();
-      await expect(page.getByTestId('workflow-detail-panel')).toBeVisible({ timeout: 5000 });
+      await page.getByTestId(`workflow-card-${workflow.id}`).click();
+      await expect(page.getByTestId('workflow-detail-page')).toBeVisible({ timeout: 5000 });
 
-      // Should NOT show the last task warning
-      await expect(page.getByTestId('last-task-warning')).not.toBeVisible();
-
-      // Cleanup
-      await page.request.delete(`/api/workflows/${multiWorkflowId}?force=true`);
+      // Both tasks are listed
+      await expect(page.getByTestId('workflow-task-task-first')).toBeVisible();
+      await expect(page.getByTestId('workflow-task-task-second')).toBeVisible();
     });
   });
 });

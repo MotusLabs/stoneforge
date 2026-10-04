@@ -37,6 +37,8 @@ export function PopoutTerminalPage() {
   const urlAgentName = search.name as string | undefined;
   const urlAgentRole = search.role as AgentRole | undefined;
   const urlWorkerMode = search.mode as WorkerMode | undefined;
+  // `osc52=0` opts this mount out of OSC 52 clipboard copy handling
+  const enableOsc52Copy = search.osc52 !== '0';
 
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
 
@@ -276,6 +278,7 @@ export function PopoutTerminalPage() {
             interactive={true}
             autoFocus={true}
             controlsResize={true}
+            enableOsc52Copy={enableOsc52Copy}
           />
         ) : (
           <StreamViewer

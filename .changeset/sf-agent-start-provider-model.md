@@ -1,0 +1,7 @@
+---
+"@stoneforge/smithy": patch
+---
+
+`sf agent start` now forwards `--provider` and `--model` to the local spawner instead of silently ignoring them. Resolution follows the same precedence as server-side session starts: CLI flag > the agent's registered provider/model (`sf agent register --provider/--model`) > default (`claude-code`, provider-default model). Previously neither flag reached the spawner and the agent's registered provider/model were ignored too, so spawned sessions could run with the wrong provider/model defaults.
+
+Invalid values fail loudly with a validation error instead of falling back silently: unknown or unavailable provider names report `Provider '...' is not registered` (or not available, with install instructions) and list the registered providers; empty/whitespace `--provider`/`--model` values are rejected; and malformed model IDs for the effective provider are rejected through a new optional `AgentProvider.validateModel()` hook — OpenCode implements it because it only understands composite `<provider>/<model>` IDs (e.g., `anthropic/claude-sonnet-4-5-20250929`) and its headless provider silently drops unparseable model names, which previously let a session run on the provider default while still reporting the requested model. `SpawnedSession` now records the effective `provider` (name) and `model`, so the session record and `sf agent start` output (including `--json`) reflect the overrides that were applied.

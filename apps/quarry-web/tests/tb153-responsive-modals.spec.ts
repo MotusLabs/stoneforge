@@ -15,6 +15,11 @@ import {
   setViewport,
   waitForResponsiveUpdate,
 } from './helpers/responsive';
+import {
+  makePlaybook,
+  mockPlaybookRoutes,
+  openCreateWorkflowModalFromTemplate,
+} from './helpers/create-workflow-modal';
 
 test.describe('TB153: Responsive Modals & Dialogs', () => {
   test.describe('CreateTaskModal', () => {
@@ -127,17 +132,20 @@ test.describe('TB153: Responsive Modals & Dialogs', () => {
 
   test.describe('CreateWorkflowModal', () => {
     test.describe('Desktop Viewport', () => {
+      const playbook = makePlaybook();
+
       test.beforeEach(async ({ page }) => {
         await setViewport(page, '2xl');
-        await page.goto('/workflows');
-        await waitForResponsiveUpdate(page, 300);
+        // Creation is playbook-only: the modal opens from a playbook template
+        // card (mocked, since the Quarry server does not serve the playbook
+        // CRUD/instantiate API the shared modal uses). The helper performs
+        // the navigation itself.
+        await mockPlaybookRoutes(page, { playbooks: [playbook] });
       });
 
       test('should show centered modal on desktop', async ({ page }) => {
-        // Click create workflow button
-        const createButton = page.getByTestId('create-workflow-button');
-        await expect(createButton).toBeVisible();
-        await createButton.click();
+        test.setTimeout(60000);
+        await openCreateWorkflowModalFromTemplate(page, playbook);
 
         // Modal should be visible
         const modal = page.getByRole('dialog', { name: 'Create Workflow', exact: true });

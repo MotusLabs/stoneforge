@@ -82,6 +82,7 @@ export function BulkActionMenu({
         {selectedCount} selected
       </span>
 
+      {/* Dropdowns must stack above the task list's sticky z-10 header. */}
       {/* Status dropdown */}
       <div className="relative" ref={statusRef}>
         <button
@@ -95,7 +96,7 @@ export function BulkActionMenu({
         </button>
         {isStatusOpen && (
           <div
-            className="absolute z-10 mt-1 bg-white border border-gray-200 rounded-md shadow-lg py-1 min-w-32"
+            className="absolute z-20 mt-1 bg-white border border-gray-200 rounded-md shadow-lg py-1 min-w-32"
             data-testid="bulk-status-options"
           >
             {STATUS_OPTIONS.map((option) => (
@@ -128,7 +129,7 @@ export function BulkActionMenu({
         </button>
         {isPriorityOpen && (
           <div
-            className="absolute z-10 mt-1 bg-white border border-gray-200 rounded-md shadow-lg py-1 min-w-32"
+            className="absolute z-20 mt-1 bg-white border border-gray-200 rounded-md shadow-lg py-1 min-w-32"
             data-testid="bulk-priority-options"
           >
             {PRIORITY_OPTIONS.map((option) => (

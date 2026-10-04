@@ -1,4 +1,11 @@
 import { test, expect } from '@playwright/test';
+import {
+  makePlaybook,
+  mockPlaybookRoutes,
+  openCreateWorkflowModal,
+  selectPlaybookInModal,
+  type InstantiateCall,
+} from './helpers/create-workflow-modal';
 
 test.describe('TB26: Playbook Browser', () => {
   // ============================================================================
@@ -52,270 +59,165 @@ test.describe('TB26: Playbook Browser', () => {
 
   // ============================================================================
   // UI Tests - Create Modal with Playbook Browser
+  //
+  // Creation is playbook-only: the modal has no quick mode, requires a
+  // playbook to be selected before submitting, and instantiates the selected
+  // playbook. The playbook endpoints are mocked because the Quarry server
+  // only discovers playbooks from the filesystem and does not serve the
+  // CRUD/instantiate API the shared modal uses.
   // ============================================================================
 
-  test('create modal opens and shows mode toggle', async ({ page }) => {
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+  test('create modal shows playbook picker and no quick mode', async ({ page }) => {
+    const playbook = makePlaybook();
+    await mockPlaybookRoutes(page, { playbooks: [playbook] });
 
-    // Open create modal
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
+    await openCreateWorkflowModal(page);
 
-    // Check mode toggle exists
-    await expect(page.getByTestId('mode-quick')).toBeVisible();
-    await expect(page.getByTestId('mode-playbook')).toBeVisible();
+    // The playbook picker is the first required field
+    await expect(page.getByTestId('playbook-picker')).toBeVisible({ timeout: 5000 });
+
+    // There is no quick/playbook mode toggle anymore
+    await expect(page.getByTestId('mode-quick')).toHaveCount(0);
+    await expect(page.getByTestId('mode-playbook')).toHaveCount(0);
+
+    // The workflow title input only appears after a playbook is selected
+    await expect(page.getByTestId('create-title-input')).toHaveCount(0);
   });
 
-  test('quick mode is default and shows quick workflow create form', async ({ page }) => {
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+  test('submit button is disabled until a playbook is selected', async ({ page }) => {
+    const playbook = makePlaybook();
+    await mockPlaybookRoutes(page, { playbooks: [playbook] });
 
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
+    await openCreateWorkflowModal(page);
 
-    // Quick mode should be active
-    await expect(page.getByTestId('mode-quick')).toHaveClass(/bg-white/);
+    // No playbook selected: submit is disabled
+    await expect(page.getByTestId('create-submit-button')).toBeVisible();
+    await expect(page.getByTestId('create-submit-button')).toBeDisabled();
 
-    // Quick workflow create inputs should be visible
-    await expect(page.getByTestId('create-title-input')).toBeVisible();
-    await expect(page.getByTestId('create-playbook-input')).toBeVisible();
-  });
-
-  test('switching to playbook mode shows playbook picker', async ({ page }) => {
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
-
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
-
-    // Switch to playbook mode
-    await page.getByTestId('mode-playbook').click();
-
-    // Playbook picker should appear (may be loading, empty, or have options)
-    const picker = page.getByTestId('playbook-picker');
-    const loading = page.getByTestId('playbook-picker-loading');
-    const empty = page.getByTestId('playbook-picker-empty');
-
-    // Wait for one of these to be visible
-    await expect(picker.or(loading).or(empty)).toBeVisible({ timeout: 5000 });
+    // Selecting a playbook enables submission
+    await selectPlaybookInModal(page, playbook);
+    await expect(page.getByTestId('create-submit-button')).toBeEnabled();
   });
 
   test('playbook picker shows available playbooks when they exist', async ({ page }) => {
-    // Check if playbooks exist first
-    const listResponse = await page.request.get('/api/playbooks');
-    const playbooks = await listResponse.json();
+    const first = makePlaybook();
+    const second = makePlaybook({
+      id: 'pb-test-2',
+      name: 'another_playbook',
+      title: 'Another Playbook',
+    });
+    await mockPlaybookRoutes(page, { playbooks: [first, second] });
 
-    if (playbooks.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
-
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
-
-    // Switch to playbook mode
-    await page.getByTestId('mode-playbook').click();
+    await openCreateWorkflowModal(page);
 
     // Click the picker trigger
     await page.getByTestId('playbook-picker-trigger').click();
 
-    // Dropdown should be visible
+    // Dropdown should be visible with every playbook option
+    await expect(page.getByTestId('playbook-picker-dropdown')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId(`playbook-option-${first.id}`)).toBeVisible();
+    await expect(page.getByTestId(`playbook-option-${second.id}`)).toBeVisible();
+    await expect(page.getByTestId(`playbook-option-${first.id}`)).toContainText(first.title);
+  });
+
+  test('playbook picker dropdown toggles closed via the trigger', async ({ page }) => {
+    const playbook = makePlaybook();
+    await mockPlaybookRoutes(page, { playbooks: [playbook] });
+
+    await openCreateWorkflowModal(page);
+
+    // Open the dropdown
+    await page.getByTestId('playbook-picker-trigger').click();
     await expect(page.getByTestId('playbook-picker-dropdown')).toBeVisible({ timeout: 5000 });
 
-    // First playbook should be listed
-    await expect(page.getByTestId(`playbook-option-${playbooks[0].name}`)).toBeVisible();
-  });
-
-  test('selecting a playbook shows playbook info', async ({ page }) => {
-    // Check if playbooks exist first
-    const listResponse = await page.request.get('/api/playbooks');
-    const playbooks = await listResponse.json();
-
-    if (playbooks.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
-
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
-
-    // Switch to playbook mode
-    await page.getByTestId('mode-playbook').click();
-
-    // Click the picker trigger and select first playbook
+    // Clicking the trigger again closes it (the picker has no click-outside handling)
     await page.getByTestId('playbook-picker-trigger').click();
-    await page.getByTestId(`playbook-option-${playbooks[0].name}`).click();
-
-    // Playbook info should be visible
-    await expect(page.getByTestId('playbook-info')).toBeVisible({ timeout: 5000 });
-    await expect(page.getByTestId('playbook-steps-preview')).toBeVisible();
+    await expect(page.getByTestId('playbook-picker-dropdown')).not.toBeVisible({ timeout: 5000 });
   });
 
-  test('playbook with variables shows variable input form', async ({ page }) => {
-    // Check for a playbook with variables
-    const listResponse = await page.request.get('/api/playbooks');
-    const playbooks = await listResponse.json();
+  test('selecting a playbook shows info, steps preview and default title', async ({ page }) => {
+    const playbook = makePlaybook();
+    await mockPlaybookRoutes(page, { playbooks: [playbook] });
 
-    if (playbooks.length === 0) {
-      test.skip();
-      return;
-    }
+    await openCreateWorkflowModal(page);
 
-    // Find a playbook with variables
-    let playbookWithVars = null;
-    for (const pb of playbooks) {
-      const detailResponse = await page.request.get(`/api/playbooks/${pb.name}`);
-      const detail = await detailResponse.json();
-      if (detail.variables && detail.variables.length > 0) {
-        playbookWithVars = pb;
-        break;
-      }
-    }
+    await selectPlaybookInModal(page, playbook);
 
-    if (!playbookWithVars) {
-      test.skip();
-      return;
-    }
+    // Title input appears, defaulting to the playbook title
+    await expect(page.getByTestId('create-title-input')).toBeVisible();
+    await expect(page.getByTestId('create-title-input')).toHaveValue(playbook.title);
 
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
-
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
-
-    // Switch to playbook mode and select the playbook
-    await page.getByTestId('mode-playbook').click();
-    await page.getByTestId('playbook-picker-trigger').click();
-    await page.getByTestId(`playbook-option-${playbookWithVars.name}`).click();
-
-    // Variable form should appear
-    await expect(page.getByTestId('variable-input-form')).toBeVisible({ timeout: 5000 });
+    // Playbook details and steps preview are shown
+    await expect(page.getByTestId('steps-preview')).toBeVisible();
+    await expect(page.getByTestId('steps-preview')).toContainText(`Steps (${playbook.steps.length})`);
+    await expect(page.getByTestId('steps-preview')).toContainText(playbook.steps[0].title);
   });
 
-  test('quick mode creating workflow works', async ({ page }) => {
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+  test('playbook with variables shows variable inputs', async ({ page }) => {
+    const playbook = makePlaybook({
+      variables: [
+        { name: 'deploy_env', type: 'string', required: false, default: 'staging' },
+      ],
+    });
+    await mockPlaybookRoutes(page, { playbooks: [playbook] });
 
-    // Get initial count
-    const beforeResponse = await page.request.get('/api/workflows');
-    const beforeWorkflows = await beforeResponse.json();
-    const beforeCount = beforeWorkflows.length;
+    await openCreateWorkflowModal(page);
 
-    // Open create modal
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
+    await selectPlaybookInModal(page, playbook);
 
-    // Fill in quick mode form
-    const timestamp = Date.now();
-    await page.getByTestId('create-title-input').fill(`E2E Quick Workflow ${timestamp}`);
-    await page.getByTestId('create-playbook-input').fill(`Quick Test ${timestamp}`);
-
-    // Submit
-    await page.getByTestId('create-submit-button').click();
-
-    // Modal should close
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible({ timeout: 10000 });
-
-    // Verify workflow was created
-    const afterResponse = await page.request.get('/api/workflows');
-    const afterWorkflows = await afterResponse.json();
-    expect(afterWorkflows.length).toBeGreaterThan(beforeCount);
+    // A variable input is rendered for each playbook variable
+    await expect(page.getByTestId('variable-input-deploy_env')).toBeVisible({ timeout: 5000 });
   });
 
-  test('submit button is disabled when no playbook selected in playbook mode', async ({ page }) => {
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+  test('required variable without default keeps submit disabled until filled', async ({ page }) => {
+    const playbook = makePlaybook({
+      variables: [
+        { name: 'api_key', type: 'string', required: true },
+      ],
+    });
+    await mockPlaybookRoutes(page, { playbooks: [playbook] });
 
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
+    await openCreateWorkflowModal(page);
 
-    // Switch to playbook mode without selecting a playbook
-    await page.getByTestId('mode-playbook').click();
+    await selectPlaybookInModal(page, playbook);
 
-    // Submit button should be disabled
+    // Required variable without a default blocks submission
+    await expect(page.getByTestId('variable-input-api_key')).toBeVisible();
     await expect(page.getByTestId('create-submit-button')).toBeDisabled();
+
+    // Filling the variable enables submission
+    await page.getByTestId('variable-input-api_key').fill('secret-value');
+    await expect(page.getByTestId('create-submit-button')).toBeEnabled();
   });
 
-  test('creating workflow from playbook creates workflow with playbook steps', async ({ page }) => {
-    // Check if playbooks exist first
-    const listResponse = await page.request.get('/api/playbooks');
-    const playbooks = await listResponse.json();
+  test('creating a workflow submits the selected playbook and title', async ({ page }) => {
+    const playbook = makePlaybook();
+    const calls: InstantiateCall[] = [];
+    await mockPlaybookRoutes(page, {
+      playbooks: [playbook],
+      onInstantiate: (call) => calls.push(call),
+    });
 
-    if (playbooks.length === 0) {
-      test.skip();
-      return;
-    }
+    await openCreateWorkflowModal(page);
 
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
+    await selectPlaybookInModal(page, playbook);
 
-    // Get initial count
-    const beforeResponse = await page.request.get('/api/workflows');
-    const beforeWorkflows = await beforeResponse.json();
-    const beforeCount = beforeWorkflows.length;
-
-    // Open create modal
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
-
-    // Switch to playbook mode and select first playbook
-    await page.getByTestId('mode-playbook').click();
-    await page.getByTestId('playbook-picker-trigger').click();
-    await page.getByTestId(`playbook-option-${playbooks[0].name}`).click();
-
-    // Wait for playbook info
-    await expect(page.getByTestId('playbook-info')).toBeVisible({ timeout: 5000 });
-
-    // Fill in title
-    const timestamp = Date.now();
-    await page.getByTestId('create-title-input').fill(`E2E Playbook Workflow ${timestamp}`);
+    // Override the default title
+    const workflowTitle = `E2E Playbook Workflow ${Date.now()}`;
+    await page.getByTestId('create-title-input').fill(workflowTitle);
 
     // Submit
     await page.getByTestId('create-submit-button').click();
 
     // Modal should close
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible({ timeout: 10000 });
+    await expect(
+      page.getByRole('dialog', { name: 'Create Workflow', exact: true })
+    ).not.toBeVisible({ timeout: 10000 });
 
-    // Verify workflow was created
-    const afterResponse = await page.request.get('/api/workflows');
-    const afterWorkflows = await afterResponse.json();
-    expect(afterWorkflows.length).toBeGreaterThan(beforeCount);
-  });
-
-  test('playbook picker closes when clicking outside', async ({ page }) => {
-    // Check if playbooks exist first
-    const listResponse = await page.request.get('/api/playbooks');
-    const playbooks = await listResponse.json();
-
-    if (playbooks.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/workflows');
-    await expect(page.getByTestId('workflows-page')).toBeVisible({ timeout: 10000 });
-
-    await page.getByTestId('create-workflow-button').click();
-    await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible({ timeout: 5000 });
-
-    // Switch to playbook mode
-    await page.getByTestId('mode-playbook').click();
-
-    // Open dropdown
-    await page.getByTestId('playbook-picker-trigger').click();
-    await expect(page.getByTestId('playbook-picker-dropdown')).toBeVisible({ timeout: 5000 });
-
-    // Click outside (on the modal background but not on the dropdown)
-    await page.getByTestId('create-title-input').click();
-
-    // Note: This test may need adjustment based on click-outside behavior
-    // The dropdown should close when we interact with other elements
+    // The selected playbook and title were sent to the instantiate endpoint
+    expect(calls).toHaveLength(1);
+    expect(calls[0].playbookId).toBe(playbook.id);
+    expect(calls[0].title).toBe(workflowTitle);
+    expect(calls[0].ephemeral).toBe(true);
   });
 });

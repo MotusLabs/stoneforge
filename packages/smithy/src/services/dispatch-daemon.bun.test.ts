@@ -6229,7 +6229,11 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
     expect(meta?.resumeCount).toBe(1);
   });
 
-  test('applies fallback rate limit when session exits rapidly without output', async () => {
+  test('does NOT record a rate limit when session exits rapidly without output', async () => {
+    // A silent rapid exit carries no provider error signature — it may be a
+    // rate limit, a crashed executable, or a killed process. Recording a
+    // provider limit from it alone paused dispatch during the 2026-10-04
+    // workspace restart loop while the provider was healthy.
     const worker = await createTestWorker('rapid-exit-rl-worker');
     const workerId = worker.id as unknown as EntityId;
     await createAssignedTask('Task with rapid exit rate limit', workerId, {
@@ -6251,10 +6255,11 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
     // Wait for async handler
     await new Promise(resolve => setTimeout(resolve, 50));
 
-    // Rate limits should be applied to all executables in the fallback chain
+    // No provider error signature → no rate limit recorded, dispatch stays
+    // active. (resumeCount rollback is covered by the test above.)
     status = await daemon.getRateLimitStatus();
-    expect(status.limits.length).toBeGreaterThanOrEqual(1);
-    expect(status.isPaused).toBe(true);
+    expect(status.limits).toHaveLength(0);
+    expect(status.isPaused).toBe(false);
   });
 
   test('does NOT roll back resumeCount when session produces assistant events before exiting', async () => {
@@ -6468,13 +6473,13 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
     }
   });
 
-  test('heuristic limit on a wrapper marks the wrapper account, not claude', async () => {
-    // Scenario "Heuristic limit on a wrapper": a worker whose executablePath is
-    // a wrapper (claude-glm) has its recovered session exit rapidly with no
-    // assistant output. The suspected rate limit must be charged to the
-    // claude-glm account only — never to the hard-coded 'claude' default or
-    // an unrelated fallback chain. Uses a daemon with no fallback chain so the
-    // session runs the worker's own executable.
+  test('silent rapid exit on a wrapper records no limit on any account', async () => {
+    // Scenario "Heuristic limit on a wrapper" (revised): a worker whose
+    // executablePath is a wrapper (claude-glm) has its recovered session exit
+    // rapidly with no assistant output. Without a provider error signature
+    // NOTHING is marked — not the wrapper account, not 'claude', not a
+    // fallback chain. Uses a daemon with no fallback chain so the session
+    // runs the worker's own executable.
     const worker = await agentRegistry.registerWorker({
       name: 'rapid-exit-wrapper-worker',
       workerMode: 'ephemeral',
@@ -6526,13 +6531,10 @@ describe('recoverOrphanedTask - rapid-exit detection', () => {
       events.emit('exit', 1, null);
       await new Promise(resolve => setTimeout(resolve, 50));
 
-      // Only the wrapper account is limited — 'claude' is NOT marked
+      // Silent exit = no provider error signature = no account is limited
       const status = await wrapperDaemon.getRateLimitStatus();
-      const limitedKeys = status.limits.map(l => l.executable);
-      expect(limitedKeys).toEqual([wrapperKey]);
-      expect(limitedKeys).not.toContain(normalizeExecutableKey('claude'));
-      // No fallback chain → any active limit pauses dispatch
-      expect(status.isPaused).toBe(true);
+      expect(status.limits).toEqual([]);
+      expect(status.isPaused).toBe(false);
     } finally {
       await wrapperDaemon.stop();
     }
@@ -6732,6 +6734,13 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
   let daemon: DispatchDaemon;
   let testDbPath: string;
   let systemEntity: EntityId;
+  /**
+   * When the daemon was constructed (captured right after createDispatchDaemon
+   * in beforeEach). Session-history entries that predate this moment are
+   * treated as restart-killed and void the rapid-exit pattern, so pattern
+   * tests must place their entries after it.
+   */
+  let daemonBuiltAt: number;
 
   beforeEach(async () => {
     pinPathForRateLimitTests();
@@ -6779,6 +6788,7 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
       inboxService,
       config
     );
+    daemonBuiltAt = Date.now();
   });
 
   afterEach(async () => {
@@ -6808,14 +6818,20 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
   }
 
   /**
-   * Creates a stuck task with session history entries simulating rapid rate-limited exits.
-   * Each session started shortly after the previous one and none have endedAt set.
+   * Creates a stuck task with session history entries simulating rapid exits
+   * observed by THIS daemon incarnation. Each session started shortly after
+   * the previous one and none have endedAt set.
+   *
+   * Entries are placed after `daemonBuiltAt`: entries that predate the
+   * daemon's construction are treated as restart-killed (they belong to a
+   * previous server incarnation) and void the pattern by design.
    */
   async function createTaskWithRateLimitPattern(
     title: string,
     workerId: EntityId,
     sessionCount: number = RATE_LIMIT_SESSION_PATTERN_COUNT,
     executable?: string,
+    options?: { predatesIncarnation?: boolean },
   ): Promise<Task> {
     const task = await createTask({
       title,
@@ -6825,8 +6841,14 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     });
     const saved = await api.create(task as unknown as Record<string, unknown> & { createdBy: EntityId }) as Task;
 
-    // Build session history with rapid succession entries (no endedAt)
+    // Build session history with rapid succession entries (no endedAt).
+    // By default the window starts after the daemon was built so the daemon
+    // "observed" these sessions; pass predatesIncarnation to place them
+    // before the daemon existed (restart-killed sessions).
     const now = Date.now();
+    const firstStart = options?.predatesIncarnation
+      ? now - (sessionCount + 1) * 30_000
+      : Math.max(now - (sessionCount - 1) * 30_000, daemonBuiltAt + 1);
     let metadata: Record<string, unknown> | undefined = undefined;
     metadata = updateOrchestratorTaskMeta(metadata, {
       assignedAgent: workerId,
@@ -6842,7 +6864,7 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
         agentId: workerId,
         agentName: 'test-worker',
         agentRole: 'worker',
-        startedAt: new Date(now - (sessionCount - i) * 30_000).toISOString() as import('@stoneforge/core').Timestamp, // 30s apart
+        startedAt: new Date(firstStart + i * 30_000).toISOString() as import('@stoneforge/core').Timestamp, // 30s apart
         // No endedAt — session exited without proper completion
         ...(executable ? { executable } : {}),
       };
@@ -6964,21 +6986,30 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     const workerId = worker.id as unknown as EntityId;
     await createTestRecoverySteward('recovery-steward-wake');
 
-    // Create task with rate limit pattern (rapid exits, no endedAt)
+    // Create task with rate limit pattern (rapid exits, no endedAt).
+    // The helper places entries after daemon construction (post-incarnation),
+    // which makes them future-dated relative to the wall clock.
     await createTaskWithRateLimitPattern('Rate limited task pre-wake', workerId);
 
-    // Call wake — this should cause hasRecentRateLimitPattern to ignore pre-wake history
-    // AND reset resumeCount since the last session predates the wake
-    daemon.wake();
+    // Freeze time past the entries, then call wake — the pattern now predates
+    // the wake, which should make hasRecentRateLimitPattern ignore it AND
+    // reset resumeCount since the last session predates the wake.
+    const originalNow = Date.now;
+    Date.now = () => daemonBuiltAt + RATE_LIMIT_SESSION_PATTERN_COUNT * 30_000 + 60_000;
+    try {
+      daemon.wake();
 
-    const result = await daemon.recoverOrphanedAssignments();
+      const result = await daemon.recoverOrphanedAssignments();
 
-    // Worker SHOULD be resumed normally (not recovery steward) because:
-    // 1. Rate limit pattern predates wake → ignored
-    // 2. resumeCount was reset to 0 since last session predates wake
-    expect(result.processed).toBe(1);
-    // Worker is resumed via resumeSession (not startSession for a recovery steward)
-    expect(sessionManager.resumeSession).toHaveBeenCalled();
+      // Worker SHOULD be resumed normally (not recovery steward) because:
+      // 1. Rate limit pattern predates wake → ignored
+      // 2. resumeCount was reset to 0 since last session predates wake
+      expect(result.processed).toBe(1);
+      // Worker is resumed via resumeSession (not startSession for a recovery steward)
+      expect(sessionManager.resumeSession).toHaveBeenCalled();
+    } finally {
+      Date.now = originalNow;
+    }
   });
 
   test('hasRecentRateLimitPattern returns true for post-wake rapid exits', async () => {
@@ -7039,12 +7070,16 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     expect(sessionManager.startSession).not.toHaveBeenCalled();
   });
 
-  test('records rate limit in tracker when session history shows rate limit pattern', async () => {
+  test('does NOT record a rate limit from a rapid-exit pattern alone', async () => {
+    // Incident 2026-10-04: rapid exits alone were treated as provider rate
+    // limit evidence and paused dispatch for +1h per detection — even when
+    // the provider was healthy (workspace restart loops). The pattern may
+    // still skip the recovery steward, but it must never record a limit.
     const worker = await createTestWorker('rl-record-worker');
     const workerId = worker.id as unknown as EntityId;
     await createTestRecoverySteward('recovery-steward-rl-record');
 
-    // Task has N rapid sessions without proper completion (rate limit pattern)
+    // Task has N rapid sessions without proper completion (rapid-exit pattern)
     await createTaskWithRateLimitPattern('Rate limited task - tracker test', workerId);
 
     // Verify no rate limits are recorded before recovery runs
@@ -7052,30 +7087,50 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     expect(beforeStatus.isPaused).toBe(false);
     expect(beforeStatus.limits).toHaveLength(0);
 
-    // Run orphan recovery — should detect rate limit pattern and record it
+    // Run orphan recovery — pattern detected, steward skipped
     const result = await daemon.recoverOrphanedAssignments();
-
-    // Recovery steward should NOT have been spawned
     expect(result.processed).toBe(0);
     expect(sessionManager.startSession).not.toHaveBeenCalled();
 
-    // Rate limit SHOULD be recorded in the tracker
+    // NO rate limit may be recorded: rapid exits are not a provider error
+    // signature. Dispatch must stay active so other work is not paused.
     const afterStatus = await daemon.getRateLimitStatus();
-    expect(afterStatus.isPaused).toBe(true);
-    expect(afterStatus.limits.length).toBeGreaterThanOrEqual(1);
-    expect(afterStatus.limits[0].executable).toBe('claude');
+    expect(afterStatus.isPaused).toBe(false);
+    expect(afterStatus.limits).toHaveLength(0);
+  });
 
-    // The reset time should be approximately RAPID_EXIT_FALLBACK_RESET_MS from now
-    const resetTime = new Date(afterStatus.limits[0].resetsAt);
-    const expectedResetTime = Date.now() + RAPID_EXIT_FALLBACK_RESET_MS;
-    // Allow 10 seconds of tolerance
-    expect(Math.abs(resetTime.getTime() - expectedResetTime)).toBeLessThan(10_000);
+  test('rapid-exit pattern from sessions killed by a server restart is not rate-limit evidence', async () => {
+    // The restart-loop scenario: every session-history entry predates the
+    // current daemon incarnation, i.e. those sessions were killed by the
+    // PID check after the workspace/server restarted. The pattern must be
+    // voided entirely — no steward skip, and above all no rate limit.
+    const worker = await createTestWorker('rl-restart-worker');
+    const workerId = worker.id as unknown as EntityId;
+    await createTestRecoverySteward('recovery-steward-rl-restart');
+
+    // Entries all predate daemon construction (previous incarnation)
+    await createTaskWithRateLimitPattern('Restart-killed task', workerId, RATE_LIMIT_SESSION_PATTERN_COUNT, undefined, {
+      predatesIncarnation: true,
+    });
+
+    const result = await daemon.recoverOrphanedAssignments();
+
+    // The restart-killed entries void the pattern: this is an ordinary stuck
+    // task from the daemon's perspective, so the recovery steward IS spawned.
+    expect(result.processed).toBe(1);
+    expect(sessionManager.startSession).toHaveBeenCalled();
+
+    // And nothing is recorded against any account
+    const status = await daemon.getRateLimitStatus();
+    expect(status.limits).toHaveLength(0);
+    expect(status.isPaused).toBe(false);
   });
 
   test('orphan-recovery pattern attributes the limit to the account the sessions ran on', async () => {
     // Scenario "Orphan-recovery pattern": the task's last sessions show the
     // repeated rapid-exit pattern and they ran on the claude-glm account.
-    // Only that account is marked — not 'claude' and not a fallback chain.
+    // No account is marked — the pattern alone is not provider evidence —
+    // and the steward spawn is still skipped.
     const worker = await createTestWorker('rl-pattern-wrapper-worker');
     const workerId = worker.id as unknown as EntityId;
     await createTestRecoverySteward('recovery-steward-rl-wrapper');
@@ -7089,17 +7144,16 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     expect(result.processed).toBe(0);
     expect(sessionManager.startSession).not.toHaveBeenCalled();
 
-    // Only the account the rapid-exit sessions ran on is limited
+    // No account is limited — rapid exits carry no provider error signature
     const status = await daemon.getRateLimitStatus();
-    const limitedKeys = status.limits.map(l => l.executable);
-    expect(limitedKeys).toEqual(['claude-glm']);
-    expect(limitedKeys).not.toContain('claude');
+    expect(status.limits).toEqual([]);
+    expect(status.isPaused).toBe(false);
   });
 
   test('orphan-recovery pattern falls back to the assignee account for legacy entries', async () => {
     // Session-history entries recorded before the per-session executable
-    // existed have no `executable` field. Attribution falls back to the
-    // assignee's current account key.
+    // existed have no `executable` field. The pattern still skips the
+    // steward spawn, and no account is marked without a signature.
     const worker = await agentRegistry.registerWorker({
       name: 'rl-pattern-legacy-wrapper',
       workerMode: 'ephemeral',
@@ -7116,9 +7170,10 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     const result = await daemon.recoverOrphanedAssignments();
     expect(result.processed).toBe(0);
 
-    // The assignee's account (claude-glm) is limited via the fallback
+    // No limit is recorded for the assignee account either
     const status = await daemon.getRateLimitStatus();
-    expect(status.limits.map(l => l.executable)).toEqual(['claude-glm']);
+    expect(status.limits).toEqual([]);
+    expect(status.isPaused).toBe(false);
   });
 
   test('rate limit pattern detection prevents repeated log spam on subsequent cycles', async () => {
@@ -7129,19 +7184,19 @@ describe('spawnRecoveryStewardForTask - rate limit session history guard', () =>
     // Task has N rapid sessions without proper completion
     await createTaskWithRateLimitPattern('Rate limited task - spam test', workerId);
 
-    // First cycle: detects pattern, records rate limit
+    // First cycle: detects pattern, skips steward spawn
     const result1 = await daemon.recoverOrphanedAssignments();
     expect(result1.processed).toBe(0);
 
-    // After recording rate limit, daemon should be paused
+    // No rate limit is recorded, so the daemon is NOT paused — but the
+    // pattern still skips the steward spawn on every subsequent cycle
+    // (with the warning deduplicated), so no spawn-storm can happen.
     const status = await daemon.getRateLimitStatus();
-    expect(status.isPaused).toBe(true);
+    expect(status.isPaused).toBe(false);
 
-    // Second cycle: since daemon is paused, the task should be skipped
-    // entirely (at the resolveExecutableWithFallback level), not re-triggering
-    // the pattern detection log
     const result2 = await daemon.recoverOrphanedAssignments();
     expect(result2.processed).toBe(0);
+    expect(sessionManager.startSession).not.toHaveBeenCalled();
   });
 
   test('does not detect rate limit pattern when sessions are far apart', async () => {

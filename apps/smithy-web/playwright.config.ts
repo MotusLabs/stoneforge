@@ -1,5 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
 import { dirname, resolve } from 'path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -7,9 +8,21 @@ const projectRoot = resolve(__dirname, '../..');
 const testDbPath = resolve(projectRoot, '.stoneforge-test/stoneforge.db');
 const setupTestDbScript = resolve(__dirname, 'tests/setup-test-db.ts');
 
-// Use dedicated test ports to avoid conflicts with development servers
-const testApiPort = 3458;
-const testWebPort = 5175;
+// Reserve four ports per worktree: Smithy API/web, then Quarry API/web.
+// Hash collisions fail visibly because server reuse is disabled by default.
+const portBase = 20000 + (createHash('sha256').update(projectRoot).digest().readUInt32BE(0) % 10000) * 4;
+function testPort(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  if (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535) {
+    throw new Error(`${name} must be an integer between 1 and 65535`);
+  }
+  return Number(value);
+}
+const testApiPort = testPort('E2E_API_PORT', portBase);
+const testWebPort = testPort('E2E_WEB_PORT', portBase + 1);
+if (testApiPort === testWebPort) throw new Error('E2E_API_PORT and E2E_WEB_PORT must differ');
+const reuseExistingServer = process.env.E2E_REUSE_SERVER === '1';
 
 export default defineConfig({
   testDir: './tests',
@@ -36,12 +49,12 @@ export default defineConfig({
       // before the server starts. This fixes a race condition with globalSetup.
       command: `bun run ${setupTestDbScript} && STONEFORGE_DB_PATH=${testDbPath} DAEMON_AUTO_START=false PORT=${testApiPort} bun run ${resolve(projectRoot, 'apps/smithy-server/src/index.ts')}`,
       port: testApiPort,
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer,
     },
     {
-      command: `VITE_API_PORT=${testApiPort} bun run dev -- --port ${testWebPort}`,
+      command: `VITE_API_PORT=${testApiPort} bun run dev -- --port ${testWebPort} --strictPort`,
       port: testWebPort,
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer,
     },
   ],
 });

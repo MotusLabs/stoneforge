@@ -214,6 +214,26 @@ export interface AgentProvider {
 
   /** List available models for this provider */
   listModels(): Promise<ModelInfo[]>;
+
+  /**
+   * Optional format validation for model identifiers accepted by this
+   * provider.
+   *
+   * Returns a human-readable error message when the model ID is malformed
+   * for this provider's expected format, or undefined when the format looks
+   * acceptable. This is a cheap syntactic guard callers can run BEFORE
+   * spawning so a bad override fails loudly at the CLI/API boundary instead
+   * of being silently dropped by the provider at runtime (e.g. a bare model
+   * name for a provider that only understands composite IDs would otherwise
+   * run on the provider's default model while still being reported as the
+   * requested one).
+   *
+   * This is NOT a catalog lookup — providers may legitimately accept model
+   * IDs they cannot enumerate offline, so implementations should only reject
+   * structurally invalid identifiers. Providers without a fixed format need
+   * not implement this.
+   */
+  validateModel?(model: string): string | undefined;
 }
 
 // ============================================================================

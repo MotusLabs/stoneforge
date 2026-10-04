@@ -59,6 +59,28 @@ describe('isRateLimitMessage', () => {
     expect(isRateLimitMessage('Your limit will reset at 3pm')).toBe(true);
   });
 
+  it('detects "API Error: 429" (HTTP 429 provider error signature)', () => {
+    expect(isRateLimitMessage('API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}')).toBe(true);
+  });
+
+  it('detects "API Error (429: rate_limit_exceeded)"', () => {
+    expect(isRateLimitMessage('API Error (429: rate_limit_exceeded)')).toBe(true);
+  });
+
+  it('detects the machine-readable rate_limit_exceeded signature on its own', () => {
+    expect(isRateLimitMessage('rate_limit_exceeded')).toBe(true);
+  });
+
+  it('does NOT treat other API error codes as rate limits', () => {
+    expect(isRateLimitMessage('API Error: 500 Internal Server Error')).toBe(false);
+    expect(isRateLimitMessage('API Error: 400 Invalid request')).toBe(false);
+    expect(isRateLimitMessage('API Error (401: unauthorized)')).toBe(false);
+  });
+
+  it('does NOT match 429 embedded in a longer number', () => {
+    expect(isRateLimitMessage('API Error: 4290 quota units consumed')).toBe(false);
+  });
+
   it('is case-insensitive', () => {
     expect(isRateLimitMessage("YOU'VE HIT YOUR LIMIT · RESETS 12AM")).toBe(true);
     expect(isRateLimitMessage('WEEKLY LIMIT REACHED · RESETS FEB 22 AT 9:30AM')).toBe(true);

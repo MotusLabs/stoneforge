@@ -5,12 +5,14 @@
  */
 
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { EntityId, ElementId, Task } from '@stoneforge/core';
 import { createTimestamp, ElementType } from '@stoneforge/core';
 import type { SessionFilter, SpawnedSessionEvent, AgentRole, WorkerMetadata, StewardMetadata } from '../../index.js';
 import { loadRolePrompt, buildWorkflowPresetSection, getAgentMetadata, generateSessionBranchName, generateSessionWorktreePath, trackListeners } from '../../index.js';
 import { isAgentDisabled } from '../../services/agent-registry.js';
+import { getProviderRegistry } from '../../providers/registry.js';
 import type { WorkflowPresetContext } from '../../prompts/index.js';
 import { getValue } from '@stoneforge/quarry';
 import type { WorkflowPreset, AgentPermissionModel } from '@stoneforge/quarry';
@@ -22,6 +24,166 @@ import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('sessions');
 const CODEX_RESUME_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// ============================================================================
+// Rate limit guard (shared by session start and resume)
+// ============================================================================
+
+/**
+ * A rate-limit refusal for a session start/resume: everything the 429
+ * response needs. Produced by {@link evaluateRateLimitRefusal}.
+ */
+interface RateLimitRefusal {
+  /** Human-readable reason, naming the limited account when it is known. */
+  message: string;
+  /** Seconds until the named limit resets (>= 1). */
+  retryAfterSeconds: number;
+  /** ISO timestamp of the soonest reset (global refusal). */
+  soonestReset?: string;
+  /** Normalised account key of the limited account (per-agent refusal). */
+  accountKey?: string;
+  /** ISO timestamp when `accountKey` resets (per-agent refusal). */
+  resetsAt?: string;
+}
+
+/**
+ * Seconds to advise the client to wait before retrying, derived from a reset
+ * timestamp. Falls back to 60s when no reset time is known.
+ */
+function retryAfterSecondsFromReset(resetsAt: string | undefined): number {
+  if (!resetsAt) {
+    return 60; // Default to 60 seconds if no reset time available
+  }
+  return Math.max(1, Math.ceil((new Date(resetsAt).getTime() - Date.now()) / 1000));
+}
+
+/**
+ * Rate limit guard shared by session start and resume.
+ *
+ * Two checks, in order:
+ *
+ * 1. **Global pause** — `getRateLimitStatus().isPaused` is true when a
+ *    manual sleep (`sf daemon sleep`) is active or when every enabled
+ *    ephemeral worker's account is limited, so nothing can be dispatched at
+ *    all. During a manual sleep the message says so, and `Retry-After`
+ *    follows the sleep deadline — real limits may reset sooner, but the
+ *    operator's pause still holds.
+ * 2. **This agent's account** — a partial limit does not pause dispatch, but
+ *    the agent being started or resumed may itself run on one of the limited
+ *    accounts. Without this check such a spawn slips through and immediately
+ *    hits the limit. `isAgentRateLimited` applies the fallback-chain rule:
+ *    an agent with an explicit `executablePath` is judged on its own account
+ *    key alone, an agent served by the chain only when every chain entry is
+ *    limited.
+ *
+ * Refusing explicitly (instead of spawning into a rejecting provider) is the
+ * fix for the 2026-10-04 phantom-success reports: `sf agent start` returned
+ * a session ID and "running" while nothing actually executed.
+ *
+ * @returns The refusal to answer with, or undefined when the session may start
+ */
+async function evaluateRateLimitRefusal(
+  dispatchDaemon: NonNullable<Services['dispatchDaemon']>,
+  agent: Parameters<NonNullable<Services['dispatchDaemon']>['isAgentRateLimited']>[0]
+): Promise<RateLimitRefusal | undefined> {
+  const rateLimitStatus = await dispatchDaemon.getRateLimitStatus();
+  if (rateLimitStatus.isPaused) {
+    if (rateLimitStatus.manualSleepUntil) {
+      return {
+        message: 'Dispatch is paused by manual sleep',
+        retryAfterSeconds: retryAfterSecondsFromReset(rateLimitStatus.manualSleepUntil),
+        soonestReset: rateLimitStatus.soonestReset,
+      };
+    }
+    return {
+      message: 'All worker accounts are currently rate-limited',
+      retryAfterSeconds: retryAfterSecondsFromReset(rateLimitStatus.soonestReset),
+      soonestReset: rateLimitStatus.soonestReset,
+    };
+  }
+
+  const agentLimit = dispatchDaemon.isAgentRateLimited(agent);
+  if (agentLimit) {
+    return {
+      message:
+        `Account '${agentLimit.accountKey}' is currently rate-limited until ${agentLimit.resetsAt}. ` +
+        `The session was NOT started. If the limit is stale, clear it with 'sf daemon wake'.`,
+      retryAfterSeconds: retryAfterSecondsFromReset(agentLimit.resetsAt),
+      accountKey: agentLimit.accountKey,
+      resetsAt: agentLimit.resetsAt,
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * Renders a {@link RateLimitRefusal} as the 429 response (with Retry-After).
+ */
+function rateLimitResponse(c: Context, refusal: RateLimitRefusal): Response {
+  return c.json(
+    {
+      error: {
+        code: 'RATE_LIMITED',
+        message: refusal.message,
+        retryAfter: refusal.retryAfterSeconds,
+        soonestReset: refusal.soonestReset,
+        accountKey: refusal.accountKey,
+        resetsAt: refusal.resetsAt,
+      },
+    },
+    { status: 429, headers: { 'Retry-After': String(refusal.retryAfterSeconds) } }
+  );
+}
+
+/**
+ * Shared guard for the start/resume routes: when a dispatch daemon is
+ * available and it refuses the spawn (global pause or the agent's own
+ * account being limited), renders the 429 refusal; otherwise undefined and
+ * the spawn may proceed.
+ */
+async function rateLimitRefusal(
+  c: Context,
+  services: Services,
+  agent: Parameters<NonNullable<Services['dispatchDaemon']>['isAgentRateLimited']>[0]
+): Promise<Response | undefined> {
+  if (!services.dispatchDaemon) {
+    return undefined;
+  }
+  const refusal = await evaluateRateLimitRefusal(services.dispatchDaemon, agent);
+  return refusal ? rateLimitResponse(c, refusal) : undefined;
+}
+
+// ============================================================================
+// Spawn option validation (start route)
+// ============================================================================
+
+/**
+ * Validates a provider name for a supervised spawn (body override or the
+ * agent's registered provider). Returns the registry's user-friendly error
+ * ("not registered", "not available" + install instructions) or undefined.
+ */
+async function validateSpawnProvider(providerName: string): Promise<string | undefined> {
+  try {
+    await getProviderRegistry().getOrThrow(providerName);
+    return undefined;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * Validates a model override for a supervised spawn against the effective
+ * provider's optional format check (e.g. OpenCode requires composite
+ * '<provider>/<model>' IDs). Returns the provider's error message or
+ * undefined. Purely syntactic — no catalog lookup.
+ */
+function validateSpawnModel(model: string, effectiveProvider?: string): string | undefined {
+  const registry = getProviderRegistry();
+  const provider = effectiveProvider ? registry.get(effectiveProvider) : undefined;
+  const validator = provider ?? registry.getDefault();
+  return validator.validateModel?.(model);
+}
 
 type NotifyClientsCallback = (
   agentId: EntityId,
@@ -231,11 +393,50 @@ export function createSessionRoutes(
         interactive?: boolean;
         cols?: number;
         rows?: number;
+        environmentVariables?: Record<string, string>;
+        model?: string;
+        provider?: string;
+        timeout?: number;
       };
+
+      // Validate spawn-shaping options before touching the rate-limit guard
+      // or the session manager, so bad values answer 400 instead of failing
+      // mid-spawn (or being silently dropped by the provider).
+      if (body.timeout !== undefined) {
+        if (typeof body.timeout !== 'number' || !Number.isFinite(body.timeout) || body.timeout <= 0) {
+          return c.json(
+            { error: { code: 'INVALID_TIMEOUT', message: 'timeout must be a positive number of milliseconds' } },
+            400
+          );
+        }
+      }
 
       const agent = await agentRegistry.getAgent(agentId);
       if (!agent) {
         return c.json({ error: { code: 'NOT_FOUND', message: 'Agent not found' } }, 404);
+      }
+
+      // Provider/model validation mirrors the CLI: the effective provider is
+      // the body override, then the agent's registered provider, then the
+      // default. Unknown providers and malformed model IDs answer 400 with
+      // the same messages the local spawn path produces.
+      {
+        const agentMetaForValidation = getAgentMetadata(agent) as
+          | { provider?: string; model?: string }
+          | undefined;
+        const effectiveProvider = body.provider ?? agentMetaForValidation?.provider;
+        if (body.provider !== undefined || effectiveProvider !== undefined) {
+          const providerError = await validateSpawnProvider(effectiveProvider!);
+          if (providerError) {
+            return c.json({ error: { code: 'INVALID_PROVIDER', message: providerError } }, 400);
+          }
+        }
+        if (body.model !== undefined) {
+          const modelError = validateSpawnModel(body.model, effectiveProvider);
+          if (modelError) {
+            return c.json({ error: { code: 'INVALID_MODEL', message: modelError } }, 400);
+          }
+        }
       }
 
       if (isAgentDisabled(agent)) {
@@ -248,6 +449,14 @@ export function createSessionRoutes(
           },
           409
         );
+      }
+
+      // Refuse the spawn explicitly when dispatch is paused or the agent's
+      // account is rate-limited, instead of returning a session that
+      // immediately dies.
+      const limited = await rateLimitRefusal(c, services, agent);
+      if (limited) {
+        return limited;
       }
 
       const existingSession = sessionManager.getActiveSession(agentId);
@@ -406,6 +615,10 @@ Please begin working on this task. Use \`sf task get ${taskResult.id}\` to see f
         interactive: body.interactive,
         cols: body.cols,
         rows: body.rows,
+        environmentVariables: body.environmentVariables,
+        provider: body.provider,
+        model: body.model,
+        timeout: body.timeout,
       });
 
       // Attach event saver immediately to capture all events, including the first assistant response
@@ -567,11 +780,50 @@ Please begin working on this task. Use \`sf task get ${taskResult.id}\` to see f
         worktree?: string;
         resumePrompt?: string;
         checkReadyQueue?: boolean;
+        // Fields the start route accepts but resume deliberately does not
+        // (session continuity: a resumed session keeps its original spawn
+        // shape). Present values are rejected explicitly below instead of
+        // being silently dropped.
+        interactive?: boolean;
+        cols?: number;
+        rows?: number;
+        environmentVariables?: Record<string, string>;
+        provider?: string;
+        model?: string;
+        timeout?: number;
       };
 
       const agent = await agentRegistry.getAgent(agentId);
       if (!agent) {
         return c.json({ error: { code: 'NOT_FOUND', message: 'Agent not found' } }, 404);
+      }
+
+      // Explicit refusal for start-only options: silently ignoring them here
+      // would let a client believe its override was applied while the resumed
+      // session runs with its original provider/model/environment.
+      {
+        const unsupported: string[] = [];
+        if (body.interactive !== undefined) unsupported.push('interactive');
+        if (body.cols !== undefined) unsupported.push('cols');
+        if (body.rows !== undefined) unsupported.push('rows');
+        if (body.environmentVariables !== undefined) unsupported.push('environmentVariables');
+        if (body.provider !== undefined) unsupported.push('provider');
+        if (body.model !== undefined) unsupported.push('model');
+        if (body.timeout !== undefined) unsupported.push('timeout');
+        if (unsupported.length > 0) {
+          return c.json(
+            {
+              error: {
+                code: 'UNSUPPORTED_FOR_RESUME',
+                message:
+                  `Option(s) ${unsupported.join(', ')} are not supported when resuming a session — ` +
+                  'a resumed session keeps its original provider, model, environment and terminal shape. ' +
+                  'Drop them, or start a fresh session instead.',
+              },
+            },
+            400
+          );
+        }
       }
 
       if (isAgentDisabled(agent)) {
@@ -584,6 +836,14 @@ Please begin working on this task. Use \`sf task get ${taskResult.id}\` to see f
           },
           409
         );
+      }
+
+      // Refuse the spawn explicitly when dispatch is paused or the agent's
+      // account is rate-limited, instead of returning a session that
+      // immediately dies.
+      const limited = await rateLimitRefusal(c, services, agent);
+      if (limited) {
+        return limited;
       }
 
       const existingSession = sessionManager.getActiveSession(agentId);

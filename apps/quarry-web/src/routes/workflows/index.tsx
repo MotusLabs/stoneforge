@@ -10,6 +10,7 @@
 
 import { useState, useMemo, useEffect } from 'react';
 import { useSearch, useNavigate } from '@tanstack/react-router';
+import { ElementNotFound } from '../../components/shared/ElementNotFound';
 import { getCurrentBinding, formatKeyBinding } from '../../lib/keyboard';
 import {
   Workflow,
@@ -34,6 +35,7 @@ import {
   useCancelWorkflow,
   useDeleteWorkflow,
   useWorkflowDetail,
+  isWorkflowTerminal,
 } from '@stoneforge/ui/workflows';
 
 type TabValue = 'templates' | 'active';
@@ -163,8 +165,15 @@ export function WorkflowsPage() {
   };
 
   const handleDeleteWorkflow = async (workflowId: string) => {
+    // WorkflowCard only offers Delete for terminal workflows. Finished durable
+    // workflows require force on the server, so the explicit delete of a
+    // terminal workflow is sent as forced (a no-op for ephemeral ones).
+    const workflow = allWorkflows.find(w => w.id === workflowId);
     try {
-      await deleteWorkflow.mutateAsync({ workflowId });
+      await deleteWorkflow.mutateAsync({
+        workflowId,
+        force: workflow ? isWorkflowTerminal(workflow.status) : false,
+      });
     } catch (error) {
       console.error('Failed to delete workflow:', error);
     }
@@ -228,6 +237,21 @@ export function WorkflowsPage() {
     return (
       <div className="flex items-center justify-center py-16">
         <Loader2 className="w-8 h-8 text-[var(--color-primary)] animate-spin" />
+      </div>
+    );
+  }
+
+  // A selected workflow that finished loading without data is unavailable.
+  if (selectedWorkflowId && !selectedWorkflow) {
+    return (
+      <div className="space-y-6 animate-fade-in" data-testid="workflows-page">
+        <ElementNotFound
+          elementType="Workflow"
+          elementId={selectedWorkflowId}
+          backRoute="/workflows"
+          backLabel="Back to Workflows"
+          onDismiss={handleBackToList}
+        />
       </div>
     );
   }

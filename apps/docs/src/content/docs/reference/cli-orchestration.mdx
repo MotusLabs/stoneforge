@@ -76,16 +76,23 @@ sf agent start <id> [options]
 | --- | --- |
 | `-p, --prompt <text>` | Initial prompt to send to agent |
 | `-m, --mode <mode>` | Spawn mode: `headless`, `interactive` |
-| `-r, --resume <id>` | Provider session ID to resume |
+| `-r, --resume <id>` | Provider session ID to resume (routed through the server's resume endpoint; start-only options combined with it are refused explicitly) |
 | `-w, --workdir <path>` | Working directory for agent |
 | `--cols <n>` | Terminal columns for interactive mode (default: 120) |
 | `--rows <n>` | Terminal rows for interactive mode (default: 30) |
 | `--timeout <ms>` | Timeout in milliseconds (default: 120000) |
 | `-e, --env <KEY=VALUE>` | Environment variable (repeatable) |
 | `-t, --taskId <id>` | Task ID to assign to agent |
-| `--stream` | Stream agent output after starting |
+| `--stream` | Stream agent output after starting (always a local foreground spawn) |
 | `--provider <name>` | Override agent provider for this session |
 | `--model <model>` | Override model for this session |
+| `-s, --server <url>` | Orchestrator server URL (default `http://localhost:3457`, or `STONEFORGE_API_URL`) |
+
+When an orchestrator server is reachable, `sf agent start` starts the session **through the server** so it is supervised, logged, and visible to the dispatch daemon. Every option except `--stream` is forwarded: `--mode` maps to the server's `interactive` flag, and `--resume` routes through the server's resume endpoint (`POST /api/agents/:id/resume`). If the server refuses the spawn — for example the agent's account is rate-limited or dispatch is paused by a manual sleep (`429 RATE_LIMITED` with a `Retry-After`), the agent is disabled, or it already has an active session — the CLI reports that explicit error instead of a success. Start-only options combined with `--resume` (e.g. `--model`) are refused explicitly by the server (`400 UNSUPPORTED_FOR_RESUME`), never silently dropped.
+
+The CLI only falls back to a local spawn when no server could be reached at all (connection refused, DNS failure — the request was never delivered). If the outcome is unknown (the request timed out or the connection dropped after submission), the command exits with an explicit "outcome is unknown" error telling you how to check the agent before retrying; it never retries locally, because the server may already have accepted the spawn.
+
+`--stream` always spawns locally in the foreground: the CLI stays attached and streams output until the session ends, so nothing is silently dropped. Without a reachable server, other starts also spawn locally — but a non-streaming local spawn is owned by the CLI process itself and ends when the CLI exits, so prefer running the server for long-running work.
 
 #### `sf agent stop`
 

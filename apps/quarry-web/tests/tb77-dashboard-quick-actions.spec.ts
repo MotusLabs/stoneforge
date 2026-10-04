@@ -1,9 +1,16 @@
 import { test, expect } from '@playwright/test';
+import {
+  makePlaybook,
+  mockPlaybookRoutes,
+  selectPlaybookInModal,
+} from './helpers/create-workflow-modal';
 
 test.describe('TB77: Dashboard Quick Actions with Modals', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/dashboard');
-    await expect(page.getByTestId('dashboard-page')).toBeVisible({ timeout: 10000 });
+    // Generous timeout: the first load of the dashboard route in a parallel
+    // worker can wait on vite's dev-server transform of the route chunk
+    await expect(page.getByTestId('dashboard-page')).toBeVisible({ timeout: 30000 });
   });
 
   test.describe('Create Task Button', () => {
@@ -110,11 +117,17 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
       await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).not.toBeVisible();
     });
 
-    test('workflow can be created from dashboard modal (quick mode)', async ({ page }) => {
+    test('workflow can be created from dashboard modal', async ({ page }) => {
+      // Creation is playbook-only: mock the playbook API the modal relies on
+      const playbook = makePlaybook();
+      await mockPlaybookRoutes(page, { playbooks: [playbook] });
+
       await page.getByTestId('quick-action-create-workflow').click();
       await expect(page.getByRole('dialog', { name: 'Create Workflow', exact: true })).toBeVisible();
 
-      // Fill in workflow details (quick mode is default)
+      // A playbook must be selected before the form unlocks
+      await selectPlaybookInModal(page, playbook);
+
       const workflowTitle = `TB77 Test Workflow ${Date.now()}`;
       await page.getByTestId('create-title-input').fill(workflowTitle);
 
@@ -232,7 +245,12 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
     });
 
     test('toast appears after successful workflow creation', async ({ page }) => {
+      // Creation is playbook-only: mock the playbook API the modal relies on
+      const playbook = makePlaybook();
+      await mockPlaybookRoutes(page, { playbooks: [playbook] });
+
       await page.getByTestId('quick-action-create-workflow').click();
+      await selectPlaybookInModal(page, playbook);
       await page.getByTestId('create-title-input').fill('Toast Test Workflow');
       await page.getByTestId('create-submit-button').click();
 
@@ -241,7 +259,12 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
     });
 
     test('toast has View Workflow action button after workflow creation', async ({ page }) => {
+      // Creation is playbook-only: mock the playbook API the modal relies on
+      const playbook = makePlaybook();
+      await mockPlaybookRoutes(page, { playbooks: [playbook] });
+
       await page.getByTestId('quick-action-create-workflow').click();
+      await selectPlaybookInModal(page, playbook);
       await page.getByTestId('create-title-input').fill('Toast Action Test Workflow');
       await page.getByTestId('create-submit-button').click();
 
@@ -315,12 +338,13 @@ test.describe('TB77: Dashboard Quick Actions with Modals', () => {
       await expect(button).toContainText('C T');
     });
 
-    test('Workflows page Create Workflow button shows keyboard hint', async ({ page }) => {
+    test('Workflows page create button shows keyboard hint', async ({ page }) => {
       await page.goto('/workflows');
       await expect(page.getByTestId('workflows-page')).toBeVisible();
 
-      // Button should show C W keyboard hint
-      const button = page.getByTestId('create-workflow-button');
+      // The templates tab header button (C W opens the create workflow modal)
+      // should show the C W keyboard hint
+      const button = page.getByTestId('workflows-create');
       await expect(button).toContainText('C W');
     });
   });

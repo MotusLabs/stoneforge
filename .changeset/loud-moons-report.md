@@ -1,0 +1,16 @@
+---
+"@stoneforge/smithy": patch
+---
+
+Rate limits are now recorded only from actual provider error signatures, and workspace-restart kills are no longer misattributed to the provider (incident 2026-10-04, task el-3hxa0i).
+
+Recording a rate limit requires the provider to have actually said so: a rate-limit/usage-cap message from the executable (including `API Error: 429 …` and `rate_limit_exceeded`, both newly recognised signatures). The two heuristics that previously recorded +1h limits without any signature no longer do:
+
+- A recovered session that exits rapidly **with no output** still rolls back `resumeCount` (it never did work) and is logged, but records nothing — the cause is undetermined, not proven to be a provider limit.
+- The rapid-exit **pattern detector** (last N sessions started in quick succession without completing) still skips the recovery steward spawn — now with a deduplicated warning and operation-log entry — but never records a limit, so it cannot pause dispatch or roll a reset time forward.
+
+Session-history entries whose `startedAt` predates the current daemon incarnation are excluded from pattern detection entirely: those sessions were killed by the workspace/server restart (the PID liveness check right after startup), not by the provider. During a container restart loop this previously recorded a fresh +1h limit on every bounce, making the dispatch pause effectively permanent while the provider was healthy. Provider health and daemon belief stay independently checkable via `sf daemon wake` to clear stale limits.
+
+`sf agent start` no longer reports phantom successes. Every non-streaming start now goes through the orchestrator server (`POST /api/agents/:id/start`, `--server` or `STONEFORGE_API_URL`, default `http://localhost:3457`) whenever one is reachable: the session is server-owned and supervised, and explicit refusals surface as CLI errors. All spawn-shaping options are forwarded — `--mode` (as the route's `interactive` flag), `--cols`, `--rows`, `--env`, `--provider`, `--model`, `--timeout` — and `--resume` routes through `POST /api/agents/:id/resume`; start-only options combined with `--resume` are refused explicitly (`400 UNSUPPORTED_FOR_RESUME`) instead of being silently dropped. `--timeout`/`--env`/`--cols`/`--rows` values are validated before anything is spawned. The CLI falls back to a local spawn only when no server was reachable at all (connection refused/DNS — the request was never delivered); a timeout or connection loss after submission is treated as ambiguous and reported as an explicit "outcome is unknown" error (the server may already have accepted the spawn — retrying locally could duplicate it), as is a success response that carries no session. `--stream` keeps its local foreground behaviour by design.
+
+The start and resume HTTP routes in `@stoneforge/smithy/server` — the routes the running server actually serves — carry the rate-limit guard (429 `RATE_LIMITED` with `Retry-After` when dispatch is paused, including by a manual sleep, or when the target agent's account is limited, naming `accountKey`/`resetsAt`) instead of spawning a session that immediately dies, and validate forwarded spawn options with explicit 400s (`INVALID_PROVIDER`, `INVALID_MODEL`, `INVALID_TIMEOUT`, `UNSUPPORTED_FOR_RESUME`) before spawning.

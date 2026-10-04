@@ -183,6 +183,18 @@ export interface SpawnedSession {
   readonly workerMode?: WorkerMode;
   /** Spawn mode used */
   readonly mode: SpawnMode;
+  /**
+   * Name of the provider used for this session (e.g., 'claude-code',
+   * 'opencode'). Records the effective provider after SpawnOptions.provider
+   * overrides are applied, so callers can verify which provider actually
+   * ran the session.
+   */
+  readonly provider: string;
+  /**
+   * Model override applied to this session (if any). Undefined means the
+   * provider's default model was used.
+   */
+  readonly model?: string;
   /** Process ID */
   readonly pid?: number;
   /** Current status */
@@ -542,6 +554,8 @@ export class SpawnerServiceImpl implements SpawnerService {
       agentRole,
       workerMode: this.getWorkerMode(agentRole, options?.mode),
       mode,
+      provider: options?.provider?.name ?? this.provider.name,
+      model: options?.model,
       status: 'starting',
       workingDirectory: options?.workingDirectory ?? this.defaultConfig.workingDirectory!,
       createdAt: now,
@@ -1401,6 +1415,8 @@ export class SpawnerServiceImpl implements SpawnerService {
       agentRole: session.agentRole,
       workerMode: session.workerMode,
       mode: session.mode,
+      provider: session.provider,
+      model: session.model,
       pid: session.pid,
       status: session.status,
       workingDirectory: session.workingDirectory,

@@ -120,3 +120,61 @@ describe('POST /api/providers/:name/verify', () => {
     expect(body.error.code).toBe('INTERNAL_ERROR');
   });
 });
+
+// Ported from apps/smithy-server/src/index.bun.test.ts ('Provider Models API
+// Routes') — the legacy duplicate tree removed in task el-5zmnji. The mocked
+// registry makes the outcomes deterministic (the legacy test had to accept
+// 200-or-503 because it hit the real provider).
+describe('GET /api/providers/:name/models', () => {
+  let services: Services;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    services = createMockServices();
+  });
+
+  it('returns the models array for an available provider', async () => {
+    mockRegistry.get.mockReturnValue(mockProvider);
+    mockProvider.isAvailable.mockResolvedValue(true);
+    mockProvider.listModels.mockResolvedValue([
+      { id: 'claude-sonnet-4-5-20250929' },
+      { id: 'claude-opus-4-5' },
+    ]);
+
+    const app = createAgentRoutes(services);
+    const res = await app.request('/api/providers/claude-code/models');
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body.models)).toBe(true);
+    expect(body.models).toHaveLength(2);
+    expect(mockProvider.listModels).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 503 PROVIDER_UNAVAILABLE when the provider is not installed', async () => {
+    mockRegistry.get.mockReturnValue(mockProvider);
+    mockProvider.isAvailable.mockResolvedValue(false);
+    mockProvider.getInstallInstructions.mockReturnValue('npm install -g @anthropic-ai/claude-code');
+
+    const app = createAgentRoutes(services);
+    const res = await app.request('/api/providers/claude-code/models');
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error.code).toBe('PROVIDER_UNAVAILABLE');
+    expect(body.error.message).toContain('not available');
+    expect(mockProvider.listModels).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 for an unknown provider name', async () => {
+    mockRegistry.get.mockReturnValue(undefined);
+
+    const app = createAgentRoutes(services);
+    const res = await app.request('/api/providers/unknown-provider/models');
+
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error.code).toBe('NOT_FOUND');
+    expect(body.error.message).toContain('Provider not found');
+  });
+});

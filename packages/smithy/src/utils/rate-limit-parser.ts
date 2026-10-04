@@ -61,6 +61,9 @@ const MONTH_NAMES: Record<string, number> = {
  * - "Claude usage limit reached. Your limit will reset at {time}"
  * - "API Error: Rate limit reached"
  * - "Usage limit reached" (Codex)
+ * - "API Error: 429 ..." / "API Error (429: rate_limit_exceeded)" — the
+ *   executable's HTTP 429 surface. These are hard provider error signatures:
+ *   rate-limit recording requires one of these, never a mere rapid exit.
  */
 export const RATE_LIMIT_PATTERNS: ReadonlyArray<RegExp> = [
   /you[\u2018\u2019''`]ve hit your limit/i,
@@ -68,6 +71,8 @@ export const RATE_LIMIT_PATTERNS: ReadonlyArray<RegExp> = [
   /usage limit reached/i,
   /rate limit reached/i,
   /limit will reset at\b/i,
+  /api error[^\n]{0,40}\b429\b/i,
+  /\brate_limit_exceeded\b/i,
 ];
 
 /**
