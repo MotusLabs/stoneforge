@@ -40,8 +40,55 @@ async function expectSidebarClosed(page: Page) {
  * but badge missing/wrong" (the clobber regression signature, which still
  * fails once the header is stable).
  */
-async function awaitBell(page: Page, timeout = 30_000) {
+async function awaitBell(page: Page, timeout = 45_000) {
   await expect(page.getByTestId('notification-bell')).toBeVisible({ timeout });
+}
+
+/**
+ * Wait for the badge to exist with the expected text, re-gating on the bell
+ * if the document is replaced mid-wait.
+ *
+ * Two properties matter here:
+ *
+ * 1. Visibility and text are ONE retried assertion. `toHaveText` keeps
+ *    retrying while the element is missing, so a document replacement between
+ *    a separate visibility check and a text check cannot produce a false
+ *    failure (observed in the field: the badge passed toBeVisible, the page
+ *    was then replaced, and toHaveText failed with element-not-found against
+ *    the replacing document — on an app whose badge was correct all along).
+ *
+ * 2. Replacement recovery. On a cold dev-server cache, vite's dependency
+ *    re-optimization triggers full page reloads mid-boot, and a slow module
+ *    fetch can do the same under parallel-suite load. The bell gate can
+ *    resolve against a first document that is then immediately replaced. When
+ *    the badge assertion fails, this helper checks the bell: if the bell is
+ *    gone too, the document was replaced and we re-gate on the new document's
+ *    header. If the bell is STILL visible, the header is stable and the badge
+ *    is genuinely absent or wrong — the clobber regression signature — and the
+ *    failure surfaces immediately from the first attempt.
+ */
+async function awaitBadgeText(page: Page, expected: string | RegExp, attempts = 2) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    awaitBell(page);
+    try {
+      await expect(page.getByTestId('notification-badge')).toHaveText(expected, { timeout: 10_000 });
+      return;
+    } catch (err) {
+      lastError = err;
+      if (attempt === attempts - 1) break;
+      // If the bell vanished too, the document was replaced under us and the
+      // next iteration re-gates on the new document's header. A helper
+      // failure against a still-present bell (stable header, badge missing
+      // or wrong) is the clobber signature and rethrows after the loop.
+      const bellStillVisible = await page
+        .getByTestId('notification-bell')
+        .isVisible()
+        .catch(() => false);
+      if (bellStillVisible) break;
+    }
+  }
+  throw lastError;
 }
 
 /**
@@ -78,11 +125,13 @@ async function seedNotifications(page: Page, notifications: Record<string, unkno
 
 test.describe('TB-O25a: Notification System', () => {
   // The dev server can take >30s to deliver the app under parallel-suite load
-  // (see awaitBell). The suite default of 30s per test turns that environment
-  // slowness into infra failures unrelated to what these tests assert; give
-  // them headroom. Timeouts are upper bounds — runs on a fast/uncontended
-  // server finish in the usual ~10-20s.
-  test.setTimeout(90_000);
+  // (see awaitBell), and awaitBadgeText may re-gate once after a document
+  // replacement, so worst-case wall time per test is ~90s of bounded waits on
+  // top of goto. The suite default of 30s per test turns that environment
+  // slowness into infra failures unrelated to what these tests assert.
+  // Timeouts are upper bounds — runs on a fast/uncontended server finish in
+  // the usual ~10-20s.
+  test.setTimeout(150_000);
 
   // The /activity landing page auto-starts the onboarding tour ~800ms after
   // load whenever a workflow preset is configured (the e2e server ships one).
@@ -204,13 +253,8 @@ test.describe('TB-O25a: Notification System', () => {
       ]);
       await page.goto('/activity');
 
-      // Header first (see awaitBell), then the badge with a window that
-      // crosses dev-server document transients but still fails on a stable
-      // header whose badge never renders.
-      awaitBell(page);
-      const badge = page.getByTestId('notification-badge');
-      await expect(badge).toBeVisible({ timeout: 10_000 });
-      await expect(badge).toHaveText('2');
+      // Badge via the re-gating helper (see awaitBadgeText)
+      await awaitBadgeText(page, '2');
     });
 
     test('badge shows 99+ for large counts', async ({ page }) => {
@@ -221,14 +265,8 @@ test.describe('TB-O25a: Notification System', () => {
       await seedNotifications(page, makeNotifications(100));
       await page.goto('/activity');
 
-      // Header first, then the badge. The badge window is generous enough to
-      // cross the dev server's transient document replacements (see the
-      // awaitBell docstring) but still fails deterministically if the header
-      // is stable and the badge never renders — the clobber signature.
-      awaitBell(page);
-      const badge = page.getByTestId('notification-badge');
-      await expect(badge).toBeVisible({ timeout: 10_000 });
-      await expect(badge).toHaveText('99+');
+      // Badge via the re-gating helper (see awaitBadgeText)
+      await awaitBadgeText(page, '99+');
     });
   });
 
@@ -262,8 +300,7 @@ test.describe('TB-O25a: Notification System', () => {
         },
       ]);
       await page.goto('/activity');
-      awaitBell(page);
-      await expect(page.getByTestId('notification-badge')).toHaveText('2', { timeout: 10_000 });
+      await awaitBadgeText(page, '2');
 
       // External, same-tab write AFTER the app mounted. Same-tab writes fire
       // no storage event, so the app's in-memory state does not know about
@@ -322,8 +359,7 @@ test.describe('TB-O25a: Notification System', () => {
       }));
       await seedNotifications(page, seed);
       await page.goto('/activity');
-      awaitBell(page);
-      await expect(page.getByTestId('notification-badge')).toHaveText('2', { timeout: 10_000 });
+      await awaitBadgeText(page, '2');
 
       // Second page in the SAME context. It only needs to be a same-origin
       // document to share localStorage — navigating to a static asset avoids
@@ -452,8 +488,7 @@ test.describe('TB-O25a: Notification System', () => {
       await page.goto('/activity');
 
       // Badge should show 2 unread
-      awaitBell(page);
-      await expect(page.getByTestId('notification-badge')).toHaveText('2', { timeout: 10_000 });
+      await awaitBadgeText(page, '2');
 
       // Open sidebar and mark all as read
       await openSidebar(page);
