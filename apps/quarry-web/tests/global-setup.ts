@@ -3,7 +3,15 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createStorageAsync, initializeSchema } from '@stoneforge/storage';
 import { createQuarryAPI } from '@stoneforge/quarry';
-import { ElementType, createTimestamp, EntityTypeValue } from '@stoneforge/core';
+import {
+  ElementType,
+  createTimestamp,
+  EntityTypeValue,
+  createGroupChannel,
+  createDocument,
+  createMessage,
+  DocumentCategory,
+} from '@stoneforge/core';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '../../..');
@@ -81,6 +89,61 @@ export default async function globalSetup() {
     name: 'operator',
     entityType: EntityTypeValue.HUMAN,
   });
+
+  // Messaging fixtures for the messaging specs (message-display, send-message,
+  // threading). Group channels require at least two member entities and there
+  // is no HTTP endpoint for creating entities, so the second member and the
+  // channels must be seeded through the storage API before the server starts.
+  // Without these the specs' channel guards skip every messaging path, and the
+  // specs then depend on channels left behind by whichever other specs happen
+  // to run first (fixture-ordering flakiness).
+  await api.create({
+    id: 'el-0001',
+    type: ElementType.ENTITY,
+    createdAt: now,
+    updatedAt: now,
+    createdBy: 'el-0000',
+    tags: [],
+    metadata: {},
+    name: 'e2e-participant',
+    entityType: EntityTypeValue.HUMAN,
+  });
+
+  // Channel with one seed message: exercises the "messages exist" read paths.
+  // The message content follows the server's POST /api/messages shape (an
+  // immutable MESSAGE_CONTENT document referenced by contentRef). Seeding via
+  // the storage API deliberately skips the route's inbox side effects so
+  // inbox specs keep starting from an empty inbox.
+  const seededChannel = await createGroupChannel({
+    name: 'e2e-messaging',
+    createdBy: 'el-0000',
+    members: ['el-0001'],
+  });
+  await api.create(seededChannel as unknown as Parameters<typeof api.create>[0]);
+
+  const seedDoc = await createDocument({
+    contentType: 'text',
+    content: 'Seed message for message display specs',
+    createdBy: 'el-0000',
+    category: DocumentCategory.MESSAGE_CONTENT,
+    immutable: true,
+  });
+  await api.create(seedDoc as unknown as Parameters<typeof api.create>[0]);
+
+  const seedMessage = await createMessage({
+    channelId: seededChannel.id,
+    sender: 'el-0000',
+    contentRef: seedDoc.id,
+  });
+  await api.create(seedMessage as unknown as Parameters<typeof api.create>[0]);
+
+  // Empty channel: exercises the "no messages" empty-state path.
+  const emptyChannel = await createGroupChannel({
+    name: 'e2e-messaging-empty',
+    createdBy: 'el-0000',
+    members: ['el-0001'],
+  });
+  await api.create(emptyChannel as unknown as Parameters<typeof api.create>[0]);
 
   // Expose playbook templates through the test server's playbook endpoints
   mkdirSync(PLAYBOOK_FIXTURE_DIR, { recursive: true });

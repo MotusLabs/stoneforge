@@ -1,48 +1,40 @@
 import { test, expect } from '@playwright/test';
+import {
+  createGroupChannelFixture,
+  listEntities,
+  type FixtureChannel,
+} from './helpers/group-channel';
 
 // ============================================================================
 // TB52: Attach Documents to Messages Tests
 // ============================================================================
 
 test.describe('TB52: Attach Documents to Messages', () => {
-  // Helper to get or create a channel for testing
-  async function getOrCreateTestChannel(page: import('@playwright/test').Page): Promise<{ id: string; members: string[] }> {
-    const response = await page.request.get('/api/channels');
-    const channels = await response.json();
-
-    if (channels.length > 0) {
-      return channels[0];
-    }
-
-    // Get an entity to use as createdBy
-    const entitiesResp = await page.request.get('/api/entities');
-    const entities = await entitiesResp.json();
-    const createdBy = entities.length > 0 ? entities[0].id : 'test-user';
-
-    // Create a channel if none exists
-    const createResponse = await page.request.post('/api/channels', {
-      data: {
-        name: `Test Channel ${Date.now()}`,
-        channelType: 'group',
-        createdBy,
-        members: [createdBy],
-        permissions: {
-          visibility: 'public',
-          joinPolicy: 'open',
-          modifyMembers: [createdBy],
-        },
-      },
-    });
-    expect(createResponse.ok()).toBe(true);
-    return createResponse.json();
+  // Helper to create a dedicated channel for a test. Group channels need at
+  // least two member entities and a channel name without spaces — see
+  // helpers/group-channel.ts for the full contract. The create is asserted so
+  // a failed channel create fails the test instead of skipping the spec.
+  //
+  // Each test gets its own channel on purpose: this spec posts messages, and
+  // posting into a shared channel (e.g. the global-setup seed) changes what
+  // other specs see — message-display picks the most recently updated
+  // channel with messages and expects its first message to stay inside the
+  // virtualization window, which extra messages from this spec would break.
+  async function createTestChannel(
+    page: import('@playwright/test').Page
+  ): Promise<FixtureChannel> {
+    return createGroupChannelFixture(page, `e2e-attachments-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
   }
 
   // Helper to create a document for testing
-  async function createTestDocument(page: import('@playwright/test').Page, options: { title?: string } = {}) {
-    // Get an entity to use as createdBy
-    const entitiesResp = await page.request.get('/api/entities');
-    const entities = await entitiesResp.json();
-    const createdBy = entities.length > 0 ? entities[0].id : 'test-user';
+  async function createTestDocument(
+    page: import('@playwright/test').Page,
+    options: { title?: string } = {}
+  ) {
+    // Get an entity to use as createdBy (global-setup seeds el-0000/el-0001)
+    const entities = await listEntities(page);
+    expect(entities.length, 'a seeded entity is required as createdBy').toBeGreaterThan(0);
+    const createdBy = entities[0].id;
 
     const response = await page.request.post('/api/documents', {
       data: {
@@ -63,7 +55,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   // ============================================================================
 
   test('POST /api/messages accepts attachmentIds array', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc = await createTestDocument(page);
     const sender = channel.members[0];
 
@@ -85,7 +77,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('POST /api/messages works without attachments', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const sender = channel.members[0];
 
     const response = await page.request.post('/api/messages', {
@@ -103,7 +95,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('POST /api/messages with multiple attachments', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc1 = await createTestDocument(page);
     const doc2 = await createTestDocument(page);
     const sender = channel.members[0];
@@ -125,7 +117,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('POST /api/messages returns 404 for non-existent document', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const sender = channel.members[0];
 
     const response = await page.request.post('/api/messages', {
@@ -143,7 +135,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('GET /api/channels/:id/messages hydrates attachments', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc = await createTestDocument(page);
     const sender = channel.members[0];
 
@@ -175,7 +167,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   // ============================================================================
 
   test('message composer shows attach button', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
 
     await page.goto('/messages');
     await expect(page.getByTestId('messages-page')).toBeVisible({ timeout: 10000 });
@@ -190,7 +182,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('clicking attach button opens document picker', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
 
     await page.goto('/messages');
     await expect(page.getByTestId('messages-page')).toBeVisible({ timeout: 10000 });
@@ -205,7 +197,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('document picker shows available documents', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc = await createTestDocument(page);
 
     await page.goto('/messages');
@@ -221,7 +213,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('selecting document in picker adds attachment preview', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc = await createTestDocument(page);
 
     await page.goto('/messages');
@@ -242,7 +234,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('attachment preview shows remove button', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc = await createTestDocument(page);
 
     await page.goto('/messages');
@@ -261,7 +253,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('clicking remove button removes attachment from preview', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc = await createTestDocument(page);
 
     await page.goto('/messages');
@@ -284,7 +276,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('document picker search filters documents', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const uniqueTitle = `UniqueAttachDoc${Date.now()}`;
     const doc = await createTestDocument(page, { title: uniqueTitle });
 
@@ -304,7 +296,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('document picker can be closed with X button', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
 
     await page.goto('/messages');
     await expect(page.getByTestId('messages-page')).toBeVisible({ timeout: 10000 });
@@ -320,7 +312,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('document picker excludes already selected documents', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc1 = await createTestDocument(page);
     const doc2 = await createTestDocument(page);
 
@@ -351,7 +343,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   // ============================================================================
 
   test('sent message with attachment displays the attachment', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc = await createTestDocument(page);
 
     await page.goto('/messages');
@@ -369,14 +361,14 @@ test.describe('TB52: Attach Documents to Messages', () => {
     await page.getByTestId('message-send-button').click();
 
     // Wait for message to appear
-    await expect(page.getByTestId('messages-list')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
 
     // Find the message attachment
     await expect(page.getByTestId(`message-attachment-${doc.id}`)).toBeVisible({ timeout: 5000 });
   });
 
   test('message attachment is clickable link to document', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc = await createTestDocument(page);
     const sender = channel.members[0];
 
@@ -393,16 +385,16 @@ test.describe('TB52: Attach Documents to Messages', () => {
     await page.goto('/messages');
     await expect(page.getByTestId('messages-page')).toBeVisible({ timeout: 10000 });
     await page.getByTestId(`channel-item-${channel.id}`).click();
-    await expect(page.getByTestId('messages-list')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
 
     // Find the attachment link
     const attachmentLink = page.getByTestId(`message-attachment-${doc.id}`);
     await expect(attachmentLink).toBeVisible({ timeout: 5000 });
-    await expect(attachmentLink).toHaveAttribute('href', `/documents?doc=${doc.id}`);
+    await expect(attachmentLink).toHaveAttribute('href', `/documents?selected=${doc.id}`);
   });
 
   test('message shows multiple attachments', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc1 = await createTestDocument(page);
     const doc2 = await createTestDocument(page);
     const sender = channel.members[0];
@@ -420,7 +412,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
     await page.goto('/messages');
     await expect(page.getByTestId('messages-page')).toBeVisible({ timeout: 10000 });
     await page.getByTestId(`channel-item-${channel.id}`).click();
-    await expect(page.getByTestId('messages-list')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
 
     // Both attachments should be visible
     await expect(page.getByTestId(`message-attachment-${doc1.id}`)).toBeVisible({ timeout: 5000 });
@@ -428,7 +420,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('message attachment shows document title', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const uniqueTitle = `Document Title ${Date.now()}`;
     const doc = await createTestDocument(page, { title: uniqueTitle });
     const sender = channel.members[0];
@@ -446,7 +438,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
     await page.goto('/messages');
     await expect(page.getByTestId('messages-page')).toBeVisible({ timeout: 10000 });
     await page.getByTestId(`channel-item-${channel.id}`).click();
-    await expect(page.getByTestId('messages-list')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
 
     // Attachment should show title
     const attachment = page.getByTestId(`message-attachment-${doc.id}`);
@@ -455,7 +447,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('message attachment shows content type badge', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc = await createTestDocument(page);
     const sender = channel.members[0];
 
@@ -472,7 +464,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
     await page.goto('/messages');
     await expect(page.getByTestId('messages-page')).toBeVisible({ timeout: 10000 });
     await page.getByTestId(`channel-item-${channel.id}`).click();
-    await expect(page.getByTestId('messages-list')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
 
     // Attachment should show content type
     const attachment = page.getByTestId(`message-attachment-${doc.id}`);
@@ -481,7 +473,7 @@ test.describe('TB52: Attach Documents to Messages', () => {
   });
 
   test('attachments cleared after sending message', async ({ page }) => {
-    const channel = await getOrCreateTestChannel(page);
+    const channel = await createTestChannel(page);
     const doc = await createTestDocument(page);
 
     await page.goto('/messages');
