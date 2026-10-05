@@ -21,6 +21,15 @@ const BREAKPOINTS = {
 const DIRECTOR_PANEL_WIDTH = 400; // approximate default expanded width
 
 test.describe('Responsive Breakpoint Alignment', () => {
+  // The /activity landing page auto-starts the onboarding tour ~800ms after
+  // load whenever a workflow preset is configured (the e2e server ships one).
+  // Mark it completed so its fixed-inset backdrop can't intercept clicks.
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('stoneforge:onboarding-complete', 'true');
+    });
+  });
+
   // --------------------------------------------------------------------------
   // Test 1: Sidebar state consistency (director open vs closed)
   // --------------------------------------------------------------------------

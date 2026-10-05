@@ -11,6 +11,13 @@ test.describe('TB-O15: Orchestrator Web Scaffold', () => {
       localStorage.setItem('orchestrator-director-collapsed', 'true');
       localStorage.setItem('orchestrator-director-maximized', 'false');
       localStorage.setItem('orchestrator-director-panel-width', '400');
+      // Suppress the onboarding tour so its fixed-inset backdrop can't
+      // intercept clicks. The e2e server config ships a configured workflow
+      // preset (to keep the undismissable first-load PresetSelectionModal
+      // away), which is exactly the condition that auto-starts this tour on
+      // /activity ~800ms after load — so every suite that lands there and
+      // clicks must mark the tour completed (same as director-terminal.spec).
+      localStorage.setItem('stoneforge:onboarding-complete', 'true');
     });
   });
 

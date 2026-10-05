@@ -23,6 +23,15 @@ async function expectSidebarClosed(page: Page) {
 }
 
 test.describe('TB-O25a: Notification System', () => {
+  // The /activity landing page auto-starts the onboarding tour ~800ms after
+  // load whenever a workflow preset is configured (the e2e server ships one).
+  // Mark it completed so its fixed-inset backdrop can't intercept clicks.
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('stoneforge:onboarding-complete', 'true');
+    });
+  });
+
   test.describe('Notification Center UI', () => {
     test('displays notification bell in header', async ({ page }) => {
       await page.goto('/');

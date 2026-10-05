@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '../..');
 const testDbPath = resolve(projectRoot, '.stoneforge-test/stoneforge.db');
+const testConfigPath = resolve(projectRoot, '.stoneforge-test/config.yaml');
 const setupTestDbScript = resolve(__dirname, 'tests/setup-test-db.ts');
 
 // Reserve four ports per worktree: Smithy API/web, then Quarry API/web.
@@ -50,6 +51,26 @@ export default defineConfig({
       command: `bun run ${setupTestDbScript} && STONEFORGE_DB_PATH=${testDbPath} DAEMON_AUTO_START=false PORT=${testApiPort} bun run ${resolve(projectRoot, 'apps/smithy-server/src/index.ts')}`,
       port: testApiPort,
       reuseExistingServer,
+      env: {
+        // Hermetic config discovery. Daemon-spawned agent sessions inherit
+        // STONEFORGE_ROOT pointing at the main workspace, and
+        // findStoneforgeDir() checks it BEFORE the cwd walk-up. Without this
+        // override the test server reads the main workspace's config.yaml —
+        // its workflow.preset makes GET /api/settings/workflow-preset return
+        // a configured preset, so the AppShell onboarding tour auto-starts
+        // and its fixed-inset backdrop intercepts clicks in unrelated tests.
+        // Pin the root to this worktree so nothing outside it is consulted.
+        STONEFORGE_ROOT: projectRoot,
+        // Serve config from the test-owned .stoneforge-test/config.yaml
+        // (written by setup-test-db.ts just before the server starts). It
+        // mirrors the repo's tracked config but declares a workflow preset:
+        // a configured preset keeps the app past its first-load gates, while
+        // an unconfigured one renders the undismissable PresetSelectionModal
+        // on /activity and blocks every click. Being gitignored and
+        // regenerated per run, it also absorbs settings PUTs from tests
+        // instead of dirtying the tracked config.
+        STONEFORGE_CONFIG: testConfigPath,
+      },
     },
     {
       command: `VITE_API_PORT=${testApiPort} bun run dev -- --port ${testWebPort} --strictPort`,

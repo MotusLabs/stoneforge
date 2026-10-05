@@ -48,6 +48,18 @@ export default defineConfig({
       cwd: resolve(__dirname, '../quarry-server'),
       port: testApiPort,
       reuseExistingServer,
+      env: {
+        // Hermetic config discovery. Daemon-spawned agent sessions inherit
+        // STONEFORGE_ROOT pointing at the main workspace, and
+        // findStoneforgeDir() checks it BEFORE the cwd walk-up — so without
+        // this override the test server reads the main workspace's config.yaml
+        // instead of this repo's own tracked .stoneforge/config.yaml (sync
+        // settings, workflow preset, merge/agent settings all leak in). Pin
+        // the root to this worktree. Playbook fixtures are unaffected: the
+        // Quarry server discovers playbooks from its cwd
+        // (apps/quarry-server/.stoneforge/playbooks), not STONEFORGE_ROOT.
+        STONEFORGE_ROOT: projectRoot,
+      },
     },
     {
       command: `VITE_API_PORT=${testApiPort} bun run dev -- --port ${testWebPort} --strictPort`,

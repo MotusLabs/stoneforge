@@ -25,6 +25,12 @@ async function openCommandPaletteWithKeyboard(page: Page) {
 
 test.describe('TB-O25b: Command Palette', () => {
   test.beforeEach(async ({ page }) => {
+    // Suppress the onboarding tour (auto-starts ~800ms after landing on
+    // /activity when a workflow preset is configured) so its backdrop can't
+    // intercept clicks. Must be registered before the goto below.
+    await page.addInitScript(() => {
+      localStorage.setItem('stoneforge:onboarding-complete', 'true');
+    });
     await page.goto('/activity');
   });
 
