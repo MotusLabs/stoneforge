@@ -526,8 +526,12 @@ test.describe('TB-O25a: Notification System', () => {
 
   test.describe('Accessibility', () => {
     test('notification bell has proper aria attributes', async ({ page }) => {
-      await page.goto('/');
+      await page.goto('/activity');
 
+      // Header first (see awaitBell) — this test also asserts immediately
+      // after goto, so it needs the same delivery tolerance as the badge
+      // tests.
+      awaitBell(page);
       const bell = page.getByTestId('notification-bell');
       await expect(bell).toHaveAttribute('aria-label', /Notifications/);
       await expect(bell).toHaveAttribute('aria-expanded', 'false');
