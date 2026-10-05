@@ -1,86 +1,26 @@
 import { test, expect } from '@playwright/test';
+import { enterDocumentEditMode } from './helpers/document-edit';
 
 test.describe('TB54: Editor Toolbar Polish', () => {
-  // ============================================================================
-  // Helper: Navigate to document edit mode
-  // ============================================================================
-  async function enterDocumentEditMode(page: import('@playwright/test').Page) {
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
-
-    if (documents.length === 0) {
-      return null;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    let selectedDocId = '';
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      selectedDocId = documents[0].id;
-      await page.getByTestId(`document-item-${selectedDocId}`).click();
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          selectedDocId = libDocs[0].id;
-          await page.getByTestId(`document-item-${selectedDocId}`).click();
-          break;
-        }
-      }
-    }
-
-    if (!selectedDocId) {
-      return null;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
-    await page.getByTestId('document-edit-button').click();
-    await expect(page.getByTestId('block-editor')).toBeVisible({ timeout: 5000 });
-
-    return selectedDocId;
-  }
-
   // ============================================================================
   // Toolbar Core Tests
   // ============================================================================
 
   test('toolbar is visible in edit mode', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await expect(page.getByTestId('block-editor-toolbar')).toBeVisible();
   });
 
   test('toolbar has undo/redo buttons (always visible)', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await expect(page.getByTestId('toolbar-undo')).toBeVisible();
     await expect(page.getByTestId('toolbar-redo')).toBeVisible();
   });
 
   test('toolbar has essential text formatting buttons', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Bold, Italic, Code are always visible (first 3 in compact mode)
     await expect(page.getByTestId('toolbar-bold')).toBeVisible();
@@ -89,11 +29,7 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   });
 
   test('toolbar has dividers between sections', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // At minimum, there should be dividers (between history and text, and between text and overflow/blocks)
     const dividers = page.getByTestId('toolbar-divider');
@@ -106,11 +42,7 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   // ============================================================================
 
   test('bold button shows tooltip with keyboard shortcut on hover', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('toolbar-bold').hover();
     await expect(page.getByTestId('tooltip-content')).toBeVisible({ timeout: 3000 });
@@ -121,11 +53,7 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   });
 
   test('italic button shows tooltip with keyboard shortcut on hover', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('toolbar-italic').hover();
     await expect(page.getByTestId('tooltip-content')).toBeVisible({ timeout: 3000 });
@@ -136,11 +64,7 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   });
 
   test('undo button shows tooltip with keyboard shortcut on hover', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('toolbar-undo').hover();
     await expect(page.getByTestId('tooltip-content')).toBeVisible({ timeout: 3000 });
@@ -151,11 +75,7 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   });
 
   test('code button shows tooltip with keyboard shortcut on hover', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('toolbar-code').hover();
     await expect(page.getByTestId('tooltip-content')).toBeVisible({ timeout: 3000 });
@@ -170,15 +90,14 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   // ============================================================================
 
   test('bold formatting is applied when button is clicked', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Hello World');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
+    // Dismiss the selection bubble menu so it cannot sit on top of the
+    // toolbar button and intercept the click (the selection survives).
+    await page.keyboard.press('Escape');
 
     await page.getByTestId('toolbar-bold').click();
 
@@ -188,15 +107,14 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   });
 
   test('italic formatting is applied when button is clicked', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Hello World');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
+    // Dismiss the selection bubble menu so it cannot sit on top of the
+    // toolbar button and intercept the click (the selection survives).
+    await page.keyboard.press('Escape');
 
     await page.getByTestId('toolbar-italic').click();
 
@@ -206,15 +124,14 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   });
 
   test('code formatting is applied when button is clicked', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('some code');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
+    // Dismiss the selection bubble menu so it cannot sit on top of the
+    // toolbar button and intercept the click (the selection survives).
+    await page.keyboard.press('Escape');
 
     await page.getByTestId('toolbar-code').click();
 
@@ -228,11 +145,7 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   // ============================================================================
 
   test('overflow menu button is visible on narrow screens', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // The default document panel is often narrow enough to trigger overflow
     // Check if overflow menu is visible
@@ -249,11 +162,7 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   });
 
   test('overflow menu opens and shows sections', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const overflowButton = page.getByTestId('toolbar-overflow-menu');
     const isOverflowVisible = await overflowButton.isVisible().catch(() => false);
@@ -278,11 +187,7 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   });
 
   test('overflow menu items have labels and shortcuts', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const overflowButton = page.getByTestId('toolbar-overflow-menu');
     const isOverflowVisible = await overflowButton.isVisible().catch(() => false);
@@ -309,11 +214,7 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   });
 
   test('clicking overflow menu item applies formatting', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const overflowButton = page.getByTestId('toolbar-overflow-menu');
     const isOverflowVisible = await overflowButton.isVisible().catch(() => false);
@@ -326,7 +227,7 @@ test.describe('TB54: Editor Toolbar Polish', () => {
     // Type some text first
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Test text');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
 
     // Open overflow menu and click Strikethrough
     await overflowButton.click();
@@ -344,16 +245,12 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   // ============================================================================
 
   test('highlight extension is available', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Type some text
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Test text');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
 
     // Try to apply highlight via overflow menu or direct button
     const overflowButton = page.getByTestId('toolbar-overflow-menu');
@@ -372,15 +269,11 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   });
 
   test('strikethrough formatting works', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Test text for strike');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
 
     const overflowButton = page.getByTestId('toolbar-overflow-menu');
     const isOverflowVisible = await overflowButton.isVisible().catch(() => false);
@@ -399,11 +292,7 @@ test.describe('TB54: Editor Toolbar Polish', () => {
   });
 
   test('horizontal rule can be inserted', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Above the line');

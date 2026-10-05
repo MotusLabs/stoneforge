@@ -1,65 +1,14 @@
 import { test, expect } from '@playwright/test';
+import { enterDocumentEditMode } from './helpers/document-edit';
 
 test.describe('TB56: Drag-and-Drop Blocks', () => {
-  // ============================================================================
-  // Helper: Navigate to document edit mode
-  // ============================================================================
-  async function enterDocumentEditMode(page: import('@playwright/test').Page) {
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
-
-    if (documents.length === 0) {
-      return null;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    let selectedDocId = '';
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      selectedDocId = documents[0].id;
-      await page.getByTestId(`document-item-${selectedDocId}`).click();
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          selectedDocId = libDocs[0].id;
-          await page.getByTestId(`document-item-${selectedDocId}`).click();
-          break;
-        }
-      }
-    }
-
-    if (!selectedDocId) {
-      return null;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
-    await page.getByTestId('document-edit-button').click();
-    await expect(page.getByTestId('block-editor')).toBeVisible({ timeout: 5000 });
-
-    return selectedDocId;
-  }
 
   // ============================================================================
   // Drag Handle Visibility Tests
   // ============================================================================
 
   test('drag handle element exists on blocks in edit mode', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Wait for editor to be fully loaded
     await page.waitForTimeout(500);
@@ -86,11 +35,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   });
 
   test('drag handle has cursor grab style', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Check that the drag handle CSS includes cursor: grab
     const hasGrabCursor = await page.evaluate(() => {
@@ -114,11 +59,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   });
 
   test('drag handle has grabbing cursor when active', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Check that the .drag-handle:active CSS includes cursor: grabbing
     const hasGrabbingCursor = await page.evaluate(() => {
@@ -148,11 +89,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   // ============================================================================
 
   test('editor renders content as blocks', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Check that editor has prose elements
     const editorContent = page.getByTestId('block-editor-content');
@@ -166,11 +103,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   });
 
   test('creating multiple blocks allows content structure', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Focus editor
     const editor = page.getByTestId('block-editor-content');
@@ -193,11 +126,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   // ============================================================================
 
   test('drop cursor styles are defined', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Check that drop cursor CSS is defined
     const hasDropCursor = await page.evaluate(() => {
@@ -224,11 +153,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   // ============================================================================
 
   test('GlobalDragHandle extension is loaded in editor', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Wait for editor to initialize
     await page.waitForTimeout(500);
@@ -255,11 +180,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   // ============================================================================
 
   test('blocks can receive focus', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const editor = page.getByTestId('block-editor-content');
     await editor.click();
@@ -274,11 +195,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   });
 
   test('blocks maintain structure after editing', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const editor = page.getByTestId('block-editor-content');
     await editor.click();
@@ -314,11 +231,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   // ============================================================================
 
   test('drag handle has hover state style', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Check that drag handle hover CSS is defined
     const hasHoverStyle = await page.evaluate(() => {
@@ -341,11 +254,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   });
 
   test('drag handle has visual grip pattern', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Check that drag handle has background-image for grip dots
     const hasGripPattern = await page.evaluate(() => {
@@ -373,11 +282,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   // ============================================================================
 
   test('editor toolbar remains functional with drag handle extension', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Verify toolbar is visible
     await expect(page.getByTestId('block-editor-toolbar')).toBeVisible();
@@ -407,11 +312,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   });
 
   test('slash commands work with drag handle extension', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Focus editor
     const editor = page.getByTestId('block-editor-content');
@@ -445,11 +346,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   // ============================================================================
 
   test('dragging state CSS class is defined', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Check that .is-dragging CSS is defined
     const hasDraggingStyle = await page.evaluate(() => {
@@ -476,11 +373,7 @@ test.describe('TB56: Drag-and-Drop Blocks', () => {
   // ============================================================================
 
   test('drag handle extension is configured with scroll threshold', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // This test verifies the extension is loaded - the scrollTreshold config
     // is internal to the extension but we can verify the extension is working

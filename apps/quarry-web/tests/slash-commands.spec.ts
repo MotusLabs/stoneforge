@@ -1,54 +1,7 @@
 import { test, expect } from '@playwright/test';
+import { enterDocumentEditMode } from './helpers/document-edit';
 
 test.describe('TB55: Slash Commands', () => {
-  // ============================================================================
-  // Helper: Navigate to document edit mode
-  // ============================================================================
-  async function enterDocumentEditMode(page: import('@playwright/test').Page) {
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
-
-    if (documents.length === 0) {
-      return null;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    let selectedDocId = '';
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      selectedDocId = documents[0].id;
-      await page.getByTestId(`document-item-${selectedDocId}`).click();
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          selectedDocId = libDocs[0].id;
-          await page.getByTestId(`document-item-${selectedDocId}`).click();
-          break;
-        }
-      }
-    }
-
-    if (!selectedDocId) {
-      return null;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
-    await page.getByTestId('document-edit-button').click();
-    await expect(page.getByTestId('block-editor')).toBeVisible({ timeout: 5000 });
-
-    return selectedDocId;
-  }
 
   // ============================================================================
   // Basic Slash Command Menu Tests
@@ -111,11 +64,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('typing "/" opens slash command menu', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Focus the editor and type /
     await page.getByTestId('block-editor-content').click();
@@ -126,11 +75,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('slash command menu shows categories', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/');
@@ -144,11 +89,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('slash command menu shows command items', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/');
@@ -171,11 +112,7 @@ test.describe('TB55: Slash Commands', () => {
   // ============================================================================
 
   test('typing after "/" filters commands', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/head');
@@ -192,11 +129,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('typing "/bul" shows only bullet list', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/bul');
@@ -211,11 +144,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('typing non-matching text shows "No matching commands"', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/xyznonexistent');
@@ -232,11 +161,7 @@ test.describe('TB55: Slash Commands', () => {
   // ============================================================================
 
   test('arrow down moves selection to next item', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/');
@@ -257,11 +182,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('arrow up moves selection to previous item', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/');
@@ -285,11 +206,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('pressing Escape closes menu', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/');
@@ -308,11 +225,7 @@ test.describe('TB55: Slash Commands', () => {
   // ============================================================================
 
   test('pressing Enter executes selected command', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/');
@@ -331,11 +244,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('clicking command item executes command', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/');
@@ -357,11 +266,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('/bullet inserts bullet list', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/bul');
@@ -377,11 +282,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('/numbered inserts ordered list', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/num');
@@ -397,11 +298,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('/quote inserts blockquote', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/quo');
@@ -417,11 +314,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('/code inserts code block', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/code');
@@ -437,11 +330,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('/divider inserts horizontal rule', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/div');
@@ -461,11 +350,7 @@ test.describe('TB55: Slash Commands', () => {
   // ============================================================================
 
   test('hovering over item changes selection', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/');
@@ -490,11 +375,7 @@ test.describe('TB55: Slash Commands', () => {
   // ============================================================================
 
   test('slash command works after text', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Some text ');
@@ -505,11 +386,7 @@ test.describe('TB55: Slash Commands', () => {
   });
 
   test('embeds category shows task and document options', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('/');

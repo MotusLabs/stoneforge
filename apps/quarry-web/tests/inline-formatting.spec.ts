@@ -1,70 +1,22 @@
 import { test, expect } from '@playwright/test';
+import { enterDocumentEditMode } from './helpers/document-edit';
 
 test.describe('TB58: Advanced Inline Formatting', () => {
-  // ============================================================================
-  // Helper: Navigate to document edit mode
-  // ============================================================================
-  async function enterDocumentEditMode(page: import('@playwright/test').Page) {
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
-
-    if (documents.length === 0) {
-      return null;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    let selectedDocId = '';
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      selectedDocId = documents[0].id;
-      await page.getByTestId(`document-item-${selectedDocId}`).click();
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          selectedDocId = libDocs[0].id;
-          await page.getByTestId(`document-item-${selectedDocId}`).click();
-          break;
-        }
-      }
-    }
-
-    if (!selectedDocId) {
-      return null;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
-    await page.getByTestId('document-edit-button').click();
-    await expect(page.getByTestId('block-editor')).toBeVisible({ timeout: 5000 });
-
-    return selectedDocId;
-  }
 
   // ============================================================================
   // Inline Code Styling Tests
   // ============================================================================
 
   test('inline code has monospace font styling', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Type some text and apply code formatting
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('some inline code');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
+    // Dismiss the selection bubble menu so it cannot cover the toolbar
+    // button and intercept the click (the selection survives).
+    await page.keyboard.press('Escape');
     await page.getByTestId('toolbar-code').click();
 
     // Check that code element exists with proper styling
@@ -77,15 +29,14 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   });
 
   test('inline code has subtle background color', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('code example');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
+    // Dismiss the selection bubble menu so it cannot cover the toolbar
+    // button and intercept the click (the selection survives).
+    await page.keyboard.press('Escape');
     await page.getByTestId('toolbar-code').click();
 
     const codeElement = page.locator('[data-testid="block-editor-content"] code').first();
@@ -99,15 +50,14 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   });
 
   test('inline code has border-radius', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('rounded code');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
+    // Dismiss the selection bubble menu so it cannot cover the toolbar
+    // button and intercept the click (the selection survives).
+    await page.keyboard.press('Escape');
     await page.getByTestId('toolbar-code').click();
 
     const codeElement = page.locator('[data-testid="block-editor-content"] code').first();
@@ -119,15 +69,14 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   });
 
   test('inline code has padding', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('padded code');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
+    // Dismiss the selection bubble menu so it cannot cover the toolbar
+    // button and intercept the click (the selection survives).
+    await page.keyboard.press('Escape');
     await page.getByTestId('toolbar-code').click();
 
     const codeElement = page.locator('[data-testid="block-editor-content"] code').first();
@@ -143,18 +92,14 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   // ============================================================================
 
   test('bubble menu appears when text is selected', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Type some text
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Select this text to see bubble menu');
 
     // Select text via keyboard
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
 
     // Wait for bubble menu to appear
     const bubbleMenu = page.getByTestId('bubble-menu');
@@ -162,15 +107,11 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   });
 
   test('bubble menu has formatting buttons', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Text for formatting');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
 
     const bubbleMenu = page.getByTestId('bubble-menu');
     await expect(bubbleMenu).toBeVisible({ timeout: 3000 });
@@ -184,15 +125,11 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   });
 
   test('bubble menu bold button applies formatting', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Make this bold');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
 
     const bubbleMenu = page.getByTestId('bubble-menu');
     await expect(bubbleMenu).toBeVisible({ timeout: 3000 });
@@ -205,15 +142,11 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   });
 
   test('bubble menu italic button applies formatting', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Make this italic');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
 
     const bubbleMenu = page.getByTestId('bubble-menu');
     await expect(bubbleMenu).toBeVisible({ timeout: 3000 });
@@ -226,15 +159,11 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   });
 
   test('bubble menu code button applies formatting', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Make this code');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
 
     const bubbleMenu = page.getByTestId('bubble-menu');
     await expect(bubbleMenu).toBeVisible({ timeout: 3000 });
@@ -247,15 +176,11 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   });
 
   test('bubble menu strikethrough button applies formatting', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Strike this through');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
 
     const bubbleMenu = page.getByTestId('bubble-menu');
     await expect(bubbleMenu).toBeVisible({ timeout: 3000 });
@@ -268,15 +193,11 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   });
 
   test('bubble menu highlight button applies formatting', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Highlight this text');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
 
     const bubbleMenu = page.getByTestId('bubble-menu');
     await expect(bubbleMenu).toBeVisible({ timeout: 3000 });
@@ -289,15 +210,11 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   });
 
   test('bubble menu hides when selection is cleared', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Select then deselect');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
 
     const bubbleMenu = page.getByTestId('bubble-menu');
     await expect(bubbleMenu).toBeVisible({ timeout: 3000 });
@@ -310,17 +227,21 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   });
 
   test('bubble menu does not appear when cursor is in code blocks', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
 
     // Create a code block using slash command
     await page.keyboard.type('/code');
     await page.keyboard.press('Enter');
+
+    // The premise of this test is a code block: if the slash command raced
+    // and created a plain paragraph instead, the selection below lands in
+    // normal text and the bubble menu legitimately appears. Fail red here
+    // rather than asserting against the wrong fixture.
+    await expect(page.getByTestId('block-editor-content').locator('pre')).toBeVisible({
+      timeout: 5000,
+    });
 
     // Type inside code block
     await page.keyboard.type('code block content');
@@ -343,39 +264,31 @@ test.describe('TB58: Advanced Inline Formatting', () => {
   // ============================================================================
 
   test('keyboard shortcut Cmd+E toggles inline code', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('code via shortcut');
-    await page.keyboard.press('Meta+a');
-    await page.keyboard.press('Meta+e');
+    await page.keyboard.press('ControlOrMeta+a');
+    await page.keyboard.press('ControlOrMeta+e');
 
     // Check that code formatting is applied
     const codeElement = page.locator('[data-testid="block-editor-content"] code');
     await expect(codeElement).toBeVisible({ timeout: 2000 });
 
     // Toggle off
-    await page.keyboard.press('Meta+a');
-    await page.keyboard.press('Meta+e');
+    await page.keyboard.press('ControlOrMeta+a');
+    await page.keyboard.press('ControlOrMeta+e');
 
     // Code element should be removed
     await expect(codeElement).not.toBeVisible({ timeout: 2000 });
   });
 
   test('highlight styling has yellow background', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
-    if (!docId) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     await page.getByTestId('block-editor-content').click();
     await page.keyboard.type('Yellow highlight');
-    await page.keyboard.press('Meta+a');
+    await page.keyboard.press('ControlOrMeta+a');
 
     // Apply highlight from toolbar or overflow menu
     const overflowButton = page.getByTestId('toolbar-overflow-menu');

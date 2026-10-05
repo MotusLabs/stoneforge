@@ -1,68 +1,14 @@
-import { test, expect, Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
+import { enterDocumentEditMode } from './helpers/document-edit';
 
 test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
-
-  // ============================================================================
-  // Helper Functions
-  // ============================================================================
-
-  async function enterDocumentEditMode(page: Page): Promise<boolean> {
-    // Get first document
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
-
-    if (documents.length === 0) {
-      return false;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    let selectedDocId = '';
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      selectedDocId = documents[0].id;
-      await page.getByTestId(`document-item-${selectedDocId}`).click();
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          selectedDocId = libDocs[0].id;
-          await page.getByTestId(`document-item-${selectedDocId}`).click();
-          break;
-        }
-      }
-    }
-
-    if (!selectedDocId) {
-      return false;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
-    await page.getByTestId('document-edit-button').click();
-    await expect(page.getByTestId('block-editor')).toBeVisible({ timeout: 5000 });
-
-    return true;
-  }
 
   // ============================================================================
   // Drag Handle Visibility Tests
   // ============================================================================
 
   test('drag handle appears when hovering over blocks', async ({ page }) => {
-    const success = await enterDocumentEditMode(page);
-    if (!success) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Focus editor and create some content
     const editor = page.getByTestId('block-editor-content');
@@ -96,11 +42,7 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
   });
 
   test('drag handle has correct positioning relative to block', async ({ page }) => {
-    const success = await enterDocumentEditMode(page);
-    if (!success) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const editor = page.getByTestId('block-editor-content');
     await editor.click();
@@ -142,11 +84,7 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
   // ============================================================================
 
   test('blocks can be reordered by dragging', async ({ page }) => {
-    const success = await enterDocumentEditMode(page);
-    if (!success) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const editor = page.getByTestId('block-editor-content');
     await editor.click();
@@ -219,11 +157,7 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
   // ============================================================================
 
   test('drop indicator appears while dragging', async ({ page }) => {
-    const success = await enterDocumentEditMode(page);
-    if (!success) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const editor = page.getByTestId('block-editor-content');
     await editor.click();
@@ -258,29 +192,29 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
         await page.mouse.down();
         await page.waitForTimeout(100);
 
-        // Move to middle of editor
-        const editorBox = await editor.boundingBox();
-        if (editorBox) {
-          await page.mouse.move(editorBox.x + editorBox.width / 2, editorBox.y + 100, { steps: 5 });
-          await page.waitForTimeout(200);
+        // Drag over the actual content (the second paragraph), not an
+        // arbitrary offset from the editor box — the drop indicator only
+        // renders over droppable content, and polling matters because the
+        // dragover-driven indicator appears asynchronously.
+        const secondP = editor.locator('p').nth(1);
+        const secondBox = await secondP.boundingBox();
+        if (secondBox) {
+          await page.mouse.move(secondBox.x + secondBox.width / 2, secondBox.y + secondBox.height / 2, { steps: 5 });
 
-          // Check if drop cursor is visible
-          const dropCursor = page.locator('.drop-cursor');
-          const dropCursorExists = await dropCursor.count() > 0;
-
-          // Also check for ProseMirror's dropcursor classes
-          const hasDropIndicator = await page.evaluate(() => {
-            return document.querySelector('.drop-cursor') !== null ||
-                   document.querySelector('.prosemirror-dropcursor-block') !== null ||
-                   document.querySelector('.prosemirror-dropcursor-inline') !== null;
-          });
-
-          console.log('Drop cursor exists:', dropCursorExists, 'Has drop indicator:', hasDropIndicator);
-          expect(hasDropIndicator).toBe(true);
-        }
+          await expect(async () => {
+            // Nudge within the paragraph to keep firing dragover events
+            await page.mouse.move(secondBox.x + secondBox.width / 3, secondBox.y + secondBox.height / 2, { steps: 2 });
+            const hasDropIndicator = await page.evaluate(() => {
+              return document.querySelector('.drop-cursor') !== null ||
+                     document.querySelector('.prosemirror-dropcursor-block') !== null ||
+                     document.querySelector('.prosemirror-dropcursor-inline') !== null;
+            });
+            expect(hasDropIndicator).toBe(true);
+          }).toPass({ timeout: 5000 });
 
         // Release
         await page.mouse.up();
+        }
       }
     }
   });
@@ -290,11 +224,7 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
   // ============================================================================
 
   test('content persists correctly after editing', async ({ page }) => {
-    const success = await enterDocumentEditMode(page);
-    if (!success) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const editor = page.getByTestId('block-editor-content');
     await editor.click();
@@ -331,11 +261,7 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
   // ============================================================================
 
   test('drag handles appear for headings created via slash command', async ({ page }) => {
-    const success = await enterDocumentEditMode(page);
-    if (!success) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const editor = page.getByTestId('block-editor-content');
     await editor.click();
@@ -381,11 +307,7 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
   });
 
   test('drag handles appear for lists created via slash command', async ({ page }) => {
-    const success = await enterDocumentEditMode(page);
-    if (!success) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const editor = page.getByTestId('block-editor-content');
     await editor.click();
@@ -428,11 +350,7 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
   });
 
   test('drag handles appear for code blocks created via slash command', async ({ page }) => {
-    const success = await enterDocumentEditMode(page);
-    if (!success) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const editor = page.getByTestId('block-editor-content');
     await editor.click();
@@ -477,11 +395,7 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
   // ============================================================================
 
   test('drag handle has correct z-index for visibility', async ({ page }) => {
-    const success = await enterDocumentEditMode(page);
-    if (!success) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Check the CSS rule for drag handle z-index
     const hasCorrectZIndex = await page.evaluate(() => {
@@ -506,11 +420,7 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
   });
 
   test('drag handle is positioned fixed for proper alignment', async ({ page }) => {
-    const success = await enterDocumentEditMode(page);
-    if (!success) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     const hasFixedPosition = await page.evaluate(() => {
       const styles = Array.from(document.styleSheets);
@@ -533,11 +443,7 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
   });
 
   test('drop cursor CSS has correct background color', async ({ page }) => {
-    const success = await enterDocumentEditMode(page);
-    if (!success) {
-      test.skip();
-      return;
-    }
+    await enterDocumentEditMode(page);
 
     // Check the CSS rule for drop cursor
     const hasDropCursorStyle = await page.evaluate(() => {

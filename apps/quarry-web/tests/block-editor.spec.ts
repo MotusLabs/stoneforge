@@ -1,4 +1,10 @@
 import { test, expect } from '@playwright/test';
+import {
+  enterDocumentEditMode,
+  openDocumentDetail,
+  findEditableDocument,
+  createDocumentFixture,
+} from './helpers/document-edit';
 
 test.describe('TB22: Block Editor', () => {
   // ============================================================================
@@ -6,17 +12,9 @@ test.describe('TB22: Block Editor', () => {
   // ============================================================================
 
   test('PATCH /api/documents/:id endpoint updates document content', async ({ page }) => {
-    // First get a list of documents
-    const listResponse = await page.request.get('/api/documents?limit=10');
-    expect(listResponse.ok()).toBe(true);
-    const documents = await listResponse.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
-
-    const doc = documents[0];
+    // PATCH rejects content updates on immutable documents, so pick an
+    // editable one (seeding a fresh document when none exists).
+    const doc = await findEditableDocument(page);
     const originalContent = doc.content || '';
     const newContent = `Updated content at ${Date.now()}`;
 
@@ -37,15 +35,7 @@ test.describe('TB22: Block Editor', () => {
   });
 
   test('PATCH /api/documents/:id endpoint updates document title', async ({ page }) => {
-    const listResponse = await page.request.get('/api/documents?limit=10');
-    const documents = await listResponse.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
-
-    const doc = documents[0];
+    const doc = await findEditableDocument(page);
     const originalTitle = doc.title || '';
     const newTitle = `Updated Title ${Date.now()}`;
 
@@ -73,15 +63,9 @@ test.describe('TB22: Block Editor', () => {
   });
 
   test('PATCH /api/documents/:id validates contentType', async ({ page }) => {
-    const listResponse = await page.request.get('/api/documents?limit=10');
-    const documents = await listResponse.json();
+    const doc = await findEditableDocument(page);
 
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
-
-    const response = await page.request.patch(`/api/documents/${documents[0].id}`, {
+    const response = await page.request.patch(`/api/documents/${doc.id}`, {
       data: { contentType: 'invalid-type' },
     });
     expect(response.status()).toBe(400);
@@ -90,15 +74,13 @@ test.describe('TB22: Block Editor', () => {
   });
 
   test('PATCH /api/documents/:id validates JSON content when contentType is json', async ({ page }) => {
-    const listResponse = await page.request.get('/api/documents?limit=10');
-    const documents = await listResponse.json();
-
-    // Find a JSON document or skip
-    const jsonDoc = documents.find((d: { contentType: string }) => d.contentType === 'json');
-    if (!jsonDoc) {
-      test.skip();
-      return;
-    }
+    // Create a JSON document instead of hunting for one (and skipping when
+    // the shared DB happens to have none).
+    const jsonDoc = await createDocumentFixture(
+      page,
+      `e2e-json-validation-${Date.now()}`,
+      { contentType: 'json', content: '{"initial": true}' }
+    );
 
     const response = await page.request.patch(`/api/documents/${jsonDoc.id}`, {
       data: { content: 'not valid json {' },
@@ -114,88 +96,13 @@ test.describe('TB22: Block Editor', () => {
   // ============================================================================
 
   test('document detail panel has edit button', async ({ page }) => {
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    await openDocumentDetail(page);
 
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    if (libraries.length === 0) {
-      // No libraries, documents show in all-documents view
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      await page.getByTestId(`document-item-${documents[0].id}`).click();
-    } else {
-      // Find a library with documents
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          await page.getByTestId(`document-item-${libDocs[0].id}`).click();
-          break;
-        }
-      }
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
     await expect(page.getByTestId('document-edit-button')).toBeVisible();
   });
 
   test('clicking edit button shows editor and save/cancel buttons', async ({ page }) => {
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    let selectedDocId = '';
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      selectedDocId = documents[0].id;
-      await page.getByTestId(`document-item-${selectedDocId}`).click();
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          selectedDocId = libDocs[0].id;
-          await page.getByTestId(`document-item-${selectedDocId}`).click();
-          break;
-        }
-      }
-    }
-
-    if (!selectedDocId) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
-
-    // Click edit button
-    await page.getByTestId('document-edit-button').click();
+    await enterDocumentEditMode(page);
 
     // Should show editor and save/cancel buttons
     await expect(page.getByTestId('block-editor')).toBeVisible({ timeout: 5000 });
@@ -207,51 +114,7 @@ test.describe('TB22: Block Editor', () => {
   });
 
   test('clicking cancel button exits edit mode', async ({ page }) => {
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    let selectedDocId = '';
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      selectedDocId = documents[0].id;
-      await page.getByTestId(`document-item-${selectedDocId}`).click();
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          selectedDocId = libDocs[0].id;
-          await page.getByTestId(`document-item-${selectedDocId}`).click();
-          break;
-        }
-      }
-    }
-
-    if (!selectedDocId) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
-
-    // Enter edit mode
-    await page.getByTestId('document-edit-button').click();
-    await expect(page.getByTestId('block-editor')).toBeVisible({ timeout: 5000 });
+    await enterDocumentEditMode(page);
 
     // Click cancel
     await page.getByTestId('document-cancel-button').click();
@@ -262,50 +125,7 @@ test.describe('TB22: Block Editor', () => {
   });
 
   test('title input is shown in edit mode', async ({ page }) => {
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    let selectedDocId = '';
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      selectedDocId = documents[0].id;
-      await page.getByTestId(`document-item-${selectedDocId}`).click();
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          selectedDocId = libDocs[0].id;
-          await page.getByTestId(`document-item-${selectedDocId}`).click();
-          break;
-        }
-      }
-    }
-
-    if (!selectedDocId) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
-
-    // Enter edit mode
-    await page.getByTestId('document-edit-button').click();
+    await enterDocumentEditMode(page);
 
     // Title input should be visible
     await expect(page.getByTestId('document-title-input')).toBeVisible({ timeout: 5000 });
@@ -316,51 +136,7 @@ test.describe('TB22: Block Editor', () => {
   // ============================================================================
 
   test('block editor toolbar is visible in edit mode', async ({ page }) => {
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    let selectedDocId = '';
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      selectedDocId = documents[0].id;
-      await page.getByTestId(`document-item-${selectedDocId}`).click();
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          selectedDocId = libDocs[0].id;
-          await page.getByTestId(`document-item-${selectedDocId}`).click();
-          break;
-        }
-      }
-    }
-
-    if (!selectedDocId) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
-
-    // Enter edit mode
-    await page.getByTestId('document-edit-button').click();
-    await expect(page.getByTestId('block-editor')).toBeVisible({ timeout: 5000 });
+    await enterDocumentEditMode(page);
 
     // Toolbar should be visible
     await expect(page.getByTestId('block-editor-toolbar')).toBeVisible();
@@ -371,51 +147,7 @@ test.describe('TB22: Block Editor', () => {
   });
 
   test('editor content area is focusable', async ({ page }) => {
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    let selectedDocId = '';
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      selectedDocId = documents[0].id;
-      await page.getByTestId(`document-item-${selectedDocId}`).click();
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          selectedDocId = libDocs[0].id;
-          await page.getByTestId(`document-item-${selectedDocId}`).click();
-          break;
-        }
-      }
-    }
-
-    if (!selectedDocId) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
-
-    // Enter edit mode
-    await page.getByTestId('document-edit-button').click();
-    await expect(page.getByTestId('block-editor')).toBeVisible({ timeout: 5000 });
+    await enterDocumentEditMode(page);
 
     // Click in the editor content area
     await page.getByTestId('block-editor-content').click();
@@ -433,56 +165,12 @@ test.describe('TB22: Block Editor', () => {
   // ============================================================================
 
   test('saving document updates persists changes', async ({ page }) => {
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
+    const docId = await enterDocumentEditMode(page);
 
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    let selectedDocId = '';
-    let originalDoc: { id: string; title?: string; content?: string } | null = null;
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      selectedDocId = documents[0].id;
-      originalDoc = documents[0];
-      await page.getByTestId(`document-item-${selectedDocId}`).click();
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          selectedDocId = libDocs[0].id;
-          // Fetch full document
-          const docResponse = await page.request.get(`/api/documents/${selectedDocId}`);
-          originalDoc = await docResponse.json();
-          await page.getByTestId(`document-item-${selectedDocId}`).click();
-          break;
-        }
-      }
-    }
-
-    if (!selectedDocId || !originalDoc) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
-
-    // Enter edit mode
-    await page.getByTestId('document-edit-button').click();
-    await expect(page.getByTestId('block-editor')).toBeVisible({ timeout: 5000 });
+    // Fetch the full document to know the original title for restore
+    const docResponse = await page.request.get(`/api/documents/${docId}`);
+    expect(docResponse.ok()).toBe(true);
+    const originalDoc = await docResponse.json();
 
     // Change the title
     const newTitle = `Test Title ${Date.now()}`;
@@ -500,7 +188,7 @@ test.describe('TB22: Block Editor', () => {
     await expect(page.getByTestId('document-detail-title')).toContainText(newTitle);
 
     // Restore original title
-    await page.request.patch(`/api/documents/${selectedDocId}`, {
+    await page.request.patch(`/api/documents/${docId}`, {
       data: { title: originalDoc.title || '' },
     });
   });
@@ -508,51 +196,9 @@ test.describe('TB22: Block Editor', () => {
   test('save error is displayed when update fails', async ({ page }) => {
     // This test would require mocking the API to fail, which is complex in Playwright
     // For now, we'll test that the error display element exists by checking the component structure
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    let selectedDocId = '';
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      selectedDocId = documents[0].id;
-      await page.getByTestId(`document-item-${selectedDocId}`).click();
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          selectedDocId = libDocs[0].id;
-          await page.getByTestId(`document-item-${selectedDocId}`).click();
-          break;
-        }
-      }
-    }
-
-    if (!selectedDocId) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
+    await enterDocumentEditMode(page);
 
     // Enter edit mode and save without changes (should exit cleanly)
-    await page.getByTestId('document-edit-button').click();
-    await expect(page.getByTestId('block-editor')).toBeVisible({ timeout: 5000 });
     await page.getByTestId('document-save-button').click();
     await expect(page.getByTestId('document-edit-button')).toBeVisible({ timeout: 5000 });
   });

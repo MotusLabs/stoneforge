@@ -1,4 +1,9 @@
 import { test, expect } from '@playwright/test';
+import {
+  openDocumentDetail,
+  getOrCreateFirstDocument,
+  createVersionedDocumentFixture,
+} from './helpers/document-edit';
 
 test.describe('TB23: Document Versions', () => {
   // ============================================================================
@@ -6,18 +11,10 @@ test.describe('TB23: Document Versions', () => {
   // ============================================================================
 
   test('GET /api/documents/:id/versions returns version history', async ({ page }) => {
-    // First get a list of documents
-    const listResponse = await page.request.get('/api/documents?limit=10');
-    expect(listResponse.ok()).toBe(true);
-    const documents = await listResponse.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
+    const doc = await getOrCreateFirstDocument(page);
 
     // Get version history for the first document
-    const response = await page.request.get(`/api/documents/${documents[0].id}/versions`);
+    const response = await page.request.get(`/api/documents/${doc.id}/versions`);
     expect(response.ok()).toBe(true);
     const versions = await response.json();
 
@@ -27,7 +24,7 @@ test.describe('TB23: Document Versions', () => {
 
     // Check structure of version entries
     for (const version of versions) {
-      expect(version.id).toBe(documents[0].id);
+      expect(version.id).toBe(doc.id);
       expect(version.type).toBe('document');
       expect(typeof version.version).toBe('number');
       expect(version.contentType).toBeDefined();
@@ -42,76 +39,43 @@ test.describe('TB23: Document Versions', () => {
   });
 
   test('GET /api/documents/:id/versions/:version returns specific version', async ({ page }) => {
-    // First get a list of documents
-    const listResponse = await page.request.get('/api/documents?limit=10');
-    expect(listResponse.ok()).toBe(true);
-    const documents = await listResponse.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
+    const doc = await getOrCreateFirstDocument(page);
 
     // Get version 1 (should always exist)
-    const response = await page.request.get(`/api/documents/${documents[0].id}/versions/1`);
+    const response = await page.request.get(`/api/documents/${doc.id}/versions/1`);
     expect(response.ok()).toBe(true);
     const version = await response.json();
 
-    expect(version.id).toBe(documents[0].id);
+    expect(version.id).toBe(doc.id);
     expect(version.type).toBe('document');
     expect(version.version).toBe(1);
   });
 
   test('GET /api/documents/:id/versions/:version returns 404 for invalid version', async ({ page }) => {
-    // First get a list of documents
-    const listResponse = await page.request.get('/api/documents?limit=10');
-    expect(listResponse.ok()).toBe(true);
-    const documents = await listResponse.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
+    const doc = await getOrCreateFirstDocument(page);
 
     // Try to get a very high version number that shouldn't exist
-    const response = await page.request.get(`/api/documents/${documents[0].id}/versions/99999`);
+    const response = await page.request.get(`/api/documents/${doc.id}/versions/99999`);
     expect(response.status()).toBe(404);
     const body = await response.json();
     expect(body.error.code).toBe('NOT_FOUND');
   });
 
   test('GET /api/documents/:id/versions/:version validates version number', async ({ page }) => {
-    // First get a list of documents
-    const listResponse = await page.request.get('/api/documents?limit=10');
-    expect(listResponse.ok()).toBe(true);
-    const documents = await listResponse.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
+    const doc = await getOrCreateFirstDocument(page);
 
     // Try invalid version numbers
-    const responseZero = await page.request.get(`/api/documents/${documents[0].id}/versions/0`);
+    const responseZero = await page.request.get(`/api/documents/${doc.id}/versions/0`);
     expect(responseZero.status()).toBe(400);
 
-    const responseNegative = await page.request.get(`/api/documents/${documents[0].id}/versions/-1`);
+    const responseNegative = await page.request.get(`/api/documents/${doc.id}/versions/-1`);
     expect(responseNegative.status()).toBe(400);
   });
 
   test('POST /api/documents/:id/restore restores a version', async ({ page }) => {
-    // First get a list of documents with multiple versions
-    const listResponse = await page.request.get('/api/documents?limit=50');
-    expect(listResponse.ok()).toBe(true);
-    const documents = await listResponse.json();
-
-    // Find a document with version > 1 (has history)
-    const docWithHistory = documents.find((doc: { version?: number }) => (doc.version || 1) > 1);
-
-    if (!docWithHistory) {
-      test.skip();
-      return;
-    }
+    // Build a document with known history (created + one content edit) so
+    // the test never depends on finding an already-edited shared document.
+    const docWithHistory = await createVersionedDocumentFixture(page);
 
     // Get current content
     const currentResponse = await page.request.get(`/api/documents/${docWithHistory.id}`);
@@ -148,16 +112,10 @@ test.describe('TB23: Document Versions', () => {
   });
 
   test('POST /api/documents/:id/restore validates version number', async ({ page }) => {
-    const listResponse = await page.request.get('/api/documents?limit=10');
-    const documents = await listResponse.json();
-
-    if (documents.length === 0) {
-      test.skip();
-      return;
-    }
+    const doc = await getOrCreateFirstDocument(page);
 
     // Try invalid version
-    const response = await page.request.post(`/api/documents/${documents[0].id}/restore`, {
+    const response = await page.request.post(`/api/documents/${doc.id}/restore`, {
       data: { version: -1 },
     });
     expect(response.status()).toBe(400);
@@ -169,64 +127,15 @@ test.describe('TB23: Document Versions', () => {
   // UI Tests - Version History Sidebar
   // ============================================================================
 
-  // Helper function to navigate to a document
-  async function navigateToDocument(page: import('@playwright/test').Page) {
-    const response = await page.request.get('/api/documents?limit=10');
-    const documents = await response.json();
-
-    if (documents.length === 0) {
-      return null;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      await page.getByTestId(`document-item-${documents[0].id}`).click();
-      return documents[0];
-    } else {
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-
-        if (libDocs.length > 0) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          await page.getByTestId(`document-item-${libDocs[0].id}`).click();
-          return libDocs[0];
-        }
-      }
-    }
-
-    return null;
-  }
-
   test('document detail panel has version history button', async ({ page }) => {
-    const doc = await navigateToDocument(page);
-    if (!doc) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
+    await openDocumentDetail(page);
 
     // Check for version history button
     await expect(page.getByTestId('document-history-button')).toBeVisible();
   });
 
   test('clicking version history button opens sidebar', async ({ page }) => {
-    const doc = await navigateToDocument(page);
-    if (!doc) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
+    await openDocumentDetail(page);
 
     // Click version history button
     await page.getByTestId('document-history-button').click();
@@ -236,13 +145,7 @@ test.describe('TB23: Document Versions', () => {
   });
 
   test('version history sidebar shows version list', async ({ page }) => {
-    const doc = await navigateToDocument(page);
-    if (!doc) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
+    await openDocumentDetail(page);
 
     // Open version history
     await page.getByTestId('document-history-button').click();
@@ -257,13 +160,7 @@ test.describe('TB23: Document Versions', () => {
   });
 
   test('version history sidebar has close button', async ({ page }) => {
-    const doc = await navigateToDocument(page);
-    if (!doc) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
+    await openDocumentDetail(page);
 
     // Open version history
     await page.getByTestId('document-history-button').click();
@@ -280,13 +177,7 @@ test.describe('TB23: Document Versions', () => {
   });
 
   test('version history button toggles sidebar', async ({ page }) => {
-    const doc = await navigateToDocument(page);
-    if (!doc) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
+    await openDocumentDetail(page);
 
     // Open version history
     await page.getByTestId('document-history-button').click();
@@ -298,13 +189,7 @@ test.describe('TB23: Document Versions', () => {
   });
 
   test('current version shows "Current" badge', async ({ page }) => {
-    const doc = await navigateToDocument(page);
-    if (!doc) {
-      test.skip();
-      return;
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
+    const docId = await openDocumentDetail(page);
 
     // Open version history
     await page.getByTestId('document-history-button').click();
@@ -314,7 +199,7 @@ test.describe('TB23: Document Versions', () => {
     await page.waitForTimeout(1000);
 
     // Get the document's current version
-    const docResponse = await page.request.get(`/api/documents/${doc.id}`);
+    const docResponse = await page.request.get(`/api/documents/${docId}`);
     const docData = await docResponse.json();
     const currentVersion = docData.version || 1;
 
@@ -326,49 +211,9 @@ test.describe('TB23: Document Versions', () => {
   });
 
   test('preview button shows on non-current versions', async ({ page }) => {
-    // Find a document with multiple versions
-    const listResponse = await page.request.get('/api/documents?limit=50');
-    const documents = await listResponse.json();
-    const docWithHistory = documents.find((d: { version?: number }) => (d.version || 1) > 1);
-
-    if (!docWithHistory) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      await page.getByTestId(`document-item-${docWithHistory.id}`).click();
-    } else {
-      let found = false;
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        const targetDoc = libDocs.find((d: { id: string }) => d.id === docWithHistory.id);
-
-        if (targetDoc) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          await page.getByTestId(`document-item-${docWithHistory.id}`).click();
-          found = true;
-          break;
-        }
-      }
-
-      if (!found) {
-        test.skip();
-        return;
-      }
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
+    // Build a document with known history instead of hunting for one
+    const doc = await createVersionedDocumentFixture(page);
+    await openDocumentDetail(page, doc.id);
 
     // Open version history
     await page.getByTestId('document-history-button').click();
@@ -385,49 +230,8 @@ test.describe('TB23: Document Versions', () => {
   });
 
   test('clicking preview shows preview banner', async ({ page }) => {
-    // Find a document with multiple versions
-    const listResponse = await page.request.get('/api/documents?limit=50');
-    const documents = await listResponse.json();
-    const docWithHistory = documents.find((d: { version?: number }) => (d.version || 1) > 1);
-
-    if (!docWithHistory) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      await page.getByTestId(`document-item-${docWithHistory.id}`).click();
-    } else {
-      let found = false;
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        const targetDoc = libDocs.find((d: { id: string }) => d.id === docWithHistory.id);
-
-        if (targetDoc) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          await page.getByTestId(`document-item-${docWithHistory.id}`).click();
-          found = true;
-          break;
-        }
-      }
-
-      if (!found) {
-        test.skip();
-        return;
-      }
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
+    const doc = await createVersionedDocumentFixture(page);
+    await openDocumentDetail(page, doc.id);
 
     // Open version history
     await page.getByTestId('document-history-button').click();
@@ -448,49 +252,8 @@ test.describe('TB23: Document Versions', () => {
   });
 
   test('exit preview button clears preview', async ({ page }) => {
-    // Find a document with multiple versions
-    const listResponse = await page.request.get('/api/documents?limit=50');
-    const documents = await listResponse.json();
-    const docWithHistory = documents.find((d: { version?: number }) => (d.version || 1) > 1);
-
-    if (!docWithHistory) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      await page.getByTestId(`document-item-${docWithHistory.id}`).click();
-    } else {
-      let found = false;
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        const targetDoc = libDocs.find((d: { id: string }) => d.id === docWithHistory.id);
-
-        if (targetDoc) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          await page.getByTestId(`document-item-${docWithHistory.id}`).click();
-          found = true;
-          break;
-        }
-      }
-
-      if (!found) {
-        test.skip();
-        return;
-      }
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
+    const doc = await createVersionedDocumentFixture(page);
+    await openDocumentDetail(page, doc.id);
 
     // Open version history
     await page.getByTestId('document-history-button').click();
@@ -514,49 +277,8 @@ test.describe('TB23: Document Versions', () => {
   });
 
   test('edit button is disabled during preview', async ({ page }) => {
-    // Find a document with multiple versions
-    const listResponse = await page.request.get('/api/documents?limit=50');
-    const documents = await listResponse.json();
-    const docWithHistory = documents.find((d: { version?: number }) => (d.version || 1) > 1);
-
-    if (!docWithHistory) {
-      test.skip();
-      return;
-    }
-
-    await page.goto('/documents');
-    await expect(page.getByTestId('documents-page')).toBeVisible({ timeout: 10000 });
-    await page.waitForTimeout(1000);
-
-    const librariesResponse = await page.request.get('/api/libraries');
-    const libraries = await librariesResponse.json();
-
-    if (libraries.length === 0) {
-      await expect(page.getByTestId('all-documents-view')).toBeVisible({ timeout: 5000 });
-      await page.getByTestId(`document-item-${docWithHistory.id}`).click();
-    } else {
-      let found = false;
-      for (const library of libraries) {
-        const libDocsResponse = await page.request.get(`/api/libraries/${library.id}/documents`);
-        const libDocs = await libDocsResponse.json();
-        const targetDoc = libDocs.find((d: { id: string }) => d.id === docWithHistory.id);
-
-        if (targetDoc) {
-          await page.getByTestId(`library-tree-item-${library.id}`).click();
-          await expect(page.getByTestId('library-view')).toBeVisible({ timeout: 5000 });
-          await page.getByTestId(`document-item-${docWithHistory.id}`).click();
-          found = true;
-          break;
-        }
-      }
-
-      if (!found) {
-        test.skip();
-        return;
-      }
-    }
-
-    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 5000 });
+    const doc = await createVersionedDocumentFixture(page);
+    await openDocumentDetail(page, doc.id);
 
     // Check edit button is enabled initially
     const editButton = page.getByTestId('document-edit-button');
