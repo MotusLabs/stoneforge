@@ -3489,7 +3489,7 @@ export class QuarryAPIImpl implements QuarryAPI {
       createdBy: actor,
       ...(entityAName && { entityAName }),
       ...(entityBName && { entityBName }),
-    });
+    }, this.getIdGeneratorConfig());
 
     const createdChannel = await this.create<Channel>(
       newChannel as unknown as Element & Record<string, unknown>

@@ -325,7 +325,7 @@ async function createDefaultAgents(
       entityType: EntityTypeValue.AGENT,
       createdBy: OPERATOR_ENTITY_ID,
       metadata: { [AGENT_META_KEY]: agentMeta },
-    });
+    }, api.getIdGeneratorConfig());
 
     const savedEntity = await api.create(entity as unknown as Record<string, unknown> & { createdBy: EntityId });
     const agentEntityId = asEntityId(savedEntity.id);
@@ -343,7 +343,7 @@ async function createDefaultAgents(
         agentName: agentDef.name,
         purpose: 'Agent direct messaging channel',
       },
-    });
+    }, api.getIdGeneratorConfig());
 
     await api.create<Channel>(
       channel as unknown as Record<string, unknown> & { createdBy: EntityId }
