@@ -212,17 +212,21 @@ export function useNotifications() {
   const unreadCount = notifications.filter((n) => !n.read && !n.dismissed).length;
   const visibleNotifications = notifications.filter((n) => !n.dismissed);
 
-  // Persist notifications when they change — but never on mount. Writing the
-  // just-loaded state back unconditionally would clobber any external write
-  // that lands between the load and the effect (or race a same-tab writer),
-  // breaking the external-writer contract that loadNotifications()/
-  // saveNotifications() document. Only hook-initiated changes persist.
-  const isInitialRender = useRef(true);
+  // Persist notifications when they change — but never just-loaded state.
+  // Writing the array that came from loadNotifications() back unconditionally
+  // would clobber any external write that lands between the load and the
+  // effect, breaking the external-writer contract that loadNotifications()/
+  // saveNotifications() document. Every hook-initiated change produces a NEW
+  // array identity (the updaters below all build fresh arrays), so "still the
+  // array we loaded" reliably means "nothing hook-initiated happened". The
+  // check is identity, not an isInitialRender ref: React StrictMode
+  // double-invokes effects on mount without resetting refs, so a ref flag
+  // flips on the first run and the second run persists just-loaded state
+  // anyway — and this app mounts inside <StrictMode> (main.tsx) with e2e
+  // running the dev server, so that path is live in every test run.
+  const loadedAtMountRef = useRef(notifications);
   useEffect(() => {
-    if (isInitialRender.current) {
-      isInitialRender.current = false;
-      return;
-    }
+    if (notifications === loadedAtMountRef.current) return;
     saveNotifications(notifications);
   }, [notifications]);
 
