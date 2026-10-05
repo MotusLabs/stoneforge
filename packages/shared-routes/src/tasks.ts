@@ -66,7 +66,25 @@ export function createTaskRoutes(services: CollaborateServices) {
             continue;
           }
 
-          await api.update(id as ElementId, updates);
+          // Maintain the completion timestamp on status transitions, the same
+          // rule as the single-task PATCH route and updateTaskStatus
+          // (@stoneforge/core): set closedAt exactly when a task transitions
+          // INTO closed, clear it when transitioning out. Without this,
+          // bulk-closed tasks never get closedAt and completion-date filters
+          // (TaskFilter.closedAfter / GET /api/tasks/completed?after=) must
+          // fall back to updatedAt permanently. Applied to a per-task copy:
+          // mutating the shared `updates` object would leak this task's
+          // closedAt onto every later task in the batch (overwriting the
+          // closedAt an already-closed task already had).
+          const taskUpdates = { ...updates };
+          const existingTask = existing as { status?: string };
+          if (taskUpdates.status === 'closed' && existingTask.status !== 'closed') {
+            taskUpdates.closedAt = new Date().toISOString();
+          } else if (existingTask.status === 'closed' && taskUpdates.status !== undefined && taskUpdates.status !== 'closed') {
+            taskUpdates.closedAt = undefined;
+          }
+
+          await api.update(id as ElementId, taskUpdates);
           results.push({ id, success: true });
         } catch (error) {
           results.push({ id, success: false, error: (error as Error).message });

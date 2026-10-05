@@ -389,3 +389,40 @@ describe('PATCH /api/tasks/:id closedAt bookkeeping', () => {
     expect(list.total).toBe(EXPECTED_COMPLETED_TODAY);
   });
 });
+
+// ===========================================================================
+// PATCH /api/tasks/bulk — closedAt bookkeeping (shared-routes handler)
+// ===========================================================================
+
+describe('PATCH /api/tasks/bulk closedAt bookkeeping', () => {
+  test('bulk close records closedAt per task and never leaks it across the batch', async () => {
+    const now = new Date();
+    const todayNoon = atLocal(now, 0, 12, 0);
+    const yesterdayNoon = atLocal(now, -1, 12, 0);
+
+    // One task that bulk-close transitions into closed, one that was already
+    // closed yesterday with its own closedAt. Sending status:'closed' for both
+    // must set closedAt on the first and leave the second's untouched — the
+    // per-task copy matters because the handler loops with one updates object.
+    const toClose = await seedTask('bulk close target', { status: 'open', updatedAt: todayNoon });
+    const alreadyClosed = await seedTask('bulk already closed', {
+      status: 'closed', closedAt: yesterdayNoon, updatedAt: yesterdayNoon,
+    });
+
+    const res = await patch('/api/tasks/bulk', {
+      ids: [toClose.id, alreadyClosed.id],
+      updates: { status: 'closed' },
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json() as { updated: number; failed: number };
+    expect(json.updated).toBe(2);
+    expect(json.failed).toBe(0);
+
+    const closedA = await (await get(`/api/tasks/${toClose.id}`)).json() as Task & { closedAt?: string };
+    expect(closedA.status).toBe('closed');
+    expect(typeof closedA.closedAt).toBe('string');
+
+    const closedB = await (await get(`/api/tasks/${alreadyClosed.id}`)).json() as Task & { closedAt?: string };
+    expect(closedB.closedAt).toBe(yesterdayNoon); // not overwritten by the batch
+  });
+});
