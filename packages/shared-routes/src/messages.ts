@@ -8,6 +8,7 @@ import { Hono } from 'hono';
 import type { ElementId, EntityId, Channel, Message, Element, CreateMessageInput } from '@stoneforge/core';
 import { createDocument, createMessage, DocumentCategory } from '@stoneforge/core';
 import type { CollaborateServicesWithBroadcast } from './types.js';
+import { isBadRequestError } from './errors.js';
 
 export function createMessageRoutes(services: CollaborateServicesWithBroadcast) {
   const { api, inboxService, broadcastInboxEvent } = services;
@@ -228,8 +229,8 @@ export function createMessageRoutes(services: CollaborateServicesWithBroadcast) 
         _attachments: attachments,
       });
     } catch (error) {
-      if ((error as { code?: string }).code === 'VALIDATION_ERROR') {
-        return c.json({ error: { code: 'VALIDATION_ERROR', message: (error as Error).message } }, 400);
+      if (isBadRequestError(error)) {
+        return c.json({ error: { code: 'VALIDATION_ERROR', message: error.message } }, 400);
       }
       if ((error as { code?: string }).code === 'NOT_FOUND') {
         return c.json({ error: { code: 'NOT_FOUND', message: (error as Error).message } }, 404);

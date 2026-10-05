@@ -7,6 +7,9 @@
 // Types
 export type { CollaborateServices, CollaborateServicesWithBroadcast, BroadcastInboxEventFn, QuarryLikeAPI, InboxLikeService } from './types.js';
 
+// Error-mapping helpers
+export { isBadRequestError } from './errors.js';
+
 // Route factories
 export { createElementsRoutes } from './elements.js';
 export { createEntityRoutes } from './entities.js';

@@ -9,6 +9,7 @@ import type { ElementId, EntityId, Channel, Entity, Visibility, JoinPolicy } fro
 import { createGroupChannel, createDirectChannel } from '@stoneforge/core';
 import type { CreateGroupChannelInput, CreateDirectChannelInput, Element } from '@stoneforge/core';
 import type { CollaborateServices } from './types.js';
+import { isBadRequestError } from './errors.js';
 
 export function createChannelRoutes(services: CollaborateServices) {
   const { api } = services;
@@ -192,8 +193,8 @@ export function createChannelRoutes(services: CollaborateServices) {
 
       return c.json(created, 201);
     } catch (error) {
-      if ((error as { code?: string }).code === 'VALIDATION_ERROR') {
-        return c.json({ error: { code: 'VALIDATION_ERROR', message: (error as Error).message } }, 400);
+      if (isBadRequestError(error)) {
+        return c.json({ error: { code: 'VALIDATION_ERROR', message: error.message } }, 400);
       }
       console.error('[stoneforge] Failed to create channel:', error);
       return c.json({ error: { code: 'INTERNAL_ERROR', message: 'Failed to create channel' } }, 500);
