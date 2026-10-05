@@ -20,6 +20,7 @@ import type {
   InboxFilter,
   InboxItem,
   CreateInboxItemInput,
+  IdGeneratorConfig,
 } from '@stoneforge/core';
 
 // ============================================================================
@@ -53,6 +54,16 @@ export interface QuarryLikeAPI {
   getTasksInPlan(planId: ElementId, filter?: Record<string, unknown>): Promise<Task[]>;
   addTaskToPlan(taskId: ElementId, planId: ElementId, options?: { actor?: EntityId }): Promise<Dependency>;
   removeTaskFromPlan(taskId: ElementId, planId: ElementId, actor?: EntityId): Promise<void>;
+  /**
+   * ID generator config with adaptive hash length and a database-backed
+   * collision checker. Route handlers MUST pass this to every element
+   * factory call (createPlan, createTask, createDocument, ...) — without it
+   * factories generate fixed-length 4-char base36 IDs with no collision
+   * check, and element INSERTs hit UNIQUE violations once the database
+   * accumulates enough elements (birthday bound at 36^4 ≈ 1.7M), surfacing
+   * as transient 500/409 failures under parallel clients.
+   */
+  getIdGeneratorConfig(): IdGeneratorConfig;
 }
 
 /**

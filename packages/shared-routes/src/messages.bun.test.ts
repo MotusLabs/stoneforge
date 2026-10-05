@@ -67,6 +67,9 @@ function createFakeServices(
   const api = {
     get: async (id: string) => elements.get(id) ?? null,
     create: async (input: Record<string, unknown>) => input,
+    // Routes pass this to element factories; unit tests don't need collision
+    // checking, so an empty config (factory defaults) is fine.
+    getIdGeneratorConfig: () => ({}),
     ...apiOverrides,
   } as unknown as QuarryLikeAPI;
 
