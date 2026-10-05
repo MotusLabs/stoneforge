@@ -94,8 +94,10 @@ apps/
 
 ### Dual Storage Model
 
-- **SQLite**: Fast queries, indexes, FTS - the **cache**
-- **JSONL**: Git-tracked, append-only - the **source of truth**
+- **SQLite**: Fast queries, indexes, FTS - the operational store while a workspace is live
+- **JSONL**: Append-only export - the **source of truth** for import/clone bootstrap (`sf init` imports it when no DB exists)
+
+**Orchestrator workspaces** (a live dispatch daemon writing to the main checkout, like this one): the `.stoneforge/sync/*.jsonl` files are machine-local live state — gitignored, never committed (see `.stoneforge/.gitignore`). Committing them makes every merge refuse to fast-forward the main checkout (git overwrite protection). The daemon's SQLite DB is authoritative there; regenerate the JSONL from it with `sf sync export --full`.
 
 ### Dependencies
 
