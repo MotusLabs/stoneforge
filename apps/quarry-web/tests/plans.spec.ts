@@ -417,6 +417,39 @@ test.describe('TB24: Plan List with Progress', () => {
 // ============================================================================
 
 test.describe('TB47: Edit Plan', () => {
+  // Warm the dev server's /plans module graph once per worker BEFORE any
+  // test in this group spends its own timeout navigating.
+  //
+  // Vite serves this app from TypeScript source (the @stoneforge/ui alias),
+  // so a worker's first /plans load makes it transform several hundred
+  // modules on demand: ~2.5s idle, but tens of seconds when the machine is
+  // also running concurrent builds. That cold compile is what made the task
+  // picker regression below time out — fixture seeding plus a cold
+  // page.goto('/plans') could not both fit the 30s test budget, and the run
+  // died waiting for `load` before any picker assertion ran. Moving the
+  // compile into this hook (whose timeout is raised below, NOT the tests')
+  // lets every test in the group navigate an already-warm server within the
+  // normal budget. Best effort only: a failed warmup is swallowed so it can
+  // never fail the group — the tests navigate themselves and surface real
+  // errors.
+  test.beforeAll(async ({ browser }, testInfo) => {
+    test.setTimeout(240_000); // this hook's budget; test timeouts stay at 30s
+    const baseURL = testInfo.project.use.baseURL;
+    if (!baseURL) return;
+    const context = await browser.newContext();
+    try {
+      const warmer = await context.newPage();
+      // Generous on purpose: under sustained load the cold compile exceeds
+      // the default 30s navigation timeout, and giving up there would
+      // reintroduce the exact flake this hook exists to remove.
+      await warmer.goto(`${baseURL}/plans`, { timeout: 180_000 });
+    } catch {
+      // Swallow: warming is an optimization, not a precondition.
+    } finally {
+      await context.close();
+    }
+  });
+
   // ============================================================================
   // API Endpoint Tests
   // ============================================================================
@@ -814,6 +847,86 @@ test.describe('TB47: Edit Plan', () => {
     await page.getByTestId('task-picker-close').click();
     await expect(page.getByTestId('task-picker-modal')).not.toBeVisible({ timeout: 5000 });
   });
+
+  test('task picker lists tasks not in the plan from the real paginated envelope', async ({ page }) => {
+    // Pins the LIVE plan task-picker contract end to end against the real
+    // ListResult envelope. The picker the plans page renders comes from
+    // @stoneforge/ui/plans (packages/ui/src/plans), whose useAvailableTasks
+    // fetches GET /api/tasks?limit=500 and unwraps the envelope before
+    // filtering — nothing else in the suite asserts picker rows actually
+    // render (the other picker tests only check the modal opens, which is
+    // how the envelope/bare-array confusion class stays invisible; see
+    // el-3etj44 and the "Quarry Task List API Envelopes" doc, el-1ib6v4).
+    //
+    // The el-3etj44 hook fix itself (apps/quarry-web/src/api/hooks/
+    // usePlanApi.ts — currently shadowed by the packages/ui copy) is pinned
+    // by the ListResult-fixture unit test next to that file.
+    const runTag = `avail-${Date.now()}`;
+
+    // Seed enough tasks that /api/tasks genuinely paginates (its default page
+    // is 50; `total` via limit=1 is the exact cross-page count).
+    const baselineResponse = await page.request.get('/api/tasks?limit=1');
+    expect(baselineResponse.ok()).toBe(true);
+    const baseline = (await baselineResponse.json()).total as number;
+
+    const seedCount = Math.min(Math.max(6, 55 - baseline), 60);
+    const created: { id: string }[] = [];
+    for (let i = 0; i < seedCount; i++) {
+      const createResponse = await page.request.post('/api/tasks', {
+        data: { title: `${runTag} candidate #${i}`, createdBy: 'test-user' },
+      });
+      expect(createResponse.ok()).toBe(true);
+      created.push(await createResponse.json());
+    }
+
+    // A plan whose initial (and only) task is created[0] — TB121 requires
+    // plans to be created with a task. Touch it so it is the NEWEST task:
+    // /api/tasks orders by updated_at DESC, so if the hook failed to exclude
+    // plan members, created[0] would be the FIRST picker row — making the
+    // absence assertions below non-vacuous even when the 50-row cap hides
+    // older seeds.
+    const planResponse = await page.request.post('/api/plans', {
+      data: {
+        title: `Available-tasks plan ${runTag}`,
+        createdBy: 'test-user',
+        initialTaskId: created[0].id,
+      },
+    });
+    expect(planResponse.ok()).toBe(true);
+    const plan = await planResponse.json();
+    const touchResponse = await page.request.patch(`/api/tasks/${created[0].id}`, {
+      data: { tags: ['avail-probe'] },
+    });
+    expect(touchResponse.ok()).toBe(true);
+
+    await page.goto('/plans');
+    await expect(page.getByTestId('plans-page')).toBeVisible({ timeout: 10000 });
+
+    await page.getByTestId(`plan-item-${plan.id}`).click();
+    await expect(page.getByTestId('plan-detail-panel')).toBeVisible({ timeout: 5000 });
+
+    await page.getByTestId('add-task-btn').click();
+    await expect(page.getByTestId('task-picker-modal')).toBeVisible({ timeout: 5000 });
+
+    // The picker must offer tasks at all — the failure mode of this defect
+    // class is the "All tasks are already in this plan" empty state.
+    await expect(page.locator('[data-testid^="task-picker-item-"]').first()).toBeVisible({
+      timeout: 10000,
+    });
+    // The newest task belongs to the plan already — it must not be offered.
+    await expect(page.getByTestId(`task-picker-item-${created[0].id}`)).toHaveCount(0);
+
+    // Scope the search to this run's tasks (the picker search debounces
+    // 300ms; the expect timeout absorbs it). created[seedCount-1] is the
+    // newest non-plan task, so it leads the searched list regardless of the
+    // 50-row cap.
+    await page.getByTestId('task-picker-search').fill(runTag);
+    await expect(
+      page.getByTestId(`task-picker-item-${created[seedCount - 1].id}`)
+    ).toBeVisible({ timeout: 10000 });
+    await expect(page.getByTestId(`task-picker-item-${created[0].id}`)).toHaveCount(0);
+  });
+
 
   test('can add task to plan via API call', async ({ page }) => {
     // This test uses the API directly since the UI task picker may have many tasks
