@@ -77,19 +77,22 @@ first `page.goto()` of a run fetches the entire unbundled module graph through
 Vite's on-demand transform pipeline. Under the default worker count (half the
 CPUs) every worker hits that cold first transform at the same moment; the
 single Vite process serializes the transforms and the `load` event can exceed
-Playwright's default 30s navigation timeout. Four recorded flakes share this
+Playwright's default 30s navigation timeout. Seven recorded flakes share this
 signature — an initial `page.goto` timing out under parallel load and passing
 on isolated retry: `playbooks.spec.ts:193`, `workspaces.spec.ts:755`/`:873`,
-`helpers/create-workflow-modal.ts:339` (`goto('/dashboard')`), and
-`onboarding.spec.ts:521` (task el-1pjuwe).
+`helpers/create-workflow-modal.ts:339` (`goto('/dashboard')`),
+`onboarding.spec.ts:521`, tb129/tb130 (`/documents`), `tb82-task-search.spec.ts:17`
+(`/tasks`), and `tb121-plans-must-have-tasks.spec.ts:230` (`/plans`)
+(task el-1pjuwe).
 
 To keep that from recurring, each app's `tests/global-setup.ts` calls
 `warmViteDevServer()` from `tests/warm-vite.ts` after seeding test data.
-It scans `tests/` for every `page.goto('/…')` literal (helpers included) and
-loads each route once in a throwaway Chromium page before any worker spawns,
-populating Vite's in-memory transform cache. A cold full-graph warmup takes
-roughly 25–35s on this hardware; every worker navigation afterwards is a
-warm-cache load measured in seconds.
+It scans `tests/` for every `page.goto` string literal (helpers included),
+strips query strings and a leading `${APP_URL}`/`${BASE_URL}` interpolation,
+and loads each distinct route once in a throwaway Chromium page before any
+worker spawns, populating Vite's in-memory transform cache. A cold full-graph
+warmup takes roughly 25–35s on this hardware; every worker navigation
+afterwards is a warm-cache load measured in seconds.
 
 The warmup removes the dominant cost (the on-demand transforms), but a fresh
 browser context still re-fetches the whole dev-mode module graph through Vite
@@ -102,17 +105,27 @@ the per-test timeout, not `navigationTimeout` — raising only
 
 Consequences for writing specs:
 
-- Navigate with `page.goto('/route')` against the configured `baseURL`. Routes
-  reached that way are warmed automatically, including routes added by future
-  specs — the list is discovered from the specs, not maintained by hand.
+- Navigate with `page.goto('/route')` against the configured `baseURL`.
+  `` page.goto(`${APP_URL}/route`) `` is discovered too (the base-URL
+  interpolation is stripped). Routes reached that way are warmed automatically,
+  including routes added by future specs — the list is discovered from the
+  specs, not maintained by hand.
+- Fully dynamic targets (`page.goto(somePath)` from a variable or an array of
+  paths) are **not** discovered. Keep the route literal at the call site, or
+  point the data at routes other specs reach literally.
+- Do not add per-spec `beforeAll` warmups. They do not fix cold Vite — they
+  relocate the flake to the next spec file that navigates the same route
+  (warming `/plans` in `plans.spec.ts` moved the incident to
+  `tb121-plans-must-have-tasks.spec.ts`), and their swallowed failures hide
+  real problems. Warmup belongs in `globalSetup`.
 - Do not reach for per-test retries or further timeout inflation to paper over
-  a slow first navigation; report a warmup gap instead (for example a route
-  built from a template literal, which the scanner cannot see).
+  a slow first navigation; report a warmup gap instead.
 - `E2E_SKIP_WARMUP=1` disables the warmup for A/B comparisons and
   emergencies. With it set, cold-cache first navigations take the full
   25–50s again under parallel load — that is the old behavior, not a bug in
   your test.
 
 This applies identically to `apps/quarry-web` (same helper, same global-setup
-call). The convention is also recorded in the Test Runner Convention document
-(el-50x1).
+call; Quarry-specific notes are in `apps/quarry-web/TESTING.md`). The
+convention is also recorded in the Test Runner Convention document
+(el-50x1, "Playwright Browser Tests").
