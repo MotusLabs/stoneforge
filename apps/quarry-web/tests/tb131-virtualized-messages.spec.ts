@@ -39,8 +39,8 @@ test.describe('TB131: Virtualized Channel Messages', () => {
     }
 
     // No qualifying channel: create one. Group channels need >= 2 member
-    // entities and there is no POST /api/entities — global-setup seeds them
-    // (see helpers/group-channel.ts).
+    // entities — global-setup seeds the two this fixture uses
+    // (see helpers/group-channel.ts for the full contract).
     const channel = await createGroupChannelFixture(page, `e2e-tb131-${Date.now()}`);
     const sender = channel.members[0];
     expect(sender, 'created channel must expose a member to send as').toBeDefined();

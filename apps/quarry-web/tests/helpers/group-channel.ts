@@ -11,10 +11,14 @@
  *   to `members` automatically, so the payload must name at least one member
  *   OTHER than `createdBy` — `members: [createdBy]` is a one-member group and
  *   is rejected by the API.
- * - There is no POST /api/entities: specs cannot mint member entities over
- *   HTTP. tests/global-setup.ts seeds two entities (el-0000 "operator" and
- *   el-0001 "e2e-participant") through the storage API before the server
- *   starts; that seed is the only source of a second group member.
+ * - The Quarry server does expose POST /api/entities
+ *   (packages/quarry/src/server/index.ts — note the shared-routes factory
+ *   in packages/shared-routes/src/entities.ts has GET only, which is easy
+ *   to mistake for the whole surface). It rejects duplicate names, though,
+ *   so per-run fixtures are better served by the two entities that
+ *   tests/global-setup.ts seeds through the storage API before the server
+ *   starts (el-0000 "operator" and el-0001 "e2e-participant"): they are
+ *   deterministic and shared by every spec in the run.
  * - Channel names allow only alphanumerics, hyphens, underscores, and colons
  *   — no spaces.
  * - GET /api/channels and /api/entities answer with the paginated envelope
@@ -72,8 +76,8 @@ export async function createGroupChannelFixture(
   expect(
     entities.length,
     'group-channel fixtures need at least two entities, but GET /api/entities returned fewer. ' +
-      'tests/global-setup.ts must seed a second entity (group channels need >= 2 member ' +
-      'entities and there is no POST /api/entities to create one from a spec)'
+      'tests/global-setup.ts seeds el-0000 and el-0001 for exactly this purpose ' +
+      '(group channels need >= 2 member entities)'
   ).toBeGreaterThanOrEqual(2);
 
   const createdBy = entities[0].id;
