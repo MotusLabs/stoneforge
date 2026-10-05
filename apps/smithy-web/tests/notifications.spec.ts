@@ -57,20 +57,32 @@ async function awaitBell(page: Page, timeout = 45_000) {
  *    was then replaced, and toHaveText failed with element-not-found against
  *    the replacing document — on an app whose badge was correct all along).
  *
- * 2. Replacement recovery. On a cold dev-server cache, vite's dependency
- *    re-optimization triggers full page reloads mid-boot, and a slow module
- *    fetch can do the same under parallel-suite load. The bell gate can
- *    resolve against a first document that is then immediately replaced. When
- *    the badge assertion fails, this helper checks the bell: if the bell is
- *    gone too, the document was replaced and we re-gate on the new document's
- *    header. If the bell is STILL visible, the header is stable and the badge
- *    is genuinely absent or wrong — the clobber regression signature — and the
- *    failure surfaces immediately from the first attempt.
+ * 2. Replacement and slow-delivery recovery. On a cold dev-server cache,
+ *    vite's dependency re-optimization triggers full page reloads mid-boot,
+ *    and a slow module fetch can do the same under parallel-suite load —
+ *    delivery can even exceed a single bell budget. The bell gate itself is
+ *    therefore retried, and when the badge assertion fails the helper checks
+ *    the bell: if the bell is gone too, the document was replaced and we
+ *    re-gate on the new document's header. If the bell is STILL visible, the
+ *    header is stable and the badge is genuinely absent or wrong — the
+ *    clobber regression signature — and the failure surfaces immediately from
+ *    the first attempt.
  */
 async function awaitBadgeText(page: Page, expected: string | RegExp, attempts = 2) {
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    awaitBell(page);
+    try {
+      awaitBell(page);
+    } catch (err) {
+      // The bell gate itself timed out. On a cold dev-server cache under
+      // parallel-suite load, page delivery (including vite's re-optimization
+      // reloads) can exceed one bell budget, so with attempts left we simply
+      // re-gate — the loop is bounded and a page that never renders fails
+      // after the final attempt.
+      lastError = err;
+      if (attempt === attempts - 1) break;
+      continue;
+    }
     try {
       await expect(page.getByTestId('notification-badge')).toHaveText(expected, { timeout: 10_000 });
       return;
