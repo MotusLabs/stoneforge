@@ -143,19 +143,29 @@ test.describe('Keyboard Shortcuts', () => {
     });
 
     test('sequence times out after delay', async ({ page }) => {
+      // The app arms a 1s sequence-reset setTimeout when 'g' is pressed
+      // (KeyboardShortcutManager.SEQUENCE_TIMEOUT in src/lib/keyboard.ts).
+      // This test used to sleep wall-clock 1100ms and hope the page timer had
+      // fired — only ~100ms of margin, which parallel-worker CPU contention
+      // regularly ate, letting 'g t' complete and navigate to /tasks.
+      // Fake the page clock instead so the timeout fires deterministically.
+      await page.clock.install();
       await page.goto('/dashboard');
       await expect(page.getByTestId('dashboard-page')).toBeVisible();
 
-      // Press G
+      // Press G - arms the 1s sequence timeout
       await page.keyboard.press('g');
 
-      // Wait for more than the timeout (1 second)
-      await page.waitForTimeout(1100);
+      // Jump past SEQUENCE_TIMEOUT (1000ms); the fake clock fires the
+      // sequence-reset timer during the call, regardless of worker CPU load
+      await page.clock.fastForward(1100);
 
       // Now press T - should not navigate because sequence timed out
       await page.keyboard.press('t');
 
-      // Should still be on dashboard
+      // Give an erroneous SPA navigation a moment to surface before asserting
+      // the negative, then confirm we never left the dashboard
+      await page.waitForTimeout(100);
       await expect(page).toHaveURL(/\/dashboard/);
       await expect(page.getByTestId('dashboard-page')).toBeVisible();
     });
