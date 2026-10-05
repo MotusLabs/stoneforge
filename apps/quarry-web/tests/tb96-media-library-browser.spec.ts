@@ -11,12 +11,11 @@ import { test, expect } from '@playwright/test';
  * - Usage tracking shows which documents use each image
  */
 
-const API_BASE = 'http://localhost:3456';
 
 test.describe('TB96: Media Library Browser', () => {
   test.describe('Image Upload API', () => {
     test('should list uploaded images via API', async ({ request }) => {
-      const response = await request.get(`${API_BASE}/api/uploads`);
+      const response = await request.get(`/api/uploads`);
       expect(response.ok()).toBeTruthy();
 
       const data = await response.json();
@@ -37,7 +36,7 @@ test.describe('TB96: Media Library Browser', () => {
       ]);
 
       // Upload the image
-      const uploadResponse = await request.post(`${API_BASE}/api/uploads`, {
+      const uploadResponse = await request.post(`/api/uploads`, {
         multipart: {
           file: {
             name: 'test-image.png',
@@ -56,7 +55,7 @@ test.describe('TB96: Media Library Browser', () => {
       expect(uploadResult.mimeType).toBe('image/png');
 
       // List uploads and verify our image is there
-      const listResponse = await request.get(`${API_BASE}/api/uploads`);
+      const listResponse = await request.get(`/api/uploads`);
       expect(listResponse.ok()).toBeTruthy();
 
       const listData = await listResponse.json();
@@ -68,7 +67,7 @@ test.describe('TB96: Media Library Browser', () => {
 
     test('should serve an uploaded image', async ({ request }) => {
       // First list existing files
-      const listResponse = await request.get(`${API_BASE}/api/uploads`);
+      const listResponse = await request.get(`/api/uploads`);
       const listData = await listResponse.json();
 
       if (listData.files.length === 0) {
@@ -82,7 +81,7 @@ test.describe('TB96: Media Library Browser', () => {
           0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ]);
 
-        await request.post(`${API_BASE}/api/uploads`, {
+        await request.post(`/api/uploads`, {
           multipart: {
             file: {
               name: 'test-serve.png',
@@ -94,14 +93,14 @@ test.describe('TB96: Media Library Browser', () => {
       }
 
       // Re-list to get a filename
-      const updatedList = await request.get(`${API_BASE}/api/uploads`);
+      const updatedList = await request.get(`/api/uploads`);
       const updatedData = await updatedList.json();
       expect(updatedData.files.length).toBeGreaterThan(0);
 
       const filename = updatedData.files[0].filename;
 
       // Fetch the image
-      const imageResponse = await request.get(`${API_BASE}/api/uploads/${filename}`);
+      const imageResponse = await request.get(`/api/uploads/${filename}`);
       expect(imageResponse.ok()).toBeTruthy();
 
       const contentType = imageResponse.headers()['content-type'];
@@ -122,7 +121,7 @@ test.describe('TB96: Media Library Browser', () => {
         0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
       ]);
 
-      const uploadResponse = await request.post(`${API_BASE}/api/uploads`, {
+      const uploadResponse = await request.post(`/api/uploads`, {
         multipart: {
           file: {
             name: `test-delete-${uniqueId}.png`,
@@ -137,7 +136,7 @@ test.describe('TB96: Media Library Browser', () => {
 
       // Delete the image
       const deleteResponse = await request.delete(
-        `${API_BASE}/api/uploads/${uploadResult.filename}`
+        `/api/uploads/${uploadResult.filename}`
       );
       expect(deleteResponse.ok()).toBeTruthy();
 
@@ -146,7 +145,7 @@ test.describe('TB96: Media Library Browser', () => {
       expect(deleteResult.filename).toBe(uploadResult.filename);
 
       // Verify it's no longer in the list
-      const listResponse = await request.get(`${API_BASE}/api/uploads`);
+      const listResponse = await request.get(`/api/uploads`);
       const listData = await listResponse.json();
       const deletedFile = listData.files.find(
         (f: { filename: string }) => f.filename === uploadResult.filename
@@ -155,18 +154,23 @@ test.describe('TB96: Media Library Browser', () => {
     });
 
     test('should return 404 for non-existent file', async ({ request }) => {
-      const response = await request.get(`${API_BASE}/api/uploads/nonexistent-file-12345.png`);
+      const response = await request.get(`/api/uploads/nonexistent-file-12345.png`);
       expect(response.status()).toBe(404);
     });
 
     test('should prevent directory traversal attacks', async ({ request }) => {
-      // Try to access files with directory traversal patterns
-      // Note: URL encoding may normalize paths before reaching the server
-      // So we also accept 404 as a valid response (path not found)
-      const response1 = await request.get(`${API_BASE}/api/uploads/../../../etc/passwd`);
+      // Try to access files with directory traversal patterns.
+      // URL construction normalizes dot path segments — including their
+      // percent-encoded form `%2e%2e` — so a literal or singly-encoded
+      // `..` collapses into a plain `/etc/passwd` fetch against the web
+      // server, which serves index.html with 200. Double-encoding keeps
+      // the segment intact past URL parsing, so the traversal reaches
+      // the API server through the /api proxy, which must reject it.
+      // We also accept 404 as a valid response (path not found).
+      const response1 = await request.get(`/api/uploads/%252e%252e/%252e%252e/%252e%252e/etc/passwd`);
       expect([400, 404]).toContain(response1.status());
 
-      const response2 = await request.delete(`${API_BASE}/api/uploads/../../../etc/passwd`);
+      const response2 = await request.delete(`/api/uploads/%252e%252e/%252e%252e/%252e%252e/etc/passwd`);
       expect([400, 404]).toContain(response2.status());
     });
   });
@@ -174,7 +178,7 @@ test.describe('TB96: Media Library Browser', () => {
   test.describe('Image Usage Tracking', () => {
     test('should return usage info for an uploaded image', async ({ request }) => {
       // List existing files to get a filename
-      const listResponse = await request.get(`${API_BASE}/api/uploads`);
+      const listResponse = await request.get(`/api/uploads`);
       const listData = await listResponse.json();
 
       if (listData.files.length === 0) {
@@ -188,7 +192,7 @@ test.describe('TB96: Media Library Browser', () => {
           0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ]);
 
-        await request.post(`${API_BASE}/api/uploads`, {
+        await request.post(`/api/uploads`, {
           multipart: {
             file: {
               name: 'test-usage.png',
@@ -200,7 +204,7 @@ test.describe('TB96: Media Library Browser', () => {
       }
 
       // Re-list to get a filename
-      const updatedList = await request.get(`${API_BASE}/api/uploads`);
+      const updatedList = await request.get(`/api/uploads`);
       const updatedData = await updatedList.json();
       expect(updatedData.files.length).toBeGreaterThan(0);
 
@@ -208,7 +212,7 @@ test.describe('TB96: Media Library Browser', () => {
 
       // Get usage info
       const usageResponse = await request.get(
-        `${API_BASE}/api/uploads/${filename}/usage`
+        `/api/uploads/${filename}/usage`
       );
       expect(usageResponse.ok()).toBeTruthy();
 
@@ -222,14 +226,14 @@ test.describe('TB96: Media Library Browser', () => {
 
     test('should return 404 for non-existent image usage', async ({ request }) => {
       const usageResponse = await request.get(
-        `${API_BASE}/api/uploads/nonexistent-file-xyz.png/usage`
+        `/api/uploads/nonexistent-file-xyz.png/usage`
       );
       expect(usageResponse.status()).toBe(404);
     });
 
     test('should track usage when image is in document content', async ({ request }) => {
       // First, get an entity to use as createdBy
-      const entitiesResponse = await request.get(`${API_BASE}/api/entities`);
+      const entitiesResponse = await request.get(`/api/entities`);
       const entitiesData = await entitiesResponse.json();
       if (!entitiesData.items || entitiesData.items.length === 0) {
         // Skip test if no entities exist
@@ -250,7 +254,7 @@ test.describe('TB96: Media Library Browser', () => {
         0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
       ]);
 
-      const uploadResponse = await request.post(`${API_BASE}/api/uploads`, {
+      const uploadResponse = await request.post(`/api/uploads`, {
         multipart: {
           file: {
             name: `test-track-${uniqueId}.png`,
@@ -264,7 +268,7 @@ test.describe('TB96: Media Library Browser', () => {
       const imageFilename = uploadResult.filename;
 
       // Create a document that references this image
-      const docResponse = await request.post(`${API_BASE}/api/documents`, {
+      const docResponse = await request.post(`/api/documents`, {
         data: {
           title: `Test Doc ${uniqueId}`,
           contentType: 'markdown',
@@ -279,7 +283,7 @@ test.describe('TB96: Media Library Browser', () => {
       try {
         // Check usage - should now find 1 document
         const usageResponse = await request.get(
-          `${API_BASE}/api/uploads/${imageFilename}/usage`
+          `/api/uploads/${imageFilename}/usage`
         );
         expect(usageResponse.ok()).toBeTruthy();
 
@@ -294,8 +298,8 @@ test.describe('TB96: Media Library Browser', () => {
         expect(found).toBeTruthy();
       } finally {
         // Clean up: delete the document and image
-        await request.delete(`${API_BASE}/api/documents/${docResult.id}`);
-        await request.delete(`${API_BASE}/api/uploads/${imageFilename}`);
+        await request.delete(`/api/documents/${docResult.id}`);
+        await request.delete(`/api/uploads/${imageFilename}`);
       }
     });
   });
@@ -332,7 +336,7 @@ test.describe('TB96: Media Library Browser', () => {
 
   test.describe('File Metadata', () => {
     test('should return complete file metadata in list', async ({ request }) => {
-      const response = await request.get(`${API_BASE}/api/uploads`);
+      const response = await request.get(`/api/uploads`);
       expect(response.ok()).toBeTruthy();
 
       const data = await response.json();
@@ -385,7 +389,7 @@ test.describe('TB96: Media Library Browser', () => {
         0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
       ]);
 
-      const upload1 = await request.post(`${API_BASE}/api/uploads`, {
+      const upload1 = await request.post(`/api/uploads`, {
         multipart: {
           file: { name: 'test-sort-1.png', mimeType: 'image/png', buffer: pngData1 },
         },
@@ -395,7 +399,7 @@ test.describe('TB96: Media Library Browser', () => {
       // Small delay
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const upload2 = await request.post(`${API_BASE}/api/uploads`, {
+      const upload2 = await request.post(`/api/uploads`, {
         multipart: {
           file: { name: 'test-sort-2.png', mimeType: 'image/png', buffer: pngData2 },
         },
@@ -404,7 +408,7 @@ test.describe('TB96: Media Library Browser', () => {
 
       try {
         // List should have newest first
-        const listResponse = await request.get(`${API_BASE}/api/uploads`);
+        const listResponse = await request.get(`/api/uploads`);
         const listData = await listResponse.json();
 
         // Find indices of our files
@@ -421,8 +425,8 @@ test.describe('TB96: Media Library Browser', () => {
         }
       } finally {
         // Clean up
-        await request.delete(`${API_BASE}/api/uploads/${result1.filename}`);
-        await request.delete(`${API_BASE}/api/uploads/${result2.filename}`);
+        await request.delete(`/api/uploads/${result1.filename}`);
+        await request.delete(`/api/uploads/${result2.filename}`);
       }
     });
   });

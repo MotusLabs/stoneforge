@@ -125,7 +125,7 @@ test.describe('TB94e: Image Block Support', () => {
     test('POST /api/uploads accepts image files', async ({ page }) => {
       const imageBuffer = createTestImageBuffer();
 
-      const response = await page.request.post('http://localhost:3456/api/uploads', {
+      const response = await page.request.post('/api/uploads', {
         multipart: {
           file: {
             name: 'test.png',
@@ -147,7 +147,7 @@ test.describe('TB94e: Image Block Support', () => {
     test('GET /api/uploads/:filename serves uploaded files', async ({ page }) => {
       // First upload a file
       const imageBuffer = createTestImageBuffer();
-      const uploadResponse = await page.request.post('http://localhost:3456/api/uploads', {
+      const uploadResponse = await page.request.post('/api/uploads', {
         multipart: {
           file: {
             name: 'test-serve.png',
@@ -161,7 +161,7 @@ test.describe('TB94e: Image Block Support', () => {
       const uploadResult = await uploadResponse.json();
 
       // Then retrieve it
-      const getResponse = await page.request.get(`http://localhost:3456${uploadResult.url}`);
+      const getResponse = await page.request.get(uploadResult.url);
       expect(getResponse.ok()).toBe(true);
       expect(getResponse.headers()['content-type']).toBe('image/png');
 
@@ -170,7 +170,7 @@ test.describe('TB94e: Image Block Support', () => {
     });
 
     test('GET /api/uploads lists uploaded files', async ({ page }) => {
-      const response = await page.request.get('http://localhost:3456/api/uploads');
+      const response = await page.request.get('/api/uploads');
       expect(response.ok()).toBe(true);
 
       const result = await response.json();
@@ -183,7 +183,7 @@ test.describe('TB94e: Image Block Support', () => {
       // Create a buffer larger than 10MB
       const largeBuffer = Buffer.alloc(11 * 1024 * 1024, 0);
 
-      const response = await page.request.post('http://localhost:3456/api/uploads', {
+      const response = await page.request.post('/api/uploads', {
         multipart: {
           file: {
             name: 'large.png',
@@ -202,7 +202,7 @@ test.describe('TB94e: Image Block Support', () => {
     test('POST /api/uploads rejects non-image files', async ({ page }) => {
       const textBuffer = Buffer.from('not an image');
 
-      const response = await page.request.post('http://localhost:3456/api/uploads', {
+      const response = await page.request.post('/api/uploads', {
         multipart: {
           file: {
             name: 'test.txt',

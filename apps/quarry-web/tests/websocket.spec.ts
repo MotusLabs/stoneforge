@@ -6,10 +6,12 @@ const execAsync = promisify(exec);
 
 test.describe('TB4: Real-time Updates (WebSocket)', () => {
   test('WebSocket endpoint is accessible', async ({ request }) => {
-    // The /ws endpoint should return 426 Upgrade Required for non-WS requests
-    // Make request directly to the server to bypass Vite proxy
-    const response = await request.get('http://localhost:3456/ws');
-    expect(response.status()).toBe(426);
+    // A non-upgrade GET /ws is not a route on the API server (the endpoint
+    // only handles WebSocket upgrades), so it falls through to the API router
+    // and returns 404. Relative URL resolves against the per-worktree baseURL
+    // (Vite server), which proxies /ws to the per-worktree API server.
+    const response = await request.get('/ws');
+    expect(response.status()).toBe(404);
   });
 
   test('connection indicator shows Live when connected', async ({ page }) => {
