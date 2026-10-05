@@ -13,8 +13,9 @@ test.describe('TB76: Dashboard Sub-Section Navigation', () => {
 
     // All dashboard lenses should be visible in sidebar
     await expect(page.getByTestId('nav-dashboard')).toBeVisible(); // Overview
-    await expect(page.getByTestId('nav-task-flow')).toBeVisible();
     await expect(page.getByTestId('nav-timeline')).toBeVisible();
+    // The task-flow lens was removed: /tasks kanban carries the flow columns
+    await expect(page.getByTestId('nav-task-flow')).toHaveCount(0);
   });
 
   test('dashboard section is collapsible', async ({ page }) => {
@@ -26,7 +27,7 @@ test.describe('TB76: Dashboard Sub-Section Navigation', () => {
 
     // Dashboard items should be visible initially (defaultExpanded: true)
     await expect(page.getByTestId('nav-dashboard')).toBeVisible();
-    await expect(page.getByTestId('nav-task-flow')).toBeVisible();
+    await expect(page.getByTestId('nav-timeline')).toBeVisible();
 
     // Click section toggle to collapse
     const toggleButton = page.getByTestId('section-toggle-dashboard');
@@ -55,13 +56,21 @@ test.describe('TB76: Dashboard Sub-Section Navigation', () => {
     await page.goto('/dashboard/overview');
     await expect(page.getByTestId('dashboard-page')).toBeVisible();
 
-    // Test Task Flow
-    await page.goto('/dashboard/task-flow');
-    await expect(page.getByTestId('task-flow-page')).toBeVisible();
+    // Test Dependencies
+    await page.goto('/dependencies');
+    await expect(page.getByTestId('dependency-graph-page')).toBeVisible();
 
     // Test Timeline
     await page.goto('/dashboard/timeline');
     await expect(page.getByTestId('timeline-page')).toBeVisible();
+  });
+
+  test('legacy task-flow route redirects to the tasks kanban', async ({ page }) => {
+    // /dashboard/task-flow no longer renders a page: it redirects to /tasks,
+    // whose kanban view carries the task-flow columns
+    await page.goto('/dashboard/task-flow');
+    await expect(page).toHaveURL(/\/tasks/);
+    await expect(page.getByTestId('tasks-page')).toBeVisible();
   });
 
   test('/dashboard redirects to last visited section when pre-set', async ({ page }) => {
@@ -70,10 +79,10 @@ test.describe('TB76: Dashboard Sub-Section Navigation', () => {
       localStorage.setItem('dashboard.lastVisited', 'task-flow');
     });
 
-    // Navigate to /dashboard - should go to last visited (task-flow)
+    // Navigate to /dashboard - the legacy 'task-flow' section maps to /tasks
     await page.goto('/dashboard');
-    await expect(page).toHaveURL(/\/dashboard\/task-flow/);
-    await expect(page.getByTestId('task-flow-page')).toBeVisible();
+    await expect(page).toHaveURL(/\/tasks/);
+    await expect(page.getByTestId('tasks-page')).toBeVisible();
   });
 
   test('/dashboard redirects to overview when no last visited set', async ({ page }) => {
@@ -91,16 +100,16 @@ test.describe('TB76: Dashboard Sub-Section Navigation', () => {
   });
 
   test('last visited dashboard section is persisted in localStorage', async ({ page }) => {
-    // Visit task-flow
-    await page.goto('/dashboard/task-flow');
-    await expect(page.getByTestId('task-flow-page')).toBeVisible();
+    // Visit overview
+    await page.goto('/dashboard/overview');
+    await expect(page.getByTestId('dashboard-page')).toBeVisible();
     await page.waitForTimeout(500);
 
     // Check localStorage
     const lastVisited = await page.evaluate(() => {
       return localStorage.getItem('dashboard.lastVisited');
     });
-    expect(lastVisited).toBe('task-flow');
+    expect(lastVisited).toBe('overview');
 
     // Visit timeline
     await page.goto('/dashboard/timeline?page=1&limit=100');
@@ -117,19 +126,14 @@ test.describe('TB76: Dashboard Sub-Section Navigation', () => {
   test('navigating between dashboard sections via sidebar works', async ({ page }) => {
     await page.goto('/dashboard/overview');
 
-    // Click Task Flow in sidebar
-    await page.getByTestId('nav-task-flow').click();
-    await expect(page).toHaveURL(/\/dashboard\/task-flow/);
-    await expect(page.getByTestId('task-flow-page')).toBeVisible();
-
-    // Active indicator should be on Task Flow
-    const taskFlowLink = page.getByTestId('nav-task-flow');
-    await expect(taskFlowLink).toHaveClass(/bg-\[var\(--color-sidebar-item-active\)\]/);
-
     // Click Timeline
     await page.getByTestId('nav-timeline').click();
     await expect(page).toHaveURL(/\/dashboard\/timeline/);
     await expect(page.getByTestId('timeline-page')).toBeVisible();
+
+    // Active indicator should be on Timeline
+    const timelineLink = page.getByTestId('nav-timeline');
+    await expect(timelineLink).toHaveClass(/bg-\[var\(--color-sidebar-item-active\)\]/);
 
     // Click Overview
     await page.getByTestId('nav-dashboard').click();
@@ -152,43 +156,34 @@ test.describe('TB76: Dashboard Sub-Section Navigation', () => {
     // Test Overview active
     await page.goto('/dashboard/overview');
     await expect(page.getByTestId('nav-dashboard')).toHaveClass(/bg-\[var\(--color-sidebar-item-active\)\]/);
-    await expect(page.getByTestId('nav-task-flow')).not.toHaveClass(/bg-\[var\(--color-sidebar-item-active\)\]/);
-
-    // Test Task Flow active
-    await page.goto('/dashboard/task-flow');
-    await expect(page.getByTestId('nav-task-flow')).toHaveClass(/bg-\[var\(--color-sidebar-item-active\)\]/);
-    await expect(page.getByTestId('nav-dashboard')).not.toHaveClass(/bg-\[var\(--color-sidebar-item-active\)\]/);
+    await expect(page.getByTestId('nav-timeline')).not.toHaveClass(/bg-\[var\(--color-sidebar-item-active\)\]/);
 
     // Test Timeline active
     await page.goto('/dashboard/timeline');
     await expect(page.getByTestId('nav-timeline')).toHaveClass(/bg-\[var\(--color-sidebar-item-active\)\]/);
+    await expect(page.getByTestId('nav-dashboard')).not.toHaveClass(/bg-\[var\(--color-sidebar-item-active\)\]/);
+
+    // The former task-flow view lives on /tasks: the Tasks item is active there
+    await page.goto('/tasks');
+    await expect(page.getByTestId('nav-tasks')).toHaveClass(/bg-\[var\(--color-sidebar-item-active\)\]/);
   });
 
   test('browser back/forward navigation works with dashboard sections', async ({ page }) => {
     await page.goto('/dashboard/overview');
 
-    // Navigate to task-flow via sidebar
-    await page.getByTestId('nav-task-flow').click();
-    await expect(page).toHaveURL(/\/dashboard\/task-flow/);
-
-    // Navigate to timeline
+    // Navigate to timeline via sidebar
     await page.getByTestId('nav-timeline').click();
     await expect(page).toHaveURL(/\/dashboard\/timeline/);
-
-    // Go back to task-flow
-    await page.goBack();
-    await expect(page).toHaveURL(/\/dashboard\/task-flow/);
-    await expect(page.getByTestId('task-flow-page')).toBeVisible();
 
     // Go back to overview
     await page.goBack();
     await expect(page).toHaveURL(/\/dashboard\/overview/);
     await expect(page.getByTestId('dashboard-page')).toBeVisible();
 
-    // Go forward to task-flow
+    // Go forward to timeline
     await page.goForward();
-    await expect(page).toHaveURL(/\/dashboard\/task-flow/);
-    await expect(page.getByTestId('task-flow-page')).toBeVisible();
+    await expect(page).toHaveURL(/\/dashboard\/timeline/);
+    await expect(page.getByTestId('timeline-page')).toBeVisible();
   });
 
   test('settings default dashboard lens is respected', async ({ page }) => {

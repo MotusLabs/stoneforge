@@ -10,9 +10,10 @@ import AxeBuilder from '@axe-core/playwright';
 
 test.describe('TB135: Text Contrast Accessibility', () => {
   // All pages to audit
+  // (The former /dashboard/task-flow page was removed: it redirects to /tasks,
+  // which is audited as the Tasks entry below.)
   const pages = [
     { name: 'Dashboard', path: '/dashboard' },
-    { name: 'Task Flow', path: '/dashboard/task-flow' },
     { name: 'Dependencies', path: '/dependencies' },
     { name: 'Timeline', path: '/dashboard/timeline' },
     { name: 'Tasks', path: '/tasks' },

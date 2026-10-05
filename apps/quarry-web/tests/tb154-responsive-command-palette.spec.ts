@@ -114,9 +114,9 @@ test.describe('TB154: Responsive Command Palette', () => {
       // Type in search
       await page.getByTestId('command-palette-input').fill('task');
 
-      // Should show filtered results
+      // Should show filtered results: Tasks matches (the retired Task Flow
+      // entry folded into it - there is no command-item-nav-task-flow)
       await expect(page.getByTestId('command-item-nav-tasks')).toBeVisible();
-      await expect(page.getByTestId('command-item-nav-task-flow')).toBeVisible();
 
       // Should not show unrelated items
       await expect(page.getByTestId('command-item-nav-messages')).not.toBeVisible();

@@ -199,16 +199,22 @@ test.describe('TB75: Sidebar and Navigation Styling', () => {
       await expect(page.getByTestId('breadcrumb-dashboard')).toBeVisible();
     });
 
-    test('breadcrumbs show hierarchy for nested routes', async ({ page }) => {
+    test('legacy task-flow URL redirects to tasks with its breadcrumb', async ({ page }) => {
+      // The task-flow page was removed: /dashboard/task-flow redirects to
+      // /tasks, whose kanban view carries the task-flow columns. /tasks is a
+      // top-level route and renders a single crumb - ROUTE_CONFIG defines no
+      // parent chains, so there is no Dashboard > X hierarchy to assert.
       await page.goto('/dashboard/task-flow');
-      await expect(page.getByTestId('task-flow-page')).toBeVisible();
+      await expect(page).toHaveURL(/\/tasks/);
+      await expect(page.getByTestId('tasks-page')).toBeVisible();
 
       const breadcrumbs = page.getByTestId('breadcrumbs');
       await expect(breadcrumbs).toBeVisible();
 
-      // Should show Dashboard > Task Flow
-      await expect(page.getByTestId('breadcrumb-dashboard')).toBeVisible();
-      await expect(page.getByTestId('breadcrumb-task-flow')).toBeVisible();
+      // Single crumb for the current section
+      await expect(page.getByTestId('breadcrumb-tasks')).toBeVisible();
+      // The retired task-flow crumb no longer exists
+      await expect(page.getByTestId('breadcrumb-task-flow')).toHaveCount(0);
     });
 
     test('parent breadcrumb is clickable for navigation', async ({ page }) => {

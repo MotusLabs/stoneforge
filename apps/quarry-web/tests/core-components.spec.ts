@@ -180,8 +180,9 @@ test.describe('TB73: Core Component Styling', () => {
       await page.goto('/tasks');
       await page.waitForLoadState('networkidle');
 
-      // Open create task modal
-      const createBtn = page.getByRole('button', { name: /create/i });
+      // Open create task modal (use the specific testid: a broad button-name
+      // match for "create" also matches sorting controls)
+      const createBtn = page.getByTestId('create-task-button');
       if (await createBtn.isVisible()) {
         await createBtn.click();
         await page.waitForTimeout(300);
@@ -248,7 +249,8 @@ test.describe('TB73: Core Component Styling', () => {
 
   test.describe('Badge Component', () => {
     test('status badges are visible on task cards', async ({ page }) => {
-      await page.goto('/dashboard/task-flow');
+      // The task-flow surface now lives on /tasks
+      await page.goto('/tasks');
       await page.waitForLoadState('networkidle');
 
       // Look for status badges on task cards
@@ -284,7 +286,8 @@ test.describe('TB73: Core Component Styling', () => {
     });
 
     test('cards have hover effect when clickable', async ({ page }) => {
-      await page.goto('/dashboard/task-flow');
+      // The task-flow surface now lives on /tasks
+      await page.goto('/tasks');
       await page.waitForLoadState('networkidle');
 
       // Find a clickable card (task card)

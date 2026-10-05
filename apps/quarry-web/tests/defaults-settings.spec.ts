@@ -35,10 +35,13 @@ test.describe('TB61: Settings Page - Default Views', () => {
 
     // All lens options should be visible
     await expect(page.getByTestId('default-dashboard-lens-overview')).toBeVisible();
-    await expect(page.getByTestId('default-dashboard-lens-task-flow')).toBeVisible();
-    await expect(page.getByTestId('default-dashboard-lens-agents')).toBeVisible();
     await expect(page.getByTestId('default-dashboard-lens-dependencies')).toBeVisible();
     await expect(page.getByTestId('default-dashboard-lens-timeline')).toBeVisible();
+
+    // The task-flow and agents lenses were removed; the task-flow view now
+    // lives on /tasks and stored legacy values redirect there via the router
+    await expect(page.getByTestId('default-dashboard-lens-task-flow')).toHaveCount(0);
+    await expect(page.getByTestId('default-dashboard-lens-agents')).toHaveCount(0);
   });
 
   test('defaults section shows sort order options', async ({ page }) => {
@@ -101,17 +104,17 @@ test.describe('TB61: Settings Page - Default Views', () => {
     await page.goto('/settings');
     await page.getByTestId('settings-nav-defaults').click();
 
-    // Select task-flow lens
-    await page.getByTestId('default-dashboard-lens-task-flow').click();
+    // Select dependencies lens
+    await page.getByTestId('default-dashboard-lens-dependencies').click();
 
     // Should show checkmark
-    const taskFlowOption = page.getByTestId('default-dashboard-lens-task-flow');
-    await expect(taskFlowOption.locator('svg.text-blue-500')).toBeVisible();
+    const dependenciesOption = page.getByTestId('default-dashboard-lens-dependencies');
+    await expect(dependenciesOption.locator('svg.text-blue-500')).toBeVisible();
 
     // Check localStorage
     const stored = await page.evaluate(() => localStorage.getItem('settings.defaults'));
     const parsed = JSON.parse(stored!);
-    expect(parsed.dashboardLens).toBe('task-flow');
+    expect(parsed.dashboardLens).toBe('dependencies');
   });
 
   test('can select sort order preference', async ({ page }) => {
@@ -137,7 +140,7 @@ test.describe('TB61: Settings Page - Default Views', () => {
 
     // Make selections
     await page.getByTestId('default-tasks-view-kanban').click();
-    await page.getByTestId('default-dashboard-lens-agents').click();
+    await page.getByTestId('default-dashboard-lens-timeline').click();
     await page.getByTestId('default-sort-created').click();
 
     // Refresh page
@@ -146,7 +149,7 @@ test.describe('TB61: Settings Page - Default Views', () => {
 
     // Selections should persist
     await expect(page.getByTestId('default-tasks-view-kanban').locator('svg.text-blue-500')).toBeVisible();
-    await expect(page.getByTestId('default-dashboard-lens-agents').locator('svg.text-blue-500')).toBeVisible();
+    await expect(page.getByTestId('default-dashboard-lens-timeline').locator('svg.text-blue-500')).toBeVisible();
     await expect(page.getByTestId('default-sort-created').locator('svg.text-blue-500')).toBeVisible();
   });
 
@@ -179,29 +182,36 @@ test.describe('TB61: Settings Page - Default Views', () => {
   });
 
   test('navigating to root respects dashboard lens preference', async ({ page }) => {
-    // Set default lens to task-flow
+    // Set default lens to dependencies
     await page.goto('/settings');
     await page.getByTestId('settings-nav-defaults').click();
-    await page.getByTestId('default-dashboard-lens-task-flow').click();
+    await page.getByTestId('default-dashboard-lens-dependencies').click();
 
     // Navigate to root
     await page.goto('/');
 
-    // Should redirect to task-flow lens
-    await expect(page).toHaveURL(/\/dashboard\/task-flow/);
+    // Should redirect to the dependencies lens
+    await expect(page).toHaveURL(/\/dependencies/);
+    await expect(page.getByTestId('dependency-graph-page')).toBeVisible();
   });
 
-  test('navigating to root with agents lens preference', async ({ page }) => {
-    // Set default lens to agents
-    await page.goto('/settings');
-    await page.getByTestId('settings-nav-defaults').click();
-    await page.getByTestId('default-dashboard-lens-agents').click();
+  test('navigating to root with legacy task-flow lens lands on /tasks', async ({ page }) => {
+    // The task-flow lens is no longer selectable in settings, but stored
+    // legacy preferences must still resolve: the router maps the lens to /tasks
+    await page.addInitScript(() => {
+      localStorage.setItem('settings.defaults', JSON.stringify({
+        tasksView: 'list',
+        dashboardLens: 'task-flow',
+        sortOrder: 'updated_at',
+      }));
+    });
 
     // Navigate to root
     await page.goto('/');
 
-    // Should redirect to agents lens
-    await expect(page).toHaveURL(/\/dashboard\/agents/);
+    // Should redirect to /tasks (kanban carries the task-flow columns)
+    await expect(page).toHaveURL(/\/tasks/);
+    await expect(page.getByTestId('tasks-page')).toBeVisible();
   });
 
   test('navigating to root with overview lens preference', async ({ page }) => {
@@ -213,8 +223,9 @@ test.describe('TB61: Settings Page - Default Views', () => {
     // Navigate to root
     await page.goto('/');
 
-    // Should redirect to dashboard (overview)
-    await expect(page).toHaveURL('/dashboard');
+    // Should redirect to dashboard overview
+    await expect(page).toHaveURL(/\/dashboard\/overview/);
+    await expect(page.getByTestId('dashboard-page')).toBeVisible();
   });
 
   test('defaults nav item no longer shows Soon badge', async ({ page }) => {
@@ -254,8 +265,6 @@ test.describe('TB61: Settings Page - Default Views', () => {
 
     // Check dashboard lens descriptions
     await expect(page.getByTestId('default-dashboard-lens-overview')).toContainText('Key metrics');
-    await expect(page.getByTestId('default-dashboard-lens-task-flow')).toContainText('Ready, blocked');
-    await expect(page.getByTestId('default-dashboard-lens-agents')).toContainText('Agent workload');
     await expect(page.getByTestId('default-dashboard-lens-dependencies')).toContainText('Visual dependency');
     await expect(page.getByTestId('default-dashboard-lens-timeline')).toContainText('Chronological event');
 

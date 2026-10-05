@@ -9,9 +9,9 @@ test.describe('TB74: Card and Table Styling', () => {
 
   test.describe('TaskCard Component', () => {
     test('task cards display with consistent styling in dashboard', async ({ page }) => {
-      // Navigate to task flow to see task cards
-      await page.click('[data-testid="nav-task-flow"]');
-      await page.waitForURL(/\/dashboard\/task-flow/);
+      // Navigate to tasks to see task cards (task-flow surface moved to /tasks)
+      await page.click('[data-testid="nav-tasks"]');
+      await page.waitForURL(/\/tasks/);
 
       // Wait for page to load
       await page.waitForTimeout(500);
@@ -19,9 +19,9 @@ test.describe('TB74: Card and Table Styling', () => {
     });
 
     test('task cards show priority badges', async ({ page }) => {
-      // Navigate to task flow
-      await page.click('[data-testid="nav-task-flow"]');
-      await page.waitForURL(/\/dashboard\/task-flow/);
+      // Navigate to tasks
+      await page.click('[data-testid="nav-tasks"]');
+      await page.waitForURL(/\/tasks/);
 
       // Wait for page to load
       await page.waitForTimeout(500);

@@ -45,15 +45,8 @@ test.describe('TB119: Accessibility Audit', () => {
       expect(criticalViolations).toHaveLength(0);
     });
 
-    test('task flow page is accessible', async ({ page }) => {
-      await page.goto('/dashboard/task-flow');
-      await page.waitForLoadState('networkidle');
-
-      const results = await runAccessibilityAudit(page);
-      const criticalViolations = filterCriticalViolations(results.violations);
-
-      expect(criticalViolations).toHaveLength(0);
-    });
+    // The former task-flow page was removed: /dashboard/task-flow redirects to
+    // /tasks, which is audited by the 'tasks page is accessible' test below.
 
     test('dependency graph page is accessible', async ({ page }) => {
       await page.goto('/dashboard/dependencies');
