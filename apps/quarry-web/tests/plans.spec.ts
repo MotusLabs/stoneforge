@@ -461,38 +461,12 @@ test.describe('TB24: Plan List with Progress', () => {
 // ============================================================================
 
 test.describe('TB47: Edit Plan', () => {
-  // Warm the dev server's /plans module graph once per worker BEFORE any
-  // test in this group spends its own timeout navigating.
-  //
-  // Vite serves this app from TypeScript source (the @stoneforge/ui alias),
-  // so a worker's first /plans load makes it transform several hundred
-  // modules on demand: ~2.5s idle, but tens of seconds when the machine is
-  // also running concurrent builds. That cold compile is what made the task
-  // picker regression below time out — fixture seeding plus a cold
-  // page.goto('/plans') could not both fit the 30s test budget, and the run
-  // died waiting for `load` before any picker assertion ran. Moving the
-  // compile into this hook (whose timeout is raised below, NOT the tests')
-  // lets every test in the group navigate an already-warm server within the
-  // normal budget. Best effort only: a failed warmup is swallowed so it can
-  // never fail the group — the tests navigate themselves and surface real
-  // errors.
-  test.beforeAll(async ({ browser }, testInfo) => {
-    test.setTimeout(240_000); // this hook's budget; test timeouts stay at 30s
-    const baseURL = testInfo.project.use.baseURL;
-    if (!baseURL) return;
-    const context = await browser.newContext();
-    try {
-      const warmer = await context.newPage();
-      // Generous on purpose: under sustained load the cold compile exceeds
-      // the default 30s navigation timeout, and giving up there would
-      // reintroduce the exact flake this hook exists to remove.
-      await warmer.goto(`${baseURL}/plans`, { timeout: 180_000 });
-    } catch {
-      // Swallow: warming is an optimization, not a precondition.
-    } finally {
-      await context.close();
-    }
-  });
+  // NOTE: this group used to carry a per-file beforeAll warmup of /plans
+  // (f6f3dc5). It was removed: the Playwright globalSetup now warms every
+  // discovered page.goto route — /plans included — before workers spawn
+  // (tests/warm-vite.ts). Per-file warmups do not fix the cold-Vite problem,
+  // they relocate it to the next spec file that navigates the same route
+  // (incident 7: tb121-plans-must-have-tasks.spec.ts:230).
 
   // ============================================================================
   // API Endpoint Tests

@@ -17,8 +17,8 @@
  * transform cache (and finishes dep pre-bundling), so every worker's first
  * navigation is a warm-cache load (~seconds, not tens of seconds).
  *
- * The route list is discovered from the specs themselves: every
- * `page.goto('/...')` literal under tests/ is warmed, so new specs that
+ * The route list is discovered from the specs themselves: every page.goto
+ * string literal under tests/ (helpers included) is warmed, so new specs that
  * navigate to new routes are covered without maintaining a list by hand.
  */
 import { readdirSync, readFileSync } from 'node:fs';
@@ -31,24 +31,40 @@ const WARMUP_TIMEOUT_MS = 120_000;
 const NETWORK_IDLE_TIMEOUT_MS = 2_000;
 
 /**
- * Collect distinct `page.goto('...')` route targets from the test sources.
+ * Collect distinct page.goto route targets from the test sources.
  * Query strings are stripped (they do not change the module graph) and the
  * list is sorted so the first, most expensive navigation covers the shared
  * entry graph before cheaper per-route warms run.
+ *
+ * Template literals are handled: a leading `${APP_URL}`/`${BASE_URL}`
+ * interpolation carries no route information and is stripped, and
+ * interpolations inside query strings (`/tasks?page=${n}`) vanish with the
+ * query. An interpolated *path* segment (`/tasks/${id}`) is warmed as the
+ * literal `/tasks/${id}` — the router still matches it to the same route
+ * chunk, which is what the warmup needs.
  */
 export function discoverGotoRoutes(testsDir: string): string[] {
   const routes = new Set<string>();
   const gotoPattern = /page\.goto\(\s*['"`]([^'"`)]+)['"`]/g;
+  const baseURLPrefix = /^\$\{(?:APP_URL|BASE_URL)\}/;
 
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory()) {
         walk(fullPath);
-      } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.js')) {
+      } else if (
+        (entry.name.endsWith('.ts') || entry.name.endsWith('.js')) &&
+        // Skip this scanner's own source: its doc comments name example
+        // goto targets that no test navigates to.
+        entry.name !== 'warm-vite.ts'
+      ) {
         const source = readFileSync(fullPath, 'utf8');
         for (const match of source.matchAll(gotoPattern)) {
-          const route = match[1].split('?')[0].split('#')[0];
+          const route = match[1]
+            .replace(baseURLPrefix, '')
+            .split('?')[0]
+            .split('#')[0];
           if (route.startsWith('/')) routes.add(route);
         }
       }
