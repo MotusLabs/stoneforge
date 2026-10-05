@@ -1,19 +1,16 @@
 import { test, expect } from '@playwright/test';
+import {
+  createGroupChannelFixture,
+  listChannels,
+  type FixtureChannel,
+} from './helpers/group-channel';
 
 test.describe('TB131: Virtualized Channel Messages', () => {
-  // Helper to get channels
-  async function getChannels(page: import('@playwright/test').Page) {
-    const response = await page.request.get('/api/channels');
-    const data = await response.json();
-    return data?.items || (Array.isArray(data) ? data : []);
-  }
-
-  // Helper to find a channel with messages
+  // Helper to find an existing channel that already has messages
   async function findChannelWithMessages(
     page: import('@playwright/test').Page
-  ): Promise<{ channel: { id: string; name: string }; messages: { id: string; createdAt: string }[] } | null> {
-    const channels = await getChannels(page);
-    if (channels.length === 0) return null;
+  ): Promise<{ channel: FixtureChannel; messages: { id: string; createdAt: string }[] } | null> {
+    const channels = await listChannels(page);
 
     for (const channel of channels) {
       const resp = await page.request.get(`/api/channels/${channel.id}/messages`);
@@ -25,74 +22,64 @@ test.describe('TB131: Virtualized Channel Messages', () => {
     return null;
   }
 
-  // Helper to create a channel with many messages for testing
+  // Helper to guarantee a channel with at least `minMessages` messages for
+  // testing. Reuses a qualifying existing channel (global-setup seeds
+  // "e2e-messaging" with one seed message); otherwise creates a valid
+  // two-member group channel and posts messages into it. Every request is
+  // asserted: a failed channel or message create fails the test red instead
+  // of skipping the spec (a skip here would silently drop TB131 coverage —
+  // el-3kh1rt).
   async function ensureChannelWithMessages(
-    page: import('@playwright/test').Page
-  ): Promise<{ channelId: string; messageCount: number }> {
-    // First check if there's already a channel with messages
+    page: import('@playwright/test').Page,
+    minMessages = 1
+  ): Promise<{ channel: FixtureChannel; messages: { id: string; createdAt: string }[] }> {
     const existing = await findChannelWithMessages(page);
-    if (existing && existing.messages.length >= 5) {
-      return { channelId: existing.channel.id, messageCount: existing.messages.length };
+    if (existing && existing.messages.length >= minMessages) {
+      return existing;
     }
 
-    // Get entities for sender
-    const entitiesResp = await page.request.get('/api/entities');
-    const entitiesData = await entitiesResp.json();
-    const entities = entitiesData?.items || (Array.isArray(entitiesData) ? entitiesData : []);
+    // No qualifying channel: create one. Group channels need >= 2 member
+    // entities and there is no POST /api/entities — global-setup seeds them
+    // (see helpers/group-channel.ts).
+    const channel = await createGroupChannelFixture(page, `e2e-tb131-${Date.now()}`);
+    const sender = channel.members[0];
+    expect(sender, 'created channel must expose a member to send as').toBeDefined();
 
-    if (entities.length === 0) {
-      // Create a test entity
-      await page.request.post('/api/entities', {
-        data: { name: 'test-sender', entityType: 'human' }
-      });
-    }
-
-    // Create a channel for testing
-    const createChannelResp = await page.request.post('/api/channels', {
-      data: {
-        name: `test-channel-${Date.now()}`,
-        channelType: 'group',
-        members: [entities[0]?.id || 'test-sender'],
-        permissions: { visibility: 'public', joinPolicy: 'open', modifyMembers: [] }
-      }
-    });
-
-    const channel = await createChannelResp.json();
-    const channelId = channel.id;
-
-    // Create messages
-    const sender = entities[0]?.id || 'test-sender';
-    const messageCount = 10;
-
+    const messageCount = Math.max(10, minMessages);
     for (let i = 0; i < messageCount; i++) {
-      await page.request.post('/api/messages', {
+      const resp = await page.request.post('/api/messages', {
         data: {
-          channelId,
+          channelId: channel.id,
           sender,
           content: `Test message ${i + 1} for virtualization testing`
         }
       });
+      expect(resp.ok(), `seeding message ${i + 1}/${messageCount} failed`).toBe(true);
       // Small delay to ensure different timestamps
       await page.waitForTimeout(50);
     }
 
-    return { channelId, messageCount };
+    // Verify the seeded messages are readable before the spec relies on them
+    const listResp = await page.request.get(`/api/channels/${channel.id}/messages`);
+    expect(listResp.ok(), 'GET channel messages after seeding must succeed').toBe(true);
+    const messages = await listResp.json();
+    expect(
+      messages.length,
+      'seeded channel must expose the posted messages'
+    ).toBeGreaterThanOrEqual(minMessages);
+
+    return { channel, messages };
   }
 
   test('messages list uses virtualized container', async ({ page }) => {
-    const channelData = await findChannelWithMessages(page);
-
-    if (!channelData) {
-      test.skip();
-      return;
-    }
+    const { channel } = await ensureChannelWithMessages(page);
 
     await page.goto('/messages');
     await expect(page.getByTestId('messages-page')).toBeVisible({ timeout: 10000 });
     await expect(page.getByTestId('channel-list')).toBeVisible({ timeout: 5000 });
 
     // Click on the channel
-    await page.getByTestId(`channel-item-${channelData.channel.id}`).click();
+    await page.getByTestId(`channel-item-${channel.id}`).click();
     await expect(page.getByTestId('messages-container')).toBeVisible({ timeout: 5000 });
 
     // Check for the virtualized list container
@@ -100,16 +87,11 @@ test.describe('TB131: Virtualized Channel Messages', () => {
   });
 
   test('virtualized list renders messages correctly', async ({ page }) => {
-    const channelData = await findChannelWithMessages(page);
-
-    if (!channelData) {
-      test.skip();
-      return;
-    }
+    const { channel } = await ensureChannelWithMessages(page);
 
     await page.goto('/messages');
     await expect(page.getByTestId('channel-list')).toBeVisible({ timeout: 5000 });
-    await page.getByTestId(`channel-item-${channelData.channel.id}`).click();
+    await page.getByTestId(`channel-item-${channel.id}`).click();
     await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
 
     // Wait a bit for initial render and auto-scroll to bottom
@@ -124,16 +106,11 @@ test.describe('TB131: Virtualized Channel Messages', () => {
   });
 
   test('messages display day separators in virtualized list', async ({ page }) => {
-    const channelData = await findChannelWithMessages(page);
-
-    if (!channelData) {
-      test.skip();
-      return;
-    }
+    const { channel } = await ensureChannelWithMessages(page);
 
     await page.goto('/messages');
     await expect(page.getByTestId('channel-list')).toBeVisible({ timeout: 5000 });
-    await page.getByTestId(`channel-item-${channelData.channel.id}`).click();
+    await page.getByTestId(`channel-item-${channel.id}`).click();
     await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
 
     // Wait for render
@@ -146,32 +123,11 @@ test.describe('TB131: Virtualized Channel Messages', () => {
   });
 
   test('empty channel shows empty state', async ({ page }) => {
-    // Create an empty channel
-    const entitiesResp = await page.request.get('/api/entities');
-    const entitiesData = await entitiesResp.json();
-    const entities = entitiesData?.items || (Array.isArray(entitiesData) ? entitiesData : []);
-
-    if (entities.length === 0) {
-      test.skip();
-      return;
-    }
-
-    const createChannelResp = await page.request.post('/api/channels', {
-      data: {
-        name: `empty-channel-${Date.now()}`,
-        channelType: 'group',
-        members: [entities[0].id],
-        permissions: { visibility: 'public', joinPolicy: 'open', modifyMembers: [] }
-      }
-    });
-    const channelData = await createChannelResp.json();
-    const channelId = channelData?.id;
-
-    if (!channelId) {
-      // Channel creation may have failed or returned different format
-      test.skip();
-      return;
-    }
+    // Create a fresh empty channel. A failed create must fail the test —
+    // skipping here would hide both fixture regressions and empty-state
+    // regressions behind a green-looking suite (el-3kh1rt).
+    const channel = await createGroupChannelFixture(page, `e2e-tb131-empty-${Date.now()}`);
+    const channelId = channel.id;
 
     await page.goto('/messages');
     await expect(page.getByTestId('channel-list')).toBeVisible({ timeout: 5000 });
@@ -187,12 +143,8 @@ test.describe('TB131: Virtualized Channel Messages', () => {
   });
 
   test('scroll position maintained within virtualized list', async ({ page }) => {
-    const { channelId, messageCount } = await ensureChannelWithMessages(page);
-
-    if (messageCount < 5) {
-      test.skip();
-      return;
-    }
+    const { channel } = await ensureChannelWithMessages(page, 5);
+    const channelId = channel.id;
 
     await page.goto('/messages');
     await expect(page.getByTestId('channel-list')).toBeVisible({ timeout: 5000 });
@@ -218,7 +170,8 @@ test.describe('TB131: Virtualized Channel Messages', () => {
   });
 
   test('jump to latest button appears when scrolled up', async ({ page }) => {
-    const { channelId } = await ensureChannelWithMessages(page);
+    const { channel } = await ensureChannelWithMessages(page);
+    const channelId = channel.id;
 
     await page.goto('/messages');
     await expect(page.getByTestId('channel-list')).toBeVisible({ timeout: 5000 });
@@ -245,40 +198,38 @@ test.describe('TB131: Virtualized Channel Messages', () => {
   });
 
   test('thread panel shows virtualized replies', async ({ page }) => {
-    const channelData = await findChannelWithMessages(page);
-
-    if (!channelData || channelData.messages.length < 1) {
-      test.skip();
-      return;
-    }
+    const { channel } = await ensureChannelWithMessages(page);
 
     await page.goto('/messages');
     await expect(page.getByTestId('channel-list')).toBeVisible({ timeout: 5000 });
-    await page.getByTestId(`channel-item-${channelData.channel.id}`).click();
+    await page.getByTestId(`channel-item-${channel.id}`).click();
     await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
 
     // Wait for messages to render
     await page.waitForTimeout(500);
 
-    // Find a message with reply button and click it
-    const replyButton = page.locator('[data-testid^="message-"][data-testid$="-reply-button"]').first();
-    if (await replyButton.isVisible()) {
-      await replyButton.click();
+    // Hover the first message bubble so its actions render, then open its
+    // thread. Scoped to the bubble (not `.first()` across the whole page) so
+    // the click cannot land on another message's button — same drift fix as
+    // el-4bjca5 applied to the threading specs.
+    const message = page.locator('[data-testid^="message-el-"]').first();
+    await expect(message).toBeVisible({ timeout: 5000 });
+    await message.hover();
 
-      // Thread panel should appear
-      await expect(page.getByTestId('thread-panel')).toBeVisible({ timeout: 5000 });
+    const replyButton = message.getByTestId(/message-reply-button-/);
+    await expect(replyButton).toBeVisible({ timeout: 5000 });
+    await replyButton.click();
 
-      // Thread panel should have virtualized replies container
-      await expect(page.getByTestId('thread-replies')).toBeVisible();
+    // Thread panel should appear
+    await expect(page.getByTestId('thread-panel')).toBeVisible({ timeout: 5000 });
 
-      // The virtualized thread list should be present (may show empty state or replies)
-      // Just verify thread panel rendered without crashing
-      await expect(page.getByTestId('thread-replies')).toBeVisible();
-    }
+    // Thread panel should have virtualized replies container
+    await expect(page.getByTestId('thread-replies')).toBeVisible();
   });
 
   test('new message appears at bottom with auto-scroll', async ({ page }) => {
-    const { channelId } = await ensureChannelWithMessages(page);
+    const { channel } = await ensureChannelWithMessages(page);
+    const channelId = channel.id;
 
     await page.goto('/messages');
     await expect(page.getByTestId('channel-list')).toBeVisible({ timeout: 5000 });
@@ -306,16 +257,11 @@ test.describe('TB131: Virtualized Channel Messages', () => {
   });
 
   test('messages container has correct accessibility attributes', async ({ page }) => {
-    const channelData = await findChannelWithMessages(page);
-
-    if (!channelData) {
-      test.skip();
-      return;
-    }
+    const { channel } = await ensureChannelWithMessages(page);
 
     await page.goto('/messages');
     await expect(page.getByTestId('channel-list')).toBeVisible({ timeout: 5000 });
-    await page.getByTestId(`channel-item-${channelData.channel.id}`).click();
+    await page.getByTestId(`channel-item-${channel.id}`).click();
     await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
 
     // Check accessibility attributes on the virtualized container
