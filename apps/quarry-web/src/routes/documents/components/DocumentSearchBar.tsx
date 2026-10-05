@@ -6,6 +6,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Search, X, Loader2, FileText } from 'lucide-react';
 import { useDocumentSearch } from '../hooks';
 import { highlightMatches } from '../utils';
+import { isEditableTarget } from '../../../lib/keyboard';
 
 interface DocumentSearchBarProps {
   onSelectDocument: (documentId: string) => void;
@@ -33,10 +34,7 @@ export function DocumentSearchBar({ onSelectDocument }: DocumentSearchBarProps) 
   // Keyboard shortcuts: / to focus, Escape to clear/close
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (
-        event.key === '/' &&
-        !(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
-      ) {
+      if (event.key === '/' && !isEditableTarget(event.target)) {
         event.preventDefault();
         inputRef.current?.focus();
       }

@@ -54,6 +54,62 @@ test.describe('TB55: Slash Commands', () => {
   // Basic Slash Command Menu Tests
   // ============================================================================
 
+  // Regression (el-pdy082): DocumentSearchBar's global "/"-to-focus-search
+  // listener used to preventDefault the "/" typed into the block editor (a
+  // contenteditable div, not an input) and steal focus, so the slash-command
+  // menu could never open on the documents page. This test creates its own
+  // document so it never skips, and covers the editor half of the contract:
+  // "/" in the editor opens the menu and the search input does not steal
+  // focus. The other half — the shortcut still focusing search when pressed
+  // outside any editable region — is covered by tb95-document-search.spec.ts
+  // ("pressing / focuses the search input").
+  test('typing "/" in the editor opens the menu even with the search bar mounted (regression: search bar must not steal "/")', async ({ page }) => {
+    // Create a fresh document via the API so this test never depends on
+    // pre-existing data (and never silently skips).
+    const librariesResponse = await page.request.get('/api/libraries');
+    const libraries = await librariesResponse.json();
+    let libraryId = libraries[0]?.id;
+    if (!libraryId) {
+      const created = await page.request.post('/api/libraries', {
+        data: { name: `Slash Regression Library ${Date.now()}`, createdBy: 'test-user' },
+      });
+      const lib = await created.json();
+      libraryId = lib.id;
+    }
+    const docResponse = await page.request.post('/api/documents', {
+      data: {
+        title: `Slash Regression ${Date.now()}`,
+        content: '',
+        contentType: 'markdown',
+        createdBy: 'test-user',
+        libraryId,
+      },
+    });
+    expect(docResponse.ok()).toBe(true);
+    const doc = await docResponse.json();
+
+    await page.goto(`/documents?library=${libraryId}&selected=${doc.id}`);
+    await expect(page.getByTestId('document-detail-panel')).toBeVisible({ timeout: 15000 });
+    await page.getByTestId('document-edit-button').click();
+    await expect(page.getByTestId('block-editor')).toBeVisible({ timeout: 10000 });
+
+    // The search bar is mounted in the library tree; "/" in the editor must
+    // reach the editor, not focus the search input.
+    const searchInput = page.getByTestId('document-search-input');
+    await expect(searchInput).toBeVisible();
+
+    const editor = page.getByTestId('block-editor-content');
+    await editor.click();
+    await page.keyboard.type('/');
+
+    await expect(page.getByTestId('slash-command-menu'), { timeout: 5000 }).toBeVisible();
+    await expect(searchInput).not.toBeFocused();
+
+    // Cleanup: leave edit mode without saving the "/" text.
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('slash-command-menu')).not.toBeVisible();
+  });
+
   test('typing "/" opens slash command menu', async ({ page }) => {
     const docId = await enterDocumentEditMode(page);
     if (!docId) {
