@@ -22,8 +22,10 @@
 
 import { exec } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { withSyncExportLock } from '@stoneforge/quarry';
 
 const execAsync = promisify(exec);
 
@@ -709,9 +711,9 @@ function shellQuote(value: string): string {
 /**
  * Fast-forward the branch checked out in `workspaceRoot` to `targetRef`,
  * safely stepping over git's overwrite-protection refusal when the only
- * blocking files are machine-local live state that the target ref no
- * longer tracks (e.g. the main checkout's `.stoneforge/sync/*.jsonl`
- * across the commit that untracked them).
+ * blocking files are machine-local live sync state that the target ref no
+ * longer tracks (the main checkout's `.stoneforge/sync/*.jsonl` across the
+ * commit that untracked them).
  *
  * Dance: snapshot the blocking files, restore them to their committed
  * content so the checkout is clean, fast-forward (which deletes them from
@@ -719,90 +721,192 @@ function shellQuote(value: string): string {
  * untracked and gitignored from that point on, so no future sync touches
  * them again.
  *
- * Only engages when EVERY blocking file lives under `.stoneforge/` AND is
- * absent from the target ref's tree (i.e. the fast-forward deletes it).
- * Anything else (genuine divergence, hand-edited tracked files) keeps the
- * warn-and-return behavior.
+ * Safety properties:
+ *
+ * - **Writer exclusion.** The entire operation (first attempt included)
+ *   runs while holding the sync-export write lock for
+ *   `<workspaceRoot>/.stoneforge/sync` (`withSyncExportLock`). Every
+ *   in-process export writer (auto-export ticks, HTTP/API-triggered
+ *   `SyncService.export` calls) takes the same lock, so no export can land
+ *   between the snapshot and the restore — a write in that window would be
+ *   silently destroyed by the restore while its dirty marks were already
+ *   cleared. Out-of-process writers (e.g. `sf sync export` from a shell)
+ *   cannot be excluded by an in-memory lock; the SQLite DB is authoritative
+ *   and a full export heals, which is why external procedures end with one.
+ * - **Abort before mutation.** If any blocking file cannot be snapshotted
+ *   for preservation (unreadable for a reason other than being locally
+ *   deleted, or the backup copy cannot be written), nothing is mutated:
+ *   no `git checkout --`, no merge. Losing live state is worse than staying
+ *   one merge behind.
+ * - **Explicit absence.** A blocking file that was deleted locally is
+ *   recorded as absent and stays absent afterwards — on success and on
+ *   retry failure alike (`git checkout --` resurrects it temporarily).
+ * - **Durable backup.** Snapshots are also copied to a temp directory
+ *   before any mutation. If the restore-after-success fails, the branch has
+ *   already moved: the backup is retained and its path is reported loudly
+ *   rather than silently dropping live state.
+ *
+ * Only engages when EVERY blocking file is a known live-sync-state path
+ * (`isLiveSyncStatePath` — `.stoneforge/sync/*.jsonl`) AND absent from the
+ * target ref's tree (i.e. the fast-forward deletes it). Anything else —
+ * genuine divergence, hand-edited tracked files, `config.yaml` (which stays
+ * tracked and must be reconciled deliberately), other files under
+ * `.stoneforge/` — keeps the warn-and-return behavior.
  */
 async function fastForwardTargetInCheckout(
   workspaceRoot: string,
   targetRef: string,
   targetBranch: string
 ): Promise<void> {
-  let firstError: unknown;
-  try {
-    await execAsync(`git merge --ff-only ${targetRef}`, {
-      cwd: workspaceRoot, encoding: 'utf8',
-    });
-    return;
-  } catch (err) {
-    firstError = err;
-  }
-
-  const detail = gitErrorDetail(firstError);
-  const blocking = parseOverwrittenFiles(detail);
-
-  let danceable = blocking.length > 0;
-  for (const f of blocking) {
-    if (!f.replace(/\\/g, '/').startsWith('.stoneforge/')) {
-      danceable = false;
-      break;
-    }
-    // The target ref must no longer track the file (the fast-forward
-    // deletes it); anything still tracked needs a real reconcile instead.
-    if (await refHasPath(workspaceRoot, targetRef, f)) {
-      danceable = false;
-      break;
-    }
-  }
-
-  if (!danceable) {
-    console.warn(
-      `[git/merge] Failed to fast-forward local target branch '${targetBranch}' in ${workspaceRoot}. Git error: ${detail}` +
-      ' Cause: locally-modified tracked files in that checkout block the fast-forward (there is no divergence; `git pull` fails the same way). Snapshot/reconcile those files, then fast-forward manually.'
-    );
-    return;
-  }
-
-  // Snapshot the live state before cleaning it for the fast-forward.
-  const snapshots = new Map<string, Buffer>();
-  for (const f of blocking) {
+  // Hold the sync-export write lock for the whole operation: in-flight
+  // exports are awaited out, and no new one can start until the live files
+  // are back in place. Not reentrant — nothing here may call export().
+  const syncDir = path.join(workspaceRoot, '.stoneforge', 'sync');
+  await withSyncExportLock(syncDir, async () => {
+    let firstError: unknown;
     try {
-      snapshots.set(f, fs.readFileSync(path.join(workspaceRoot, f)));
-    } catch {
-      // File unreadable (e.g. deleted locally) — nothing to preserve.
+      await execAsync(`git merge --ff-only ${targetRef}`, {
+        cwd: workspaceRoot, encoding: 'utf8',
+      });
+      return;
+    } catch (err) {
+      firstError = err;
     }
-  }
 
-  const restoreSnapshots = () => {
-    for (const [f, content] of snapshots) {
+    const detail = gitErrorDetail(firstError);
+    const blocking = parseOverwrittenFiles(detail);
+
+    let danceable = blocking.length > 0;
+    for (const f of blocking) {
+      // Known live-sync paths only. In particular config.yaml — tracked,
+      // locally modified by the daemon's config upgrades — is deliberately
+      // NOT danceable: its changes must be reconciled by a human procedure,
+      // not stepped over.
+      if (!isLiveSyncStatePath(f)) {
+        danceable = false;
+        break;
+      }
+      // The target ref must no longer track the file (the fast-forward
+      // deletes it); anything still tracked needs a real reconcile instead.
+      if (await refHasPath(workspaceRoot, targetRef, f)) {
+        danceable = false;
+        break;
+      }
+    }
+
+    if (!danceable) {
+      console.warn(
+        `[git/merge] Failed to fast-forward local target branch '${targetBranch}' in ${workspaceRoot}. Git error: ${detail}` +
+        ' Cause: locally-modified tracked files in that checkout block the fast-forward (there is no divergence; `git pull` fails the same way). Snapshot/reconcile those files, then fast-forward manually.'
+      );
+      return;
+    }
+
+    // ---- Snapshot phase: preserve live state BEFORE any mutation. ----
+    // A null entry records "locally absent" so absence can be restored.
+    const snapshots = new Map<string, Buffer | null>();
+    const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-live-state-'));
+
+    for (const f of blocking) {
       const abs = path.join(workspaceRoot, f);
-      fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, content);
+      let content: Buffer | null;
+      try {
+        content = fs.readFileSync(abs);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          content = null;
+        } else {
+          // Unreadable for another reason (permissions, I/O error). Abort
+          // before any mutation — proceeding would let git discard state
+          // we failed to preserve.
+          console.warn(
+            `[git/merge] Not fast-forwarding local target branch '${targetBranch}' in ${workspaceRoot}: live state file ${f} could not be read for preservation (${(err as NodeJS.ErrnoException).code ?? err}). No files were modified.`
+          );
+          fs.rmSync(backupDir, { recursive: true, force: true });
+          return;
+        }
+      }
+      snapshots.set(f, content);
+
+      // Durable copy: survives even if this process dies mid-dance, and is
+      // reportable if the in-memory restore later fails.
+      if (content !== null) {
+        try {
+          fs.writeFileSync(path.join(backupDir, path.basename(f)), content);
+        } catch (backupErr) {
+          console.warn(
+            `[git/merge] Not fast-forwarding local target branch '${targetBranch}' in ${workspaceRoot}: could not back up live state file ${f} (${(backupErr as NodeJS.ErrnoException).code ?? backupErr}). No files were modified.`
+          );
+          fs.rmSync(backupDir, { recursive: true, force: true });
+          return;
+        }
+      }
     }
-  };
 
-  try {
-    await execAsync(
-      `git checkout -- ${blocking.map(shellQuote).join(' ')}`,
-      { cwd: workspaceRoot, encoding: 'utf8' }
-    );
-    await execAsync(`git merge --ff-only ${targetRef}`, {
-      cwd: workspaceRoot, encoding: 'utf8',
-    });
-  } catch (retryError) {
-    // Fast-forward still refused: put the live state back exactly as it was.
-    restoreSnapshots();
+    /**
+     * Put the live state back exactly as it was: content for files that
+     * existed, absence for files that did not. Restores every file it can
+     * and reports the ones it could not instead of throwing mid-way.
+     */
+    const restoreSnapshots = (): string[] => {
+      const failures: string[] = [];
+      for (const [f, content] of snapshots) {
+        const abs = path.join(workspaceRoot, f);
+        try {
+          if (content === null) {
+            fs.rmSync(abs, { force: true });
+          } else {
+            fs.mkdirSync(path.dirname(abs), { recursive: true });
+            fs.writeFileSync(abs, content);
+          }
+        } catch (restoreErr) {
+          failures.push(`${f} (${(restoreErr as NodeJS.ErrnoException).code ?? restoreErr})`);
+        }
+      }
+      return failures;
+    };
+
+    try {
+      await execAsync(
+        `git checkout -- ${blocking.map(shellQuote).join(' ')}`,
+        { cwd: workspaceRoot, encoding: 'utf8' }
+      );
+      await execAsync(`git merge --ff-only ${targetRef}`, {
+        cwd: workspaceRoot, encoding: 'utf8',
+      });
+    } catch (retryError) {
+      // Fast-forward still refused: put the live state back exactly as it
+      // was (including absence) and leave the branch where it was.
+      const failures = restoreSnapshots();
+      if (failures.length > 0) {
+        console.error(
+          `[git/merge] CRITICAL: failed to restore live state files after an aborted fast-forward of '${targetBranch}' in ${workspaceRoot}: ${failures.join('; ')}. Snapshots retained at ${backupDir}. Restore them manually or regenerate with 'sf sync export --full' (the SQLite DB is authoritative).`
+        );
+      } else {
+        fs.rmSync(backupDir, { recursive: true, force: true });
+      }
+      console.warn(
+        `[git/merge] Failed to fast-forward local target branch '${targetBranch}' in ${workspaceRoot} even after setting aside live state files (${blocking.join(', ')}). Git error: ${gitErrorDetail(retryError)}`
+      );
+      return;
+    }
+
+    // Fast-forward succeeded — the branch has moved, so the restore is now
+    // mandatory, not best-effort.
+    const failures = restoreSnapshots();
+    if (failures.length > 0) {
+      // Keep the durable backup and say where it is; the live files on disk
+      // may be missing or stale. The DB is authoritative; full export heals.
+      console.error(
+        `[git/merge] CRITICAL: fast-forwarded '${targetBranch}' in ${workspaceRoot} but failed to restore machine-local live state files: ${failures.join('; ')}. Snapshots retained at ${backupDir}. Restore them or regenerate with 'sf sync export --full' (the SQLite DB is authoritative).`
+      );
+      return;
+    }
+    fs.rmSync(backupDir, { recursive: true, force: true });
     console.warn(
-      `[git/merge] Failed to fast-forward local target branch '${targetBranch}' in ${workspaceRoot} even after setting aside live state files (${blocking.join(', ')}). Git error: ${gitErrorDetail(retryError)}`
+      `[git/merge] Fast-forwarded '${targetBranch}' in ${workspaceRoot}; restored ${snapshots.size} machine-local live-state file(s) (${blocking.join(', ')}) that the target no longer tracks, with sync exports excluded for the duration.`
     );
-    return;
-  }
-
-  restoreSnapshots();
-  console.warn(
-    `[git/merge] Fast-forwarded '${targetBranch}' in ${workspaceRoot}; restored ${snapshots.size} machine-local live-state file(s) (${blocking.join(', ')}) that the target no longer tracks.`
-  );
+  });
 }
 
 /**
@@ -817,7 +921,8 @@ async function fastForwardTargetInCheckout(
  *   files are machine-local live state that the target no longer tracks
  *   (live `.stoneforge/sync/*.jsonl` across the untracking commit), the
  *   files are snapshotted, the fast-forward is retried on a clean
- *   checkout, and the live content is restored afterwards (see
+ *   checkout, and the live content is restored afterwards — with
+ *   in-process sync exports excluded for the duration (see
  *   fastForwardTargetInCheckout).
  * - Any other failure: logs a warning including the real git error and
  *   returns silently. The merge is already pushed to remote.

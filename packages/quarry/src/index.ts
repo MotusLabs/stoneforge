@@ -134,6 +134,8 @@ export {
   // Service
   SyncService,
   createSyncService,
+  // Export Write Lock
+  withSyncExportLock,
   // Auto Export
   AutoExportService,
   createAutoExportService,

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AutoExportService, createAutoExportService } from './auto-export.js';
 import { SyncService, createSyncService } from './service.js';
+import { withSyncExportLock } from './export-lock.js';
 import { createStorage, initializeSchema } from '@stoneforge/storage';
 import type { StorageBackend } from '@stoneforge/storage';
 import type { Element, ElementId, EntityId } from '@stoneforge/core';
@@ -546,4 +547,172 @@ describe('AutoExportService', () => {
     // The tick finished cleanly — dirty tracking acknowledged
     expect(backend.getDirtyElements()).toHaveLength(0);
   }, 20_000);
+});
+
+// ----------------------------------------------------------------------------
+// Pause / resume (daemon-sleep quiesce support)
+// ----------------------------------------------------------------------------
+
+describe('AutoExportService pause/resume', () => {
+  beforeEach(() => {
+    tempDir = createTempDir();
+    backend = createTestBackend(join(tempDir, 'test.db'));
+    syncService = createSyncService(backend);
+  });
+
+  afterEach(() => {
+    if (backend.isOpen) {
+      backend.close();
+    }
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('pause awaits an in-flight tick and stops further polling; resume re-arms and full-exports', async () => {
+  const outputDir = join(tempDir, 'sync');
+
+  let tickExportCount = 0;
+  let releaseExport: () => void = () => {};
+  let gateArmed = true; // gate exactly ONE incremental export
+  const originalExport = syncService.export.bind(syncService);
+  syncService.export = async (options) => {
+    if (options.full || !gateArmed) {
+      return originalExport(options);
+    }
+    tickExportCount++;
+    await new Promise<void>((resolve) => {
+      releaseExport = resolve;
+    });
+    gateArmed = false;
+    return originalExport(options);
+  };
+
+  const service = createAutoExportService({
+    syncService,
+    backend,
+    syncConfig: defaultSyncConfig({ exportDebounce: 10 }),
+    outputDir,
+  });
+
+  await service.start();
+
+  const task = createTestElement({ id: 'el-pause1' as ElementId });
+  insertElement(backend, task);
+  backend.markDirty('el-pause1');
+
+  // A tick export is parked in the gate (observed via the count, el-19vmmo).
+  await waitFor(() => tickExportCount >= 1);
+
+  const paused = service.pause('test pause');
+  let pauseResolved = false;
+  paused.then(() => {
+    pauseResolved = true;
+  });
+  await sleep(30);
+  expect(pauseResolved).toBe(false); // still draining the in-flight tick
+  releaseExport();
+  await paused;
+  expect(pauseResolved).toBe(true);
+
+  // While paused, dirty elements accumulate without any export running.
+  const task2 = createTestElement({ id: 'el-pause2' as ElementId });
+  insertElement(backend, task2);
+  backend.markDirty('el-pause2');
+  const ticksAtPause = tickExportCount;
+  await sleep(60);
+  expect(tickExportCount).toBe(ticksAtPause); // no polls while paused
+  expect(backend.getDirtyElements()).toHaveLength(1); // el-pause2 still dirty
+
+  // Resume: re-arms polling via the startup full export, which regenerates
+  // the JSONL from the (authoritative) DB — el-pause2 lands in the file.
+  await service.resume();
+  const elementsFile = join(outputDir, 'elements.jsonl');
+  await waitFor(() => readFileSync(elementsFile, 'utf-8').includes('el-pause2'));
+
+  // Polling really re-armed: a NEW dirty element after resume is exported by
+  // a regular tick (full export does not clear dirty marks, the incremental
+  // tick does — assert the drain too, via observable conditions only).
+  const task3 = createTestElement({ id: 'el-pause3' as ElementId });
+  insertElement(backend, task3);
+  backend.markDirty('el-pause3');
+  await waitFor(() => readFileSync(elementsFile, 'utf-8').includes('el-pause3'));
+  await waitFor(() => backend.getDirtyElements().length === 0);
+
+  await service.stop();
+}, 20_000);
+
+test('pause is a no-op when the service is not running', async () => {
+  const outputDir = join(tempDir, 'sync');
+  const service = createAutoExportService({
+    syncService,
+    backend,
+    syncConfig: defaultSyncConfig(),
+    outputDir,
+  });
+
+  await expect(service.pause('never started')).resolves.toBeUndefined();
+  // resume() maps to start(): on a never-started service it performs the
+  // startup full export and arms the poll interval. Stop it again — bun runs
+  // every test file in one process, and a leaked interval keeps erroring
+  // against the closed backend during later test files.
+  await expect(service.resume()).resolves.toBeUndefined();
+  await service.stop();
+});
+
+test('pause drains a tick gated behind an externally held export lock', async () => {
+  // The daemon-sleep pause must also wait out exports that are queued on
+  // the sync-export write lock (e.g. behind the merge steward's dance).
+  const outputDir = join(tempDir, 'sync');
+
+  // Signal when the tick's export has STARTED (and is queued on the lock).
+  let exportStarted = false;
+  const originalExport = syncService.export.bind(syncService);
+  syncService.export = async (options) => {
+    if (!options.full) {
+      exportStarted = true;
+    }
+    return originalExport(options);
+  };
+
+  const service = createAutoExportService({
+    syncService,
+    backend,
+    syncConfig: defaultSyncConfig({ exportDebounce: 10 }),
+    outputDir,
+  });
+  await service.start();
+
+  const task = createTestElement({ id: 'el-lockdrain' as ElementId });
+  insertElement(backend, task);
+  backend.markDirty('el-lockdrain');
+
+  let releaseHolder!: () => void;
+  const holderGate = new Promise<void>((resolve) => {
+    releaseHolder = resolve;
+  });
+  const holder = withSyncExportLock(outputDir, async () => {
+    await holderGate;
+  });
+
+  // A tick fired and its export is stuck behind the holder (observed via the
+  // started flag, not a fixed sleep — el-19vmmo).
+  await waitFor(() => exportStarted);
+
+  const paused = service.pause('quiesce');
+  let pauseResolved = false;
+  paused.then(() => {
+    pauseResolved = true;
+  });
+
+  await sleep(50);
+  expect(pauseResolved).toBe(false); // export still waiting on the lock
+
+  releaseHolder();
+  await holder;
+  await paused; // now the drain completed
+  expect(pauseResolved).toBe(true);
+
+  await service.stop();
+}, 20_000);
 });

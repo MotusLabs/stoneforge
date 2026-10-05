@@ -118,6 +118,38 @@ export class AutoExportService {
   }
 
   /**
+   * Pause auto-export polling and wait for any in-flight tick to drain.
+   *
+   * Once the returned promise resolves, no further export writes will start
+   * until `resume()` is called. This is what makes an operator pause (e.g.
+   * `sf daemon sleep`) a real quiesce of the JSONL writers inside the server
+   * process — pausing dispatch alone would leave this poller writing while
+   * the operator manipulates the live files underneath it.
+   *
+   * Safe to call when not running (no-op) or repeatedly. Each pause fully
+   * stops the poller, so a `start()` racing it cannot arm a late interval.
+   */
+  async pause(reason = 'paused'): Promise<void> {
+    if (!this.pollInterval && !this.startPromise) {
+      return;
+    }
+    await this.stop();
+    console.log(`[auto-export] ${reason}`);
+  }
+
+  /**
+   * Resume auto-export after a `pause()`.
+   *
+   * Re-arming performs the startup full export, which regenerates the JSONL
+   * from the (authoritative) SQLite database — deliberately: anything that
+   * happened to the live files while paused is reconciled from the source of
+   * truth instead of trusting whatever state they were left in.
+   */
+  async resume(): Promise<void> {
+    await this.start();
+  }
+
+  /**
    * Stop the auto-export polling loop.
    *
    * If a `start()` (initial export) or a poll tick is still in flight, this

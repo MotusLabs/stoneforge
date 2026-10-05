@@ -26,7 +26,7 @@ export function markDaemonAsServerManaged(): void {
 }
 
 export function createDaemonRoutes(services: Services) {
-  const { dispatchDaemon } = services;
+  const { dispatchDaemon, autoExportService } = services;
   const app = new Hono();
 
   // GET /api/daemon/status
@@ -298,6 +298,19 @@ export function createDaemonRoutes(services: Services) {
         );
       }
 
+      // Quiesce the JSONL auto-export writer FIRST (awaits any in-flight
+      // export) so a sleep is a real quiesce of background writers, not just
+      // of dispatch: procedures that follow (e.g. the main-checkout live-state
+      // transition runbook) manipulate the very files this poller writes.
+      // Best-effort — the dispatch pause below is the primary effect.
+      try {
+        await autoExportService.pause(
+          `auto-export paused: daemon sleep until ${resetTime.toISOString()}`
+        );
+      } catch (pauseError) {
+        logger.error('Failed to pause auto-export during daemon sleep:', pauseError);
+      }
+
       dispatchDaemon.sleepUntil(resetTime);
 
       return c.json({
@@ -327,6 +340,17 @@ export function createDaemonRoutes(services: Services) {
 
     try {
       dispatchDaemon.wake();
+
+      // Resume the JSONL auto-export writer paused by daemon sleep. Resume
+      // performs the startup full export, regenerating the live files from
+      // the authoritative SQLite DB — deliberate, so anything that happened
+      // to them while paused is reconciled from the source of truth.
+      // Best-effort — the dispatch wake above is the primary effect.
+      try {
+        await autoExportService.resume();
+      } catch (resumeError) {
+        logger.error('Failed to resume auto-export after daemon wake:', resumeError);
+      }
 
       return c.json({
         success: true,

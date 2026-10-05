@@ -804,6 +804,7 @@ describe('SyncService', () => {
 
       const serviceAny = service as unknown as {
         writeAtomic: (filePath: string, content: string) => Promise<void>;
+        exportUnlocked: (options: { outputDir: string; full: boolean }) => Promise<unknown>;
       };
       const originalWriteAtomic = serviceAny.writeAtomic.bind(service);
       let injected = false;
@@ -813,8 +814,11 @@ describe('SyncService', () => {
           // Re-mark while export 1 is writing (token T2)
           updateElementPayload(backend, 'el-task1', { title: 'task1 v3' });
           // A complete second export runs, snapshots T2 and clears it —
-          // the dirty row is deleted
-          await service.export({ outputDir, full: false });
+          // the dirty row is deleted. It must go through the lock-free
+          // exportUnlocked core: the outer export holds the sync-export
+          // write lock (same-process exports are serialized by it now), and
+          // the overlap this test reconstructs is the cross-process one.
+          await serviceAny.exportUnlocked({ outputDir, full: false });
           expect(backend.getDirtyElements()).toHaveLength(0);
           // The element changes again in the same frozen millisecond: the
           // re-created row must not receive a token export 1 still holds

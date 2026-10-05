@@ -20,6 +20,7 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { withSyncExportLock } from './export-lock.js';
 import type { StorageBackend, DirtyElement } from '@stoneforge/storage';
 import type { Element, ElementId, Timestamp, EntityId, Dependency, DependencyType } from '@stoneforge/core';
 import { createTimestamp } from '@stoneforge/core';
@@ -154,6 +155,23 @@ export class SyncService {
    * @returns Export result with file paths and counts
    */
   async export(options: SyncExportOptions): Promise<ExportResult> {
+    // Serialize with other export writers and with critical sections that
+    // temporarily manipulate the live files (the merge steward's snapshot
+    // dance holds the same lock while it steps a checkout over the untracking
+    // commit). Not reentrant: nothing under the lock may call export().
+    return withSyncExportLock(options.outputDir, () => this.exportUnlocked(options));
+  }
+
+  /**
+   * Export without the sync-export write lock.
+   *
+   * The lock makes overlapping exports impossible within one process, but
+   * two processes sharing a directory (server + `sf sync export` from a
+   * shell) can still overlap — the stale-snapshot dirty-token handling in
+   * clearExportedDirty exists for exactly that case, and tests drive it
+   * through this core to reconstruct the overlap deterministically.
+   */
+  private async exportUnlocked(options: SyncExportOptions): Promise<ExportResult> {
     const now = createTimestamp();
 
     // Ensure output directory exists

@@ -1,0 +1,5 @@
+---
+"@stoneforge/quarry": patch
+---
+
+JSONL export writes are now serialized per output directory by a shared async lock (`withSyncExportLock`, exported from the package root). `SyncService.export` takes the lock, so overlapping exports can no longer interleave inside one process — and critical sections that temporarily manipulate the live sync files (the merge steward's fast-forward snapshot dance in `@stoneforge/smithy`) hold the same lock, guaranteeing an export that lands while a checkout is being stepped over the untracking commit is awaited out rather than silently destroyed by the restore. The unserialized core is factored into a private `exportUnlocked` used by tests to reconstruct the cross-process overlap (server + `sf sync export` from a shell) that the dirty-token stale-snapshot handling still guards. `AutoExportService` gains `pause()`/`resume()`: pause awaits any in-flight tick and disarms polling; resume re-arms via the startup full export, regenerating the JSONL from the authoritative SQLite DB. Wired to daemon sleep/wake by `@stoneforge/smithy`.

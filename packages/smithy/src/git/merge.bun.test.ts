@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import { withSyncExportLock } from '@stoneforge/quarry';
 import { mergeBranch, detectTargetBranch, execGitSafe, hasRemote, syncLocalBranch, syncLocalBranchFromCommit, ensureTargetBranchExists, isLiveSyncStatePath, extractConflictPaths, parseOverwrittenFiles } from './merge.js';
 
 const execAsync = promisify(exec);
@@ -1205,6 +1206,244 @@ describe('syncLocalBranch live-state fast-forward', () => {
       expect(fs.readFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), 'utf8'))
         .toBe('{"id":"el-live"}\n');
     } finally {
+      cleanup(repoDir, remoteDir);
+    }
+  });
+
+  test('does not step over locally-modified .stoneforge files outside the known live sync paths', async () => {
+    const { repoDir, remoteDir } = await setup();
+    try {
+      // A tracked non-sync file under .stoneforge/ that the target deletes.
+      fs.mkdirSync(path.join(repoDir, '.stoneforge/other'), { recursive: true });
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/other/notes.md'), 'committed\n');
+      await execAsync('git add . && git commit -m "Track notes"', { cwd: repoDir });
+      await execAsync('git push origin main', { cwd: repoDir });
+
+      // Target (origin/main) deletes it.
+      await execAsync('git checkout --detach', { cwd: repoDir });
+      await execAsync('git rm .stoneforge/other/notes.md', { cwd: repoDir });
+      await execAsync('git commit -m "Delete notes"', { cwd: repoDir });
+      await execAsync('git push origin HEAD:main', { cwd: repoDir });
+      await execAsync('git checkout main', { cwd: repoDir });
+
+      // Locally-modified copy blocks the fast-forward — but the dance is
+      // reserved for known live sync paths (.stoneforge/sync/*.jsonl).
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/other/notes.md'), 'local edits\n');
+
+      await syncLocalBranch(repoDir, 'main');
+
+      const { stdout: local } = await execAsync('git rev-parse main', { cwd: repoDir });
+      const { stdout: remote } = await execAsync('git rev-parse origin/main', { cwd: repoDir });
+      expect(local.trim()).not.toBe(remote.trim());
+      expect(fs.readFileSync(path.join(repoDir, '.stoneforge/other/notes.md'), 'utf8'))
+        .toBe('local edits\n');
+    } finally {
+      cleanup(repoDir, remoteDir);
+    }
+  });
+});
+
+// ============================================================================
+// Dance regressions: writer exclusion, preservation, absence handling
+// ============================================================================
+
+/**
+ * Standard live-state-blocked checkout: target untracked the sync files,
+ * local main is one commit behind, live content sits on the tracked paths.
+ */
+async function setupBlockedLiveState(): Promise<{ repoDir: string; remoteDir: string; syncDir: string; elements: string; dependencies: string }> {
+  const { repoDir, remoteDir } = await setup();
+  await commitTrackedSyncState(repoDir);
+  await untrackSyncStateOnTarget(repoDir);
+  fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), '{"id":"el-live"}\n');
+  fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/dependencies.jsonl'), '{"blocked":"el-live"}\n');
+  return {
+    repoDir,
+    remoteDir,
+    syncDir: path.join(repoDir, '.stoneforge/sync'),
+    elements: path.join(repoDir, '.stoneforge/sync/elements.jsonl'),
+    dependencies: path.join(repoDir, '.stoneforge/sync/dependencies.jsonl'),
+  };
+}
+
+async function branchGap(repoDir: string): Promise<boolean> {
+  const { stdout: local } = await execAsync('git rev-parse main', { cwd: repoDir });
+  const { stdout: remote } = await execAsync('git rev-parse origin/main', { cwd: repoDir });
+  return local.trim() !== remote.trim();
+}
+
+describe('fastForwardTargetInCheckout writer exclusion (sync export lock)', () => {
+  test('awaits an in-flight export and preserves its content across the dance', async () => {
+    const { repoDir, remoteDir, syncDir, elements } = await setupBlockedLiveState();
+    try {
+      let writerFinished = false;
+      // An export writer holds the lock first. The dance must queue behind
+      // it — snapshoting the EXPORTED content, not the pre-export live
+      // content — or the restore would clobber the export after its dirty
+      // marks were already cleared.
+      const writer = withSyncExportLock(syncDir, async () => {
+        await new Promise((r) => setTimeout(r, 25)); // in-flight, like a real export
+        fs.writeFileSync(elements, '{"id":"el-exported"}\n');
+        writerFinished = true;
+      });
+
+      const dance = syncLocalBranch(repoDir, 'main');
+      await writer;
+      expect(writerFinished).toBe(true);
+      await dance;
+
+      // The export's content survived; the branch still caught up.
+      expect(await branchGap(repoDir)).toBe(false);
+      expect(fs.readFileSync(elements, 'utf8')).toBe('{"id":"el-exported"}\n');
+    } finally {
+      cleanup(repoDir, remoteDir);
+    }
+  });
+
+  test('a writer queuing behind the dance lands after the restore and is not clobbered', async () => {
+    const { repoDir, remoteDir, syncDir, elements } = await setupBlockedLiveState();
+    try {
+      // Start the dance and immediately queue a locked writer. Whichever
+      // order the lock grants, the writer's write must be the final state —
+      // the dance's snapshot restore must never overwrite it.
+      const dance = syncLocalBranch(repoDir, 'main');
+      const writer = withSyncExportLock(syncDir, async () => {
+        fs.writeFileSync(elements, '{"id":"el-late"}\n');
+      });
+      await Promise.all([dance, writer]);
+
+      expect(await branchGap(repoDir)).toBe(false);
+      expect(fs.readFileSync(elements, 'utf8')).toBe('{"id":"el-late"}\n');
+    } finally {
+      cleanup(repoDir, remoteDir);
+    }
+  });
+});
+
+describe('live-state transition: first (untracking) merge then an ordinary merge', () => {
+  test('dance carries the untracking merge; the next merge is a plain fast-forward', async () => {
+    const { repoDir, remoteDir } = await setup();
+    try {
+      await commitTrackedSyncState(repoDir);
+
+      // Ordinary feature branch cut BEFORE the untracking (like the branches
+      // this workspace already has in flight).
+      await execAsync('git checkout -b feature/straddles-untracking', { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'feature.ts'), 'export const real = 1;\n');
+      await execAsync('git add . && git commit -m "Real feature"', { cwd: repoDir });
+      await execAsync('git push origin feature/straddles-untracking', { cwd: repoDir });
+
+      // First merge: the untracking commit itself lands on origin/main while
+      // the checkout holds live state on the tracked paths.
+      await execAsync('git checkout main', { cwd: repoDir });
+      await untrackSyncStateOnTarget(repoDir);
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), '{"id":"el-live-1"}\n');
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/dependencies.jsonl'), '{"blocked":"el-live-1"}\n');
+
+      await syncLocalBranch(repoDir, 'main');
+
+      let { stdout: local } = await execAsync('git rev-parse main', { cwd: repoDir });
+      let { stdout: remote } = await execAsync('git rev-parse origin/main', { cwd: repoDir });
+      expect(local.trim()).toBe(remote.trim()); // first merge: caught up
+      expect(fs.readFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), 'utf8'))
+        .toBe('{"id":"el-live-1"}\n');
+
+      // Daemon keeps writing live state while origin/main advances again...
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), '{"id":"el-live-2"}\n');
+
+      // Land the feature branch on origin/main (as the merge steward would).
+      await execAsync('git checkout --detach', { cwd: repoDir });
+      await execAsync('git merge --squash feature/straddles-untracking', { cwd: repoDir });
+      await execAsync('git commit -m "Squash feature onto main"', { cwd: repoDir });
+      await execAsync('git push origin HEAD:main', { cwd: repoDir });
+      await execAsync('git checkout main', { cwd: repoDir });
+
+      // Second merge: ordinary fast-forward — the JSONLs are untracked now,
+      // so nothing blocks; the dance must not even engage, and live state
+      // written before it stays untouched.
+      await syncLocalBranch(repoDir, 'main');
+
+      ({ stdout: local } = await execAsync('git rev-parse main', { cwd: repoDir }));
+      ({ stdout: remote } = await execAsync('git rev-parse origin/main', { cwd: repoDir }));
+      expect(local.trim()).toBe(remote.trim()); // within one merge: equal
+      expect(fs.readFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), 'utf8'))
+        .toBe('{"id":"el-live-2"}\n');
+      expect(fs.readFileSync(path.join(repoDir, 'feature.ts'), 'utf8'))
+        .toBe('export const real = 1;\n'); // the real change landed
+      const { stdout: status } = await execAsync('git status --porcelain', { cwd: repoDir });
+      expect(status.trim()).toBe('');
+    } finally {
+      cleanup(repoDir, remoteDir);
+    }
+  });
+});
+
+describe('fastForwardTargetInCheckout preservation failures', () => {
+  test('aborts before any mutation when a live-state file cannot be read', async () => {
+    if (process.getuid?.() === 0) {
+      // chmod does not stop root from reading; nothing to assert here
+      return;
+    }
+    const { repoDir, remoteDir, elements } = await setupBlockedLiveState();
+    try {
+      const before = fs.readFileSync(elements);
+      fs.chmodSync(elements, 0o000);
+
+      await syncLocalBranch(repoDir, 'main');
+
+      // Nothing mutated: branch still behind, file bytes untouched.
+      expect(await branchGap(repoDir)).toBe(true);
+      fs.chmodSync(elements, 0o644);
+      expect(fs.readFileSync(elements)).toEqual(before);
+    } finally {
+      try { fs.chmodSync(elements, 0o644); } catch { /* already cleaned up */ }
+      cleanup(repoDir, remoteDir);
+    }
+  });
+
+  test('a locally deleted live-state file stays deleted across the dance', async () => {
+    const { repoDir, remoteDir, elements, dependencies } = await setupBlockedLiveState();
+    try {
+      // Live daemon deleted dependencies.jsonl locally (e.g. mid-regeneration).
+      fs.rmSync(dependencies);
+
+      await syncLocalBranch(repoDir, 'main');
+
+      expect(await branchGap(repoDir)).toBe(false);
+      // Present file kept its live content; absent file stayed absent —
+      // `git checkout --` resurrects it only transiently.
+      expect(fs.readFileSync(elements, 'utf8')).toBe('{"id":"el-live"}\n');
+      expect(fs.existsSync(dependencies)).toBe(false);
+      const { stdout: status } = await execAsync('git status --porcelain', { cwd: repoDir });
+      expect(status.trim()).toBe('');
+    } finally {
+      cleanup(repoDir, remoteDir);
+    }
+  });
+
+  test('on a failed retry, restores live content and original absence, branch untouched', async () => {
+    if (process.getuid?.() === 0) {
+      return; // chmod does not stop root from writing
+    }
+    const { repoDir, remoteDir, syncDir, elements, dependencies } = await setupBlockedLiveState();
+    try {
+      fs.rmSync(dependencies);
+      // Read-only sync dir: `git checkout --` cannot unlink/create there, so
+      // the retry path fails BEFORE the fast-forward moves the branch.
+      fs.chmodSync(syncDir, 0o555);
+
+      try {
+        await syncLocalBranch(repoDir, 'main');
+      } finally {
+        fs.chmodSync(syncDir, 0o755);
+      }
+
+      // Branch untouched, live content restored, original absence preserved.
+      expect(await branchGap(repoDir)).toBe(true);
+      expect(fs.readFileSync(elements, 'utf8')).toBe('{"id":"el-live"}\n');
+      expect(fs.existsSync(dependencies)).toBe(false);
+    } finally {
+      try { fs.chmodSync(syncDir, 0o755); } catch { /* already gone */ }
       cleanup(repoDir, remoteDir);
     }
   });
