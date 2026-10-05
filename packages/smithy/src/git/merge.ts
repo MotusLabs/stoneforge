@@ -545,6 +545,20 @@ export async function mergeBranch(options: MergeBranchOptions): Promise<MergeBra
 }
 
 /**
+ * Extract the most useful diagnostic text from an execAsync rejection.
+ * promisify(exec) errors carry stderr (preferred) plus a message that
+ * embeds the failed command and captured output.
+ */
+function gitErrorDetail(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const e = err as { stderr?: unknown; message?: unknown };
+    if (typeof e.stderr === 'string' && e.stderr.trim()) return e.stderr.trim();
+    if (typeof e.message === 'string' && e.message.trim()) return e.message.trim();
+  }
+  return String(err);
+}
+
+/**
  * Fast-forward the local target branch ref to match origin, without
  * the dangerous checkout dance.
  *
@@ -552,8 +566,13 @@ export async function mergeBranch(options: MergeBranchOptions): Promise<MergeBra
  *   updates the local ref without touching the working tree at all.
  * - When ON the target branch: `git merge --ff-only origin/target`
  *   fast-forwards in place (unavoidably touches working tree files).
- * - If either fails (e.g. non-ff divergence): logs a warning and
- *   returns silently. The merge is already pushed to remote.
+ * - If either fails: logs a warning including the real git error and
+ *   returns silently. The merge is already pushed to remote. NOTE: the
+ *   recurring failure in this workspace is NOT non-ff divergence — it is
+ *   git's overwrite-protection refusal ("Your local changes ... would be
+ *   overwritten by merge") when the main checkout holds locally-modified
+ *   tracked files (live .stoneforge/sync state). `git pull` fails
+ *   identically in that case, so the warning must not blindly advise it.
  */
 export async function syncLocalBranch(
   workspaceRoot: string,
@@ -588,10 +607,21 @@ export async function syncLocalBranch(
         cwd: workspaceRoot, encoding: 'utf8',
       });
     }
-  } catch {
+  } catch (err) {
     // Non-fatal: local branch sync is best-effort.
-    // The merge is already pushed to remote — user can `git pull` manually.
-    console.warn('[git/merge] Failed to fast-forward local target branch (non-ff divergence or missing ref). Run `git pull` to sync manually.');
+    // The merge is already pushed to remote. Log the REAL git error — the
+    // old fixed-text guess ("non-ff divergence or missing ref") was a false
+    // diagnosis on clean fast-forwards: the actual recurring cause is git's
+    // overwrite-protection refusal when the main checkout has locally-modified
+    // tracked files (live .stoneforge/sync state), which `git pull` cannot fix.
+    const detail = gitErrorDetail(err);
+    const blockedByLocalChanges = detail.includes('would be overwritten by merge');
+    console.warn(
+      `[git/merge] Failed to fast-forward local target branch '${targetBranch}' in ${workspaceRoot}. Git error: ${detail}` +
+        (blockedByLocalChanges
+          ? ' Cause: locally-modified tracked files in that checkout block the fast-forward (there is no divergence; `git pull` fails the same way). Snapshot/reconcile those files, then fast-forward manually.'
+          : ' Manual sync may be needed (e.g. `git pull --ff-only`).')
+    );
   }
 }
 
@@ -631,7 +661,9 @@ export async function syncLocalBranchFromCommit(
         cwd: workspaceRoot, encoding: 'utf8',
       });
     }
-  } catch {
-    console.warn('[git/merge] Failed to update local target branch after local-only merge.');
+  } catch (err) {
+    console.warn(
+      `[git/merge] Failed to update local target branch '${targetBranch}' to ${commitHash} in ${workspaceRoot}. Git error: ${gitErrorDetail(err)}`
+    );
   }
 }
