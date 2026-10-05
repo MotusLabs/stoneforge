@@ -9,5 +9,15 @@
 *.sqlite-shm
 daemon-state.json
 
+# Live orchestration state — machine-local, never committed.
+# The dispatch daemon live-writes these in the main checkout; tracked copies
+# made every merge diverge from live state and permanently block fast-forward
+# merges there (git's overwrite protection). The operational store is the
+# SQLite DB (also ignored); the JSONL exports regenerate from it via a full
+# export (`sf sync export --full`) and are only consumed by `sf init` when
+# importing a cloned workspace that has no DB.
+sync/elements.jsonl
+sync/dependencies.jsonl
+
 # Local workspace data
 .worktrees/
