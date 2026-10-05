@@ -239,6 +239,31 @@ export async function openDocumentDetail(
 }
 
 /**
+ * The newest editable document with EMPTY content, creating one when no
+ * such document exists. Editor suites type their own content from scratch,
+ * and a shared-DB document can carry arbitrary text: a '/' typed directly
+ * after existing text sits mid-word and never triggers the slash menu
+ * (TipTap's Suggestion needs the trigger character at a word start). That
+ * is exactly how these suites failed whenever another spec's content-
+ * bearing fixture (e.g. a version-history document) was the newest
+ * editable document.
+ *
+ * Reusing an existing empty document (instead of creating one per test)
+ * keeps the realtime-event volume down: every fixture write is broadcast
+ * to every open page in the parallel run, and the resulting re-render
+ * storms were flipping editor UI state mid-test.
+ */
+export async function findEmptyEditableDocument(
+  page: Page
+): Promise<FixtureDocument> {
+  const documents = await listDocuments(page);
+  const empty = documents.find(
+    (doc) => !doc.immutable && !(doc.content ?? '').trim()
+  );
+  return empty ?? createDocumentFixture(page, fixtureTitle('editor'));
+}
+
+/**
  * Navigate into a document's edit mode and return the document's id. Shared
  * by the six editor suites (previously six byte-identical local copies that
  * all died at `documents[0].id`). Never returns null and never skips: the
@@ -246,7 +271,7 @@ export async function openDocumentDetail(
  * so a broken fixture fails red at the cause.
  */
 export async function enterDocumentEditMode(page: Page): Promise<string> {
-  const document = await findEditableDocument(page);
+  const document = await findEmptyEditableDocument(page);
   await openDocumentDetail(page, document.id);
   await page.getByTestId('document-edit-button').click();
   await expect(page.getByTestId('block-editor')).toBeVisible({

@@ -1,5 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { enterDocumentEditMode } from './helpers/document-edit';
+import {
+  enterDocumentEditMode,
+  openDocumentDetail,
+  createDocumentFixture,
+} from './helpers/document-edit';
 
 test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
 
@@ -224,7 +228,17 @@ test.describe('TB94c-2: Block Drag-and-Drop with Markdown Persistence', () => {
   // ============================================================================
 
   test('content persists correctly after editing', async ({ page }) => {
-    await enterDocumentEditMode(page);
+    // This test SAVES — give it an exclusive document instead of the shared
+    // empty one, so a concurrently-saving spec cannot clobber its content.
+    const fixture = await createDocumentFixture(
+      page,
+      `e2e-persist-${Date.now()}`
+    );
+    await openDocumentDetail(page, fixture.id);
+    await page.getByTestId('document-edit-button').click();
+    await expect(page.getByTestId('block-editor')).toBeVisible({
+      timeout: 10000,
+    });
 
     const editor = page.getByTestId('block-editor-content');
     await editor.click();

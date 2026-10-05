@@ -165,7 +165,18 @@ test.describe('TB22: Block Editor', () => {
   // ============================================================================
 
   test('saving document updates persists changes', async ({ page }) => {
-    const docId = await enterDocumentEditMode(page);
+    // This test SAVES — give it an exclusive document instead of the shared
+    // empty one, so a concurrently-saving spec cannot clobber its title.
+    const fixture = await createDocumentFixture(
+      page,
+      `e2e-save-persist-${Date.now()}`
+    );
+    await openDocumentDetail(page, fixture.id);
+    await page.getByTestId('document-edit-button').click();
+    await expect(page.getByTestId('block-editor')).toBeVisible({
+      timeout: 10000,
+    });
+    const docId = fixture.id;
 
     // Fetch the full document to know the original title for restore
     const docResponse = await page.request.get(`/api/documents/${docId}`);
