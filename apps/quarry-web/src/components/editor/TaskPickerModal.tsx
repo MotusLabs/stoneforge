@@ -79,8 +79,11 @@ function useTasks(searchQuery: string) {
       const response = await fetch(`/api/tasks?${params}`);
       if (!response.ok) throw new Error('Failed to fetch tasks');
       const data = await response.json();
-      // API returns { data: Task[], total: number } for paginated results
-      return Array.isArray(data) ? data : data.data || [];
+      // GET /api/tasks returns the paginated envelope {items, total, offset,
+      // limit, hasMore}. Reading `data.data` here always produced an empty
+      // list, so the task picker never showed any task (same envelope class
+      // as the other ListResult unwraps; DocumentPickerModal reads items).
+      return Array.isArray(data) ? data : data.items || [];
     },
   });
 }
