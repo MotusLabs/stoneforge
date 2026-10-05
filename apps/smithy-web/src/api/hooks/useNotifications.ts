@@ -148,6 +148,27 @@ function saveNotifications(notifications: Notification[]): void {
 }
 
 /**
+ * Merge the freshly-read stored list into the in-memory list.
+ *
+ * loadNotifications()/saveNotifications() promise that external writers (tests,
+ * other tools, other tabs) can put notifications in localStorage and have them
+ * counted. The storage event only fires in *other* contexts, so a same-tab
+ * external write made after mount is invisible to this hook's state. If a
+ * mutation then persisted in-memory state alone, it would silently overwrite
+ * the external entries. Every mutating callback therefore re-reads storage and
+ * merges: entries only present in storage are adopted, and on id conflicts the
+ * in-memory entry wins (it is the copy this hook is about to mutate).
+ * Result is ordered newest-first, matching how addNotification prepends.
+ */
+function mergeNotifications(stored: Notification[], current: Notification[]): Notification[] {
+  const currentIds = new Set(current.map((n) => n.id));
+  const merged = [...current, ...stored.filter((n) => !currentIds.has(n.id))];
+  return merged.sort(
+    (a, b) => (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0)
+  );
+}
+
+/**
  * Load preferences from localStorage
  */
 function loadPreferences(): NotificationPreferences {
@@ -191,10 +212,35 @@ export function useNotifications() {
   const unreadCount = notifications.filter((n) => !n.read && !n.dismissed).length;
   const visibleNotifications = notifications.filter((n) => !n.dismissed);
 
-  // Persist notifications when they change
+  // Persist notifications when they change — but never on mount. Writing the
+  // just-loaded state back unconditionally would clobber any external write
+  // that lands between the load and the effect (or race a same-tab writer),
+  // breaking the external-writer contract that loadNotifications()/
+  // saveNotifications() document. Only hook-initiated changes persist.
+  const isInitialRender = useRef(true);
   useEffect(() => {
+    if (isInitialRender.current) {
+      isInitialRender.current = false;
+      return;
+    }
     saveNotifications(notifications);
   }, [notifications]);
+
+  // Adopt external writes into state. The storage event fires in every other
+  // context sharing this localStorage when the key changes, so a live app
+  // picks up externally-written notifications (another tab, an external tool)
+  // instead of holding stale in-memory state that would overwrite them on the
+  // next save. Same-context writes (this tab) cannot fire the event; those are
+  // covered by the storage merge inside every mutating callback below.
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === NOTIFICATIONS_KEY) {
+        setNotifications(loadNotifications());
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   // Persist preferences when they change
   useEffect(() => {
@@ -214,7 +260,17 @@ export function useNotifications() {
         dismissed: false,
       };
 
-      setNotifications((prev) => [newNotification, ...prev].slice(0, MAX_NOTIFICATIONS));
+      setNotifications((prev) => {
+        // Merge with what is currently in localStorage so notifications
+        // written externally after mount survive this save.
+        const base = mergeNotifications(loadNotifications(), prev);
+        // The cap bounds storage growth, but it never shrinks a list an
+        // external writer seeded larger than MAX_NOTIFICATIONS: at cap the
+        // oldest entry rotates out while the total stays at the seeded size,
+        // so the unread badge keeps counting every external entry.
+        const cap = Math.max(MAX_NOTIFICATIONS, base.length);
+        return [newNotification, ...base].slice(0, cap);
+      });
 
       // Show toast
       const toastFn = notification.type === 'error' ? toast.error :
@@ -245,7 +301,9 @@ export function useNotifications() {
    */
   const markAsRead = useCallback((id: string) => {
     setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, read: true } : n))
+      mergeNotifications(loadNotifications(), prev).map((n) =>
+        n.id === id ? { ...n, read: true } : n
+      )
     );
   }, []);
 
@@ -253,7 +311,9 @@ export function useNotifications() {
    * Mark all notifications as read
    */
   const markAllAsRead = useCallback(() => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    setNotifications((prev) =>
+      mergeNotifications(loadNotifications(), prev).map((n) => ({ ...n, read: true }))
+    );
   }, []);
 
   /**
@@ -261,12 +321,17 @@ export function useNotifications() {
    */
   const dismissNotification = useCallback((id: string) => {
     setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, dismissed: true } : n))
+      mergeNotifications(loadNotifications(), prev).map((n) =>
+        n.id === id ? { ...n, dismissed: true } : n
+      )
     );
   }, []);
 
   /**
    * Clear all notifications
+   *
+   * Deliberately does NOT merge with storage: "Clear all" is an explicit
+   * request to empty the list, including entries written externally.
    */
   const clearAll = useCallback(() => {
     setNotifications([]);
