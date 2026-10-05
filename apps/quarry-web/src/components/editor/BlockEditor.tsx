@@ -135,13 +135,16 @@ interface MenuItemProps {
   icon: React.ReactNode;
   label: string;
   shortcut?: string;
+  /** Same testid the action carries as a top-level toolbar button */
+  testId?: string;
 }
 
-function MenuItem({ onClick, isActive, disabled, icon, label, shortcut }: MenuItemProps) {
+function MenuItem({ onClick, isActive, disabled, icon, label, shortcut, testId }: MenuItemProps) {
   return (
     <DropdownMenu.Item
       onClick={onClick}
       disabled={disabled}
+      data-testid={testId}
       className={`flex items-center justify-between gap-3 px-3 py-2 text-sm rounded cursor-pointer outline-none
                   ${isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-700'}
                   ${disabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-100'}
@@ -589,6 +592,18 @@ export function BlockEditor({
     </ToolbarButton>
   );
 
+  // Render overflow menu items. Keep the same toolbar-${id} testid the action
+  // has as a top-level button so tests can address an action the same way in
+  // both toolbar modes (full toolbar vs compact overflow dropdown).
+  const renderMenuItem = (action: ToolbarAction) => (
+    <MenuItem
+      key={action.id}
+      {...action}
+      onClick={action.action}
+      testId={`toolbar-${action.id}`}
+    />
+  );
+
   return (
     <>
       {/* Task Picker Modal */}
@@ -678,7 +693,8 @@ export function BlockEditor({
                       align="end"
                       sideOffset={4}
                       className="z-50 min-w-[200px] p-1 bg-white rounded-lg shadow-lg border border-gray-200
-                                 animate-in fade-in-0 zoom-in-95 data-[side=bottom]:slide-in-from-top-2"
+                                 animate-in fade-in-0 zoom-in-95 data-[side=bottom]:slide-in-from-top-2
+                                 max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto"
                       data-testid="toolbar-overflow-content"
                     >
                       {!isCodeMode && (
@@ -686,33 +702,25 @@ export function BlockEditor({
                           <DropdownMenu.Label className="px-3 py-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">
                             Text
                           </DropdownMenu.Label>
-                          {textActions.slice(3).map(action => (
-                            <MenuItem key={action.id} {...action} onClick={action.action} />
-                          ))}
+                          {textActions.slice(3).map(renderMenuItem)}
                           <DropdownMenu.Separator className="h-px my-1 bg-gray-200" />
 
                           <DropdownMenu.Label className="px-3 py-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">
                             Headings
                           </DropdownMenu.Label>
-                          {headingActions.map(action => (
-                            <MenuItem key={action.id} {...action} onClick={action.action} />
-                          ))}
+                          {headingActions.map(renderMenuItem)}
                           <DropdownMenu.Separator className="h-px my-1 bg-gray-200" />
 
                           <DropdownMenu.Label className="px-3 py-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">
                             Lists
                           </DropdownMenu.Label>
-                          {listActions.map(action => (
-                            <MenuItem key={action.id} {...action} onClick={action.action} />
-                          ))}
+                          {listActions.map(renderMenuItem)}
                           <DropdownMenu.Separator className="h-px my-1 bg-gray-200" />
 
                           <DropdownMenu.Label className="px-3 py-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">
                             Alignment
                           </DropdownMenu.Label>
-                          {alignmentActions.map(action => (
-                            <MenuItem key={action.id} {...action} onClick={action.action} />
-                          ))}
+                          {alignmentActions.map(renderMenuItem)}
                           <DropdownMenu.Separator className="h-px my-1 bg-gray-200" />
                         </>
                       )}
@@ -720,9 +728,7 @@ export function BlockEditor({
                       <DropdownMenu.Label className="px-3 py-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">
                         Blocks
                       </DropdownMenu.Label>
-                      {blockActions.map(action => (
-                        <MenuItem key={action.id} {...action} onClick={action.action} />
-                      ))}
+                      {blockActions.map(renderMenuItem)}
                     </DropdownMenu.Content>
                   </DropdownMenu.Portal>
                 </DropdownMenu.Root>

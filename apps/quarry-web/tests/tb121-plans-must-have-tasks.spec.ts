@@ -233,8 +233,10 @@ test.describe('TB121: Plans Must Have Task Children', () => {
       await page.getByTestId('create-plan-btn').click();
       await expect(page.getByTestId('create-plan-modal')).toBeVisible({ timeout: 5000 });
 
-      // Should show "Initial Task Required" notice
-      await expect(page.getByText('Initial Task Required')).toBeVisible();
+      // Should show the required-task notice (wording matches CreatePlanModal's
+      // TasksSection; the old "Initial Task Required" label was removed when the
+      // modal switched to search-and-select of existing tasks)
+      await expect(page.getByText('Plans must have at least one task')).toBeVisible();
     });
 
     test('Create button is disabled without task', async ({ page }) => {
@@ -251,7 +253,17 @@ test.describe('TB121: Plans Must Have Task Children', () => {
       await expect(page.getByTestId('create-plan-submit')).toBeDisabled();
     });
 
-    test('can create plan with new task', async ({ page }) => {
+    test('can create plan with selected task', async ({ page }) => {
+      // The modal selects existing tasks (inline new-task creation was removed;
+      // new tasks come from the separate Create Task modal), so seed the
+      // initial task via the API — the atomic initialTask path is covered by
+      // the API tests above.
+      const taskTitle = `UI Test Task ${Date.now()}`;
+      const taskResponse = await page.request.post('/api/tasks', {
+        data: { title: taskTitle, createdBy: 'system' },
+      });
+      const task = await taskResponse.json();
+
       await page.goto('/plans');
       await expect(page.getByTestId('plans-page')).toBeVisible({ timeout: 10000 });
 
@@ -259,16 +271,16 @@ test.describe('TB121: Plans Must Have Task Children', () => {
       await expect(page.getByTestId('create-plan-modal')).toBeVisible({ timeout: 5000 });
 
       const planTitle = `UI Test Plan ${Date.now()}`;
-      const taskTitle = `UI Test Task ${Date.now()}`;
 
       // Enter plan title
       await page.getByTestId('plan-title-input').fill(planTitle);
 
-      // Mode should default to "Create New Task"
-      await expect(page.getByTestId('mode-new-task')).toHaveClass(/bg-blue-500/);
+      // Submit stays disabled until a task is selected (TB121)
+      await expect(page.getByTestId('create-plan-submit')).toBeDisabled();
 
-      // Enter task title
-      await page.getByTestId('task-title-input').fill(taskTitle);
+      // Search for the seeded task and select it
+      await page.getByTestId('task-search-input').fill(taskTitle);
+      await page.getByTestId(`available-task-${task.id}`).click();
 
       // Submit should now be enabled
       await expect(page.getByTestId('create-plan-submit')).toBeEnabled();
@@ -282,41 +294,59 @@ test.describe('TB121: Plans Must Have Task Children', () => {
       // Plan should be visible in list (use testid to avoid matching detail panel too)
       await expect(page.getByTestId('plans-list').getByText(planTitle)).toBeVisible({ timeout: 5000 });
 
-      // Cleanup: get the plan ID and delete it
+      // Cleanup: get the plan ID and delete it with its task
       const plansResponse = await page.request.get('/api/plans');
       const plans = await plansResponse.json();
       const createdPlan = plans.find((p: { title: string }) => p.title === planTitle);
       if (createdPlan) {
-        // Get tasks and delete
-        const tasksResponse = await page.request.get(`/api/plans/${createdPlan.id}/tasks`);
-        const tasks = await tasksResponse.json();
-        for (const task of tasks) {
-          await page.request.delete(`/api/tasks/${task.id}?force=true`);
-        }
+        await page.request.delete(`/api/tasks/${task.id}?force=true`);
         await page.request.delete(`/api/plans/${createdPlan.id}?force=true`);
       }
     });
 
-    test('can switch between new task and existing task mode', async ({ page }) => {
+    test('can search tasks and change the task selection', async ({ page }) => {
+      // The new/existing task mode toggle was removed; the modal now combines
+      // search with select/deselect. Seed two tasks with distinct titles.
+      const taskTitles = [
+        `Selection Task A ${Date.now()}`,
+        `Selection Task B ${Date.now()}`,
+      ];
+      const taskIds: string[] = [];
+      for (const title of taskTitles) {
+        const response = await page.request.post('/api/tasks', {
+          data: { title, createdBy: 'system' },
+        });
+        const task = await response.json();
+        taskIds.push(task.id);
+      }
+
       await page.goto('/plans');
       await expect(page.getByTestId('plans-page')).toBeVisible({ timeout: 10000 });
 
       await page.getByTestId('create-plan-btn').click();
       await expect(page.getByTestId('create-plan-modal')).toBeVisible({ timeout: 5000 });
 
-      // Default is new task mode
-      await expect(page.getByTestId('task-title-input')).toBeVisible();
+      await page.getByTestId('plan-title-input').fill('Task Selection Probe Plan');
 
-      // Switch to existing task mode
-      await page.getByTestId('mode-existing-task').click();
+      // Search narrows the available list to the matching task
+      // (search is debounced, so assert on the narrowed result)
+      await page.getByTestId('task-search-input').fill(taskTitles[0]);
+      const availableTasks = page.locator('[data-testid^="available-task-"]');
+      await expect(page.getByTestId(`available-task-${taskIds[0]}`)).toBeVisible();
+      await expect(availableTasks).toHaveCount(1);
 
-      // Should show search input instead of task title input
-      await expect(page.getByTestId('existing-task-search')).toBeVisible();
-      await expect(page.getByTestId('task-title-input')).not.toBeVisible();
+      // Selecting a task enables submit
+      await page.getByTestId(`available-task-${taskIds[0]}`).click();
+      await expect(page.getByTestId('create-plan-submit')).toBeEnabled();
 
-      // Switch back to new task mode
-      await page.getByTestId('mode-new-task').click();
-      await expect(page.getByTestId('task-title-input')).toBeVisible();
+      // Removing the selection disables submit again (TB121: a plan needs a task)
+      await page.getByTestId(`remove-selected-task-${taskIds[0]}`).click();
+      await expect(page.getByTestId('create-plan-submit')).toBeDisabled();
+
+      // Cleanup
+      for (const id of taskIds) {
+        await page.request.delete(`/api/tasks/${id}?force=true`);
+      }
     });
 
     test('can close modal with cancel button', async ({ page }) => {
@@ -328,6 +358,60 @@ test.describe('TB121: Plans Must Have Task Children', () => {
 
       await page.getByTestId('create-plan-cancel').click();
       await expect(page.getByTestId('create-plan-modal')).not.toBeVisible({ timeout: 2000 });
+    });
+
+    test('can create a task from inside the Create Plan modal and it is auto-selected (el-2djabw)', async ({ page }) => {
+      // The plan modal must not dead-end when no tasks exist: the
+      // "Create New Task" affordance opens the global Create Task modal on
+      // top, and the created task is auto-selected for the plan.
+      await page.goto('/plans');
+      await expect(page.getByTestId('plans-page')).toBeVisible({ timeout: 10000 });
+
+      await page.getByTestId('create-plan-btn').click();
+      await expect(page.getByTestId('create-plan-modal')).toBeVisible({ timeout: 5000 });
+
+      const planTitle = `UI Nested Task Plan ${Date.now()}`;
+      const taskTitle = `UI Nested Task ${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+      // The Create New Task affordance is present (rendered only when the
+      // consumer wires onCreateNewTask)
+      await expect(page.getByTestId('create-new-task-btn')).toBeVisible();
+      await page.getByTestId('create-new-task-btn').click();
+
+      // The Create Task modal opens stacked on top of the plan modal
+      await expect(page.getByTestId('create-task-modal')).toBeVisible({ timeout: 5000 });
+      await expect(page.getByTestId('create-plan-modal')).toBeVisible();
+
+      // Create the task
+      await page.getByTestId('create-task-title-input').fill(taskTitle);
+      await page.getByTestId('create-task-submit-button').click();
+
+      // Task modal closes; plan modal stays open with the new task
+      // auto-selected in the Selected Tasks list
+      await expect(page.getByTestId('create-task-modal')).not.toBeVisible({ timeout: 5000 });
+      await expect(page.getByTestId('create-plan-modal').getByText(taskTitle)).toBeVisible({ timeout: 5000 });
+
+      // Complete the plan with the auto-selected task
+      await page.getByTestId('plan-title-input').fill(planTitle);
+      await expect(page.getByTestId('create-plan-submit')).toBeEnabled();
+      await page.getByTestId('create-plan-submit').click();
+
+      // Modal closes and the plan appears in the list
+      await expect(page.getByTestId('create-plan-modal')).not.toBeVisible({ timeout: 5000 });
+      await expect(page.getByTestId('plans-list').getByText(planTitle)).toBeVisible({ timeout: 5000 });
+
+      // Cleanup: delete the plan and its tasks
+      const plansResponse = await page.request.get('/api/plans');
+      const plans = await plansResponse.json();
+      const createdPlan = plans.find((p: { title: string }) => p.title === planTitle);
+      if (createdPlan) {
+        const tasksResponse = await page.request.get(`/api/plans/${createdPlan.id}/tasks`);
+        const tasks = await tasksResponse.json();
+        for (const task of tasks) {
+          await page.request.delete(`/api/tasks/${task.id}?force=true`);
+        }
+        await page.request.delete(`/api/plans/${createdPlan.id}?force=true`);
+      }
     });
   });
 

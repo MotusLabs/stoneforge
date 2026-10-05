@@ -15,7 +15,8 @@ import { CreateWorkflowModal } from '@stoneforge/ui/workflows';
 import { CreateEntityModal } from '../components/entity/CreateEntityModal';
 import { CreateTeamModal } from '../components/team/CreateTeamModal';
 import { CreateDocumentModal } from '../components/document/CreateDocumentModal';
-import { CreatePlanModal } from '@stoneforge/ui/plans';
+import { CreatePlanModal, notifyPlanModalTaskCreated } from '@stoneforge/ui/plans';
+import { useCurrentUser } from '../contexts';
 
 interface GlobalQuickActionsContextValue {
   /** Open the create task modal */
@@ -56,6 +57,7 @@ interface GlobalQuickActionsProviderProps {
 
 export function GlobalQuickActionsProvider({ children }: GlobalQuickActionsProviderProps) {
   const navigate = useNavigate();
+  const { currentUser } = useCurrentUser();
   const [isCreateTaskModalOpen, setIsCreateTaskModalOpen] = useState(false);
   const [isCreateBacklogTaskModalOpen, setIsCreateBacklogTaskModalOpen] = useState(false);
   const [isCreateWorkflowModalOpen, setIsCreateWorkflowModalOpen] = useState(false);
@@ -111,7 +113,16 @@ export function GlobalQuickActionsProvider({ children }: GlobalQuickActionsProvi
   }, []);
 
   // Handlers for modal success
-  const handleTaskCreated = useCallback((task: { id: string }) => {
+  const handleTaskCreated = useCallback((task: { id: string; title?: string }) => {
+    // When the Create Plan modal is open, the task was created from inside it
+    // (via the "Create New Task" affordance): hand it back so the plan modal
+    // refreshes its task list and auto-selects the new task.
+    if (isCreatePlanModalOpen) {
+      notifyPlanModalTaskCreated({ id: task.id, title: task.title || 'New Task' });
+      toast.success('Task created and added to selection');
+      return;
+    }
+
     toast.success('Task created successfully', {
       description: 'Your new task has been created.',
       action: {
@@ -119,7 +130,7 @@ export function GlobalQuickActionsProvider({ children }: GlobalQuickActionsProvi
         onClick: () => navigate({ to: '/tasks', search: { selected: task.id, page: 1, limit: 25 } }),
       },
     });
-  }, [navigate]);
+  }, [navigate, isCreatePlanModalOpen]);
 
   const handleWorkflowCreated = useCallback((workflow: { id: string; title: string }) => {
     toast.success('Workflow created successfully', {
@@ -301,6 +312,18 @@ export function GlobalQuickActionsProvider({ children }: GlobalQuickActionsProvi
     <GlobalQuickActionsContext.Provider value={contextValue}>
       {children}
 
+      {/* Global Create Plan Modal.
+          Rendered before the task/workflow/etc. modals so the Create Task
+          modal opened via onCreateNewTask stacks on top of it (both are
+          fixed inset-0 z-50; later DOM order paints above). */}
+      <CreatePlanModal
+        isOpen={isCreatePlanModalOpen}
+        onClose={() => setIsCreatePlanModalOpen(false)}
+        onSuccess={handlePlanCreated}
+        currentUserId={currentUser?.id}
+        onCreateNewTask={openCreateTaskModal}
+      />
+
       {/* Global Create Task Modal */}
       <CreateTaskModal
         isOpen={isCreateTaskModalOpen}
@@ -342,13 +365,6 @@ export function GlobalQuickActionsProvider({ children }: GlobalQuickActionsProvi
         isOpen={isCreateDocumentModalOpen}
         onClose={() => setIsCreateDocumentModalOpen(false)}
         onSuccess={handleDocumentCreated}
-      />
-
-      {/* Global Create Plan Modal */}
-      <CreatePlanModal
-        isOpen={isCreatePlanModalOpen}
-        onClose={() => setIsCreatePlanModalOpen(false)}
-        onSuccess={handlePlanCreated}
       />
     </GlobalQuickActionsContext.Provider>
   );

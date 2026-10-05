@@ -80,17 +80,21 @@ test.describe('Keyboard Shortcuts', () => {
       await expect(page.getByTestId('dashboard-page')).toBeVisible();
     });
 
-    test('G F navigates to Task Flow page', async ({ page }) => {
+    test('G F is unbound (task-flow surface removed)', async ({ page }) => {
       await page.goto('/dashboard');
       await expect(page.getByTestId('dashboard-page')).toBeVisible();
 
+      // The task-flow lens was removed: the /tasks kanban view carries the
+      // task-flow columns, so 'G F' is no longer registered ('G T' navigates
+      // to Tasks; the legacy /dashboard/task-flow route redirects to /tasks).
+      // See src/lib/keyboard.ts and the Quarry Web Reference (el-4iiz).
       // Press G then F in sequence
       await page.keyboard.press('g');
       await page.keyboard.press('f');
 
-      // Should navigate to task flow page
-      await expect(page).toHaveURL(/\/dashboard\/task-flow/);
-      await expect(page.getByTestId('task-flow-page')).toBeVisible();
+      // Unbound sequence is inert — stay on the dashboard
+      await expect(page).toHaveURL(/\/dashboard\/overview/);
+      await expect(page.getByTestId('dashboard-page')).toBeVisible();
     });
 
     test('G L navigates to Timeline page', async ({ page }) => {
@@ -139,19 +143,29 @@ test.describe('Keyboard Shortcuts', () => {
     });
 
     test('sequence times out after delay', async ({ page }) => {
+      // The app arms a 1s sequence-reset setTimeout when 'g' is pressed
+      // (KeyboardShortcutManager.SEQUENCE_TIMEOUT in src/lib/keyboard.ts).
+      // This test used to sleep wall-clock 1100ms and hope the page timer had
+      // fired — only ~100ms of margin, which parallel-worker CPU contention
+      // regularly ate, letting 'g t' complete and navigate to /tasks.
+      // Fake the page clock instead so the timeout fires deterministically.
+      await page.clock.install();
       await page.goto('/dashboard');
       await expect(page.getByTestId('dashboard-page')).toBeVisible();
 
-      // Press G
+      // Press G - arms the 1s sequence timeout
       await page.keyboard.press('g');
 
-      // Wait for more than the timeout (1 second)
-      await page.waitForTimeout(1100);
+      // Jump past SEQUENCE_TIMEOUT (1000ms); the fake clock fires the
+      // sequence-reset timer during the call, regardless of worker CPU load
+      await page.clock.fastForward(1100);
 
       // Now press T - should not navigate because sequence timed out
       await page.keyboard.press('t');
 
-      // Should still be on dashboard
+      // Give an erroneous SPA navigation a moment to surface before asserting
+      // the negative, then confirm we never left the dashboard
+      await page.waitForTimeout(100);
       await expect(page).toHaveURL(/\/dashboard/);
       await expect(page.getByTestId('dashboard-page')).toBeVisible();
     });
