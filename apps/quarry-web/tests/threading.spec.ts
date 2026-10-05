@@ -1,19 +1,7 @@
 import { test, expect } from '@playwright/test';
+import { getChannels, getFirstEntity } from './helpers/messaging';
 
 test.describe('TB19: Threading', () => {
-  // Helper to get channels
-  async function getChannels(page: import('@playwright/test').Page) {
-    const response = await page.request.get('/api/channels');
-    return response.json();
-  }
-
-  // Helper to get first entity
-  async function getFirstEntity(page: import('@playwright/test').Page) {
-    const response = await page.request.get('/api/entities');
-    const entities = await response.json();
-    return entities.length > 0 ? entities[0] : null;
-  }
-
   test('GET /api/messages/:id/replies endpoint returns replies', async ({ page }) => {
     const channels = await getChannels(page);
     const entity = await getFirstEntity(page);
@@ -153,14 +141,14 @@ test.describe('TB19: Threading', () => {
     await page.getByTestId(`channel-item-${channel.id}`).click();
 
     // Wait for messages to load
-    await expect(page.getByTestId('messages-list')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
 
     // Get the first message and hover over it
-    const firstMessage = page.getByTestId(/message-/).first();
+    const firstMessage = page.locator('[data-testid^="message-el-"]').first();
     await firstMessage.hover();
 
     // Reply button should appear on hover
-    const replyButton = page.getByTestId(/message-reply-button-/).first();
+    const replyButton = firstMessage.getByTestId(/message-reply-button-/);
     await expect(replyButton).toBeVisible();
   });
 
@@ -198,15 +186,15 @@ test.describe('TB19: Threading', () => {
     await page.getByTestId(`channel-item-${channel.id}`).click();
 
     // Wait for messages to load
-    await expect(page.getByTestId('messages-list')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
 
     // Wait for the specific message and hover over it
-    const message = page.locator(`[data-testid^="message-"]`).filter({ hasText: messageContent }).first();
+    const message = page.locator(`[data-testid^="message-el-"]`).filter({ hasText: messageContent }).first();
     await expect(message).toBeVisible({ timeout: 5000 });
     await message.hover();
 
     // Click reply button
-    const replyButton = page.getByTestId(/message-reply-button-/).first();
+    const replyButton = message.getByTestId(/message-reply-button-/);
     await expect(replyButton).toBeVisible();
     await replyButton.click();
 
@@ -243,14 +231,14 @@ test.describe('TB19: Threading', () => {
     await page.getByTestId(`channel-item-${channel.id}`).click();
 
     // Wait for messages and open thread
-    await expect(page.getByTestId('messages-list')).toBeVisible({ timeout: 5000 });
-    const message = page.getByTestId(/message-/).first();
+    await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
+    const message = page.locator('[data-testid^="message-el-"]').first();
     await message.hover();
-    await page.getByTestId(/message-reply-button-/).first().click();
+    await message.getByTestId(/message-reply-button-/).click();
 
     await expect(page.getByTestId('thread-panel')).toBeVisible();
     await expect(page.getByTestId('thread-composer')).toBeVisible();
-    await expect(page.getByTestId('thread-input')).toBeVisible();
+    await expect(page.getByTestId('thread-composer').getByTestId('message-input')).toBeVisible();
     await expect(page.getByTestId('thread-send-button')).toBeVisible();
   });
 
@@ -281,10 +269,10 @@ test.describe('TB19: Threading', () => {
     await page.getByTestId(`channel-item-${channel.id}`).click();
 
     // Open thread
-    await expect(page.getByTestId('messages-list')).toBeVisible({ timeout: 5000 });
-    const message = page.getByTestId(/message-/).first();
+    await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
+    const message = page.locator('[data-testid^="message-el-"]').first();
     await message.hover();
-    await page.getByTestId(/message-reply-button-/).first().click();
+    await message.getByTestId(/message-reply-button-/).click();
 
     await expect(page.getByTestId('thread-panel')).toBeVisible();
 
@@ -327,21 +315,21 @@ test.describe('TB19: Threading', () => {
     await page.getByTestId(`channel-item-${channel.id}`).click();
 
     // Open thread
-    await expect(page.getByTestId('messages-list')).toBeVisible({ timeout: 5000 });
-    const message = page.locator(`[data-testid^="message-"]`).filter({ hasText: messageContent }).first();
+    await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
+    const message = page.locator(`[data-testid^="message-el-"]`).filter({ hasText: messageContent }).first();
     await expect(message).toBeVisible({ timeout: 5000 });
     await message.hover();
-    await page.getByTestId(/message-reply-button-/).first().click();
+    await message.getByTestId(/message-reply-button-/).click();
 
     await expect(page.getByTestId('thread-panel')).toBeVisible();
 
     // Send a reply
     const replyContent = `Reply content ${Date.now()}`;
-    await page.getByTestId('thread-input').fill(replyContent);
+    await page.getByTestId('thread-composer').getByTestId('message-input').fill(replyContent);
     await page.getByTestId('thread-send-button').click();
 
     // Wait for input to clear
-    await expect(page.getByTestId('thread-input')).toHaveValue('', { timeout: 5000 });
+    await expect(page.getByTestId('thread-composer').getByTestId('message-input')).toHaveText('', { timeout: 5000 });
 
     // Reply should appear in thread
     await expect(page.getByText(replyContent)).toBeVisible({ timeout: 10000 });
@@ -375,11 +363,11 @@ test.describe('TB19: Threading', () => {
     await page.getByTestId(`channel-item-${channel.id}`).click();
 
     // Open thread for the message
-    await expect(page.getByTestId('messages-list')).toBeVisible({ timeout: 5000 });
-    const message = page.locator(`[data-testid^="message-"]`).filter({ hasText: messageContent }).first();
+    await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
+    const message = page.locator(`[data-testid^="message-el-"]`).filter({ hasText: messageContent }).first();
     await expect(message).toBeVisible({ timeout: 5000 });
     await message.hover();
-    await page.getByTestId(/message-reply-button-/).first().click();
+    await message.getByTestId(/message-reply-button-/).click();
 
     await expect(page.getByTestId('thread-panel')).toBeVisible();
 

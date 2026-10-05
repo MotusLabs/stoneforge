@@ -1,12 +1,7 @@
 import { test, expect } from '@playwright/test';
+import { getChannels } from './helpers/messaging';
 
 test.describe('TB17: Message Display', () => {
-  // Helper to get channels
-  async function getChannels(page: import('@playwright/test').Page) {
-    const response = await page.request.get('/api/channels');
-    return response.json();
-  }
-
   test('GET /api/channels/:id/messages endpoint returns messages', async ({ page }) => {
     const channels = await getChannels(page);
 
@@ -62,7 +57,7 @@ test.describe('TB17: Message Display', () => {
     // Channel header should be visible
     await expect(page.getByTestId('channel-header')).toBeVisible();
     await expect(page.getByTestId('channel-name')).toBeVisible();
-    await expect(page.getByTestId('channel-member-count')).toBeVisible();
+    await expect(page.getByTestId('channel-members-button')).toBeVisible();
   });
 
   test('channel view shows messages container', async ({ page }) => {
@@ -153,7 +148,7 @@ test.describe('TB17: Message Display', () => {
     await page.getByTestId(`channel-item-${channelWithMessages.channel.id}`).click();
 
     // Messages list should be visible
-    await expect(page.getByTestId('messages-list')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('virtualized-messages-list')).toBeVisible({ timeout: 5000 });
 
     // First message should be visible
     const firstMessage = channelWithMessages.messages[0];
@@ -209,8 +204,12 @@ test.describe('TB17: Message Display', () => {
     await expect(page.getByTestId('channel-list')).toBeVisible({ timeout: 5000 });
     await page.getByTestId(`channel-item-${channels[0].id}`).click();
 
-    // Composer placeholder should be visible
-    await expect(page.getByTestId('message-composer-placeholder')).toBeVisible();
+    // Composer placeholder should be visible: the composer is a tiptap
+    // rich-text editor, so the placeholder is the Placeholder extension's
+    // data-placeholder attribute on the empty editor node.
+    const input = page.getByTestId('message-input');
+    await expect(input).toBeVisible();
+    await expect(input.locator('[data-placeholder]').first()).toBeVisible();
   });
 
   test('channel name is displayed in header', async ({ page }) => {
@@ -242,7 +241,7 @@ test.describe('TB17: Message Display', () => {
     await page.getByTestId(`channel-item-${channels[0].id}`).click();
 
     // Member count should be visible
-    const memberCountText = await page.getByTestId('channel-member-count').textContent();
+    const memberCountText = await page.getByTestId('channel-members-button').textContent();
     expect(memberCountText).toMatch(/\d+ members?/);
   });
 });

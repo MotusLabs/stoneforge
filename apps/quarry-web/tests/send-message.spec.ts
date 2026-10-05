@@ -1,19 +1,7 @@
 import { test, expect } from '@playwright/test';
+import { getChannels, getFirstEntity } from './helpers/messaging';
 
 test.describe('TB18: Send Message', () => {
-  // Helper to get channels
-  async function getChannels(page: import('@playwright/test').Page) {
-    const response = await page.request.get('/api/channels');
-    return response.json();
-  }
-
-  // Helper to get first entity
-  async function getFirstEntity(page: import('@playwright/test').Page) {
-    const response = await page.request.get('/api/entities');
-    const entities = await response.json();
-    return entities.length > 0 ? entities[0] : null;
-  }
-
   test('POST /api/messages endpoint creates message', async ({ page }) => {
     const channels = await getChannels(page);
     const entity = await getFirstEntity(page);
@@ -139,8 +127,11 @@ test.describe('TB18: Send Message', () => {
 
     const input = page.getByTestId('message-input');
     await expect(input).toBeVisible();
-    const placeholder = await input.getAttribute('placeholder');
-    expect(placeholder).toContain(channels[0].name);
+    // The composer is a tiptap rich-text editor: the placeholder is rendered by
+    // the Placeholder extension as a data-placeholder attribute on the empty
+    // node, not as an input placeholder attribute.
+    const placeholderNode = input.locator('[data-placeholder]').first();
+    await expect(placeholderNode).toHaveAttribute('data-placeholder', expect.stringContaining(channels[0].name));
   });
 
   test('send button is disabled when input is empty', async ({ page }) => {
@@ -218,7 +209,7 @@ test.describe('TB18: Send Message', () => {
     await page.getByTestId('message-send-button').click();
 
     // Input should be cleared after sending
-    await expect(input).toHaveValue('', { timeout: 5000 });
+    await expect(input).toHaveText('', { timeout: 5000 });
   });
 
   test('sent message appears in message list', async ({ page }) => {
@@ -245,7 +236,7 @@ test.describe('TB18: Send Message', () => {
     await page.getByTestId('message-send-button').click();
 
     // Wait for input to clear (message sent)
-    await expect(page.getByTestId('message-input')).toHaveValue('', { timeout: 5000 });
+    await expect(page.getByTestId('message-input')).toHaveText('', { timeout: 5000 });
 
     // Message should appear in the list
     await expect(page.getByText(testContent)).toBeVisible({ timeout: 10000 });
@@ -276,7 +267,7 @@ test.describe('TB18: Send Message', () => {
     await input.press('Enter');
 
     // Input should be cleared after sending
-    await expect(input).toHaveValue('', { timeout: 5000 });
+    await expect(input).toHaveText('', { timeout: 5000 });
   });
 
   test('Shift+Enter does not send message', async ({ page }) => {
@@ -296,7 +287,6 @@ test.describe('TB18: Send Message', () => {
     await input.press('Shift+Enter');
 
     // Input should still have content (not sent)
-    const value = await input.inputValue();
-    expect(value).toContain('Line 1');
+    await expect(input).toContainText('Line 1');
   });
 });
