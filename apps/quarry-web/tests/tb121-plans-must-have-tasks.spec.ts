@@ -359,6 +359,60 @@ test.describe('TB121: Plans Must Have Task Children', () => {
       await page.getByTestId('create-plan-cancel').click();
       await expect(page.getByTestId('create-plan-modal')).not.toBeVisible({ timeout: 2000 });
     });
+
+    test('can create a task from inside the Create Plan modal and it is auto-selected (el-2djabw)', async ({ page }) => {
+      // The plan modal must not dead-end when no tasks exist: the
+      // "Create New Task" affordance opens the global Create Task modal on
+      // top, and the created task is auto-selected for the plan.
+      await page.goto('/plans');
+      await expect(page.getByTestId('plans-page')).toBeVisible({ timeout: 10000 });
+
+      await page.getByTestId('create-plan-btn').click();
+      await expect(page.getByTestId('create-plan-modal')).toBeVisible({ timeout: 5000 });
+
+      const planTitle = `UI Nested Task Plan ${Date.now()}`;
+      const taskTitle = `UI Nested Task ${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+      // The Create New Task affordance is present (rendered only when the
+      // consumer wires onCreateNewTask)
+      await expect(page.getByTestId('create-new-task-btn')).toBeVisible();
+      await page.getByTestId('create-new-task-btn').click();
+
+      // The Create Task modal opens stacked on top of the plan modal
+      await expect(page.getByTestId('create-task-modal')).toBeVisible({ timeout: 5000 });
+      await expect(page.getByTestId('create-plan-modal')).toBeVisible();
+
+      // Create the task
+      await page.getByTestId('create-task-title-input').fill(taskTitle);
+      await page.getByTestId('create-task-submit-button').click();
+
+      // Task modal closes; plan modal stays open with the new task
+      // auto-selected in the Selected Tasks list
+      await expect(page.getByTestId('create-task-modal')).not.toBeVisible({ timeout: 5000 });
+      await expect(page.getByTestId('create-plan-modal').getByText(taskTitle)).toBeVisible({ timeout: 5000 });
+
+      // Complete the plan with the auto-selected task
+      await page.getByTestId('plan-title-input').fill(planTitle);
+      await expect(page.getByTestId('create-plan-submit')).toBeEnabled();
+      await page.getByTestId('create-plan-submit').click();
+
+      // Modal closes and the plan appears in the list
+      await expect(page.getByTestId('create-plan-modal')).not.toBeVisible({ timeout: 5000 });
+      await expect(page.getByTestId('plans-list').getByText(planTitle)).toBeVisible({ timeout: 5000 });
+
+      // Cleanup: delete the plan and its tasks
+      const plansResponse = await page.request.get('/api/plans');
+      const plans = await plansResponse.json();
+      const createdPlan = plans.find((p: { title: string }) => p.title === planTitle);
+      if (createdPlan) {
+        const tasksResponse = await page.request.get(`/api/plans/${createdPlan.id}/tasks`);
+        const tasks = await tasksResponse.json();
+        for (const task of tasks) {
+          await page.request.delete(`/api/tasks/${task.id}?force=true`);
+        }
+        await page.request.delete(`/api/plans/${createdPlan.id}?force=true`);
+      }
+    });
   });
 
   test.describe('UI - Last Task Warning', () => {
