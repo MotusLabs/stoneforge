@@ -95,6 +95,12 @@ afterEach(() => {
 // ============================================================================
 
 describe('createQuarryApp lifecycle', () => {
+  // Explicit per-test timeouts (el-19vmmo): every test here awaits real
+  // I/O (SQLite writes, the initial JSONL export, temp-dir teardown) whose
+  // WALL time balloons under a concurrent build, while bun's default 5s
+  // per-test timeout kept firing on loaded full-suite runs — failing tests
+  // whose assertions all held. 30s is ~10x a loaded run's duration; a
+  // genuinely-hung teardown is still caught well inside it.
   test('immediate stop() resolves cleanly with no teardown noise', async () => {
     const app = createAppInTempDir();
 
@@ -109,7 +115,7 @@ describe('createQuarryApp lifecycle', () => {
     // done: no late-started async work may surface anything.
     await sleep(60);
     expectNoTeardownNoise();
-  });
+  }, 30_000);
 
   test('immediate stop() then removing the temp dir produces no late errors', async () => {
     const app = createAppInTempDir();
@@ -120,7 +126,7 @@ describe('createQuarryApp lifecycle', () => {
 
     await sleep(60);
     expectNoTeardownNoise();
-  });
+  }, 30_000);
 
   test('ready() awaits full service startup and the app serves requests', async () => {
     const app = createAppInTempDir();
@@ -139,7 +145,7 @@ describe('createQuarryApp lifecycle', () => {
     await app.stop();
     expect(app.storageBackend.isOpen).toBe(false);
     expectNoTeardownNoise();
-  });
+  }, 30_000);
 
   test('stop() is idempotent', async () => {
     const app = createAppInTempDir();
@@ -149,7 +155,7 @@ describe('createQuarryApp lifecycle', () => {
 
     expect(app.storageBackend.isOpen).toBe(false);
     expectNoTeardownNoise();
-  });
+  }, 30_000);
 
   test('concurrent stop() calls all wait for the same teardown', async () => {
     const app = createAppInTempDir();
@@ -160,7 +166,7 @@ describe('createQuarryApp lifecycle', () => {
 
     expect(app.storageBackend.isOpen).toBe(false);
     expectNoTeardownNoise();
-  });
+  }, 30_000);
 
   test('sequential create→stop cycles get a fresh broadcaster singleton', async () => {
     const appA = createAppInTempDir();
@@ -177,5 +183,5 @@ describe('createQuarryApp lifecycle', () => {
     expect(appA.storageBackend.isOpen).toBe(false);
     expect(appB.storageBackend.isOpen).toBe(false);
     expectNoTeardownNoise();
-  });
+  }, 30_000);
 });

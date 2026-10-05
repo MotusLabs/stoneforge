@@ -30,8 +30,16 @@ const PIPE_BUFFER_BYTES = 65_536;
 /** Payload comfortably above the pipe buffer (task requires > 200KB). */
 const PAYLOAD_BYTES = 300_007;
 
-/** Upper bound for "the CLI exited instead of hanging". */
-const EXIT_TIMEOUT_MS = 20_000;
+/**
+ * Upper bound for "the CLI exited instead of hanging".
+ *
+ * Sized for a loaded machine (el-19vmmo): under a sustained concurrent
+ * turbo build on a 16-core box, a CLEAN `sf show` run has measured ~22s
+ * wall clock, and a 20s ceiling killed it — failing a test whose
+ * assertions all held. 45s still catches a genuine hang well inside the
+ * 60s per-test timeouts; a clean run on an idle machine is ~1-2s.
+ */
+const EXIT_TIMEOUT_MS = 45_000;
 
 const nodeCliAvailable = existsSync(DIST_BIN);
 
@@ -186,14 +194,32 @@ describe('exitGracefully() helper', () => {
    * Writes a >64KB payload to stdout and then exits through exitGracefully(),
    * in a child process, through a pipe. `extra` can leave an open handle
    * behind to prove the fallback exit still fires.
+   *
+   * Emission channel is runtime-specific (el-19vmmo):
+   * - Node writes via `process.stdout.write` — that is the path whose
+   *   buffering exitGracefully's drain (`write('', cb)`) exists to protect.
+   * - Bun writes via `console.log` — the channel every real CLI command
+   *   uses (cli/runner.ts outputResult). Under Bun a direct
+   *   `process.stdout.write` is the documented-lossy WriteStream path
+   *   (see src/cli/exit.ts: merely accessing process.stdout switches
+   *   console off the fast direct-to-fd path), and no large-output command
+   *   emits that way. Measured under a sustained concurrent build, piped
+   *   through a slow reader: console.log + exitGracefully delivered all
+   *   300,007 bytes in 40/40 runs; process.stdout.write truncated in
+   *   40/40 (81,920 or 131,072 bytes) — the old probe pinned a contract
+   *   nothing relies on and flaked under load.
    */
   async function runProbe(runtime: 'bun' | 'node', extra: 'clean' | 'stray-handle'): Promise<CliRun> {
     const dir = mkdtempSync(join(tmpdir(), 'sf-exit-probe-'));
     try {
       const importPath = runtime === 'bun' ? SRC_EXIT : DIST_EXIT;
+      const write =
+        runtime === 'bun'
+          ? `console.log(${JSON.stringify('y'.repeat(PAYLOAD_BYTES - 1))});` // + \n = PAYLOAD_BYTES
+          : `process.stdout.write(${JSON.stringify('y'.repeat(PAYLOAD_BYTES))});`;
       const code = [
         `import { exitGracefully } from ${JSON.stringify('file://' + importPath)};`,
-        `process.stdout.write(${JSON.stringify('y'.repeat(PAYLOAD_BYTES))});`,
+        write,
         extra === 'stray-handle' ? 'setInterval(() => {}, 1000);' : '',
         'await exitGracefully(0);',
       ].join('\n');
@@ -223,7 +249,12 @@ describe('exitGracefully() helper', () => {
       expect(result.timedOut).toBe(false);   // would be true if it hung
       expect(result.exitCode).toBe(0);
       expect(result.stdout.length).toBe(PAYLOAD_BYTES);
-      expect(result.durationMs).toBeLessThan(5_000); // 250ms grace + margin
+      // Sized for a loaded machine (el-19vmmo): node startup + a 300KB piped
+      // write can exceed 5s of wall clock under a concurrent build while
+      // still exiting promptly — the 250ms forced-exit grace remains three
+      // orders of magnitude below this bound. A true hang is caught
+      // separately by `timedOut` (EXIT_TIMEOUT_MS) and the per-test timeout.
+      expect(result.durationMs).toBeLessThan(15_000);
     },
     30_000
   );

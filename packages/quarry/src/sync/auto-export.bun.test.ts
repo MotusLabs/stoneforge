@@ -79,6 +79,32 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Poll `predicate` every ~10ms until it returns true, or fail once
+ * `deadlineMs` of wall time has elapsed.
+ *
+ * Replacement for sleep()-then-assert in tests of interval-based services
+ * (el-19vmmo): a fixed sleep window assumes the service's poll interval
+ * fired inside that window, which is exactly what stops being true on a
+ * loaded machine — timer callbacks are delayed by a busy event loop, so a
+ * 100-120ms window can contain zero ticks even though the service behaves
+ * correctly (observed 10 of 12 loaded runs failing on that assumption).
+ * Waiting for the observable condition keeps the assertion about the
+ * service's behavior (it exports eventually) instead of the scheduler's
+ * punctuality. The deadline (8s for a 40-50ms poll interval, ~160 missed
+ * ticks) only guards against a dead service; tests using it carry an
+ * explicit per-test timeout above the deadline.
+ */
+async function waitFor(predicate: () => boolean, deadlineMs = 8_000): Promise<void> {
+  const deadline = Date.now() + deadlineMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`waitFor: condition not met within ${deadlineMs}ms`);
+    }
+    await sleep(10);
+  }
+}
+
 // ============================================================================
 // Test Suite
 // ============================================================================
@@ -150,94 +176,104 @@ describe('AutoExportService', () => {
   // Incremental export on dirty elements
   // --------------------------------------------------------------------------
 
-  test('triggers incremental export when dirty elements exist', async () => {
-    const outputDir = join(tempDir, 'sync');
-    const service = createAutoExportService({
-      syncService,
-      backend,
-      syncConfig: defaultSyncConfig(),
-      outputDir,
-    });
+  test(
+    'triggers incremental export when dirty elements exist',
+    async () => {
+      const outputDir = join(tempDir, 'sync');
+      const service = createAutoExportService({
+        syncService,
+        backend,
+        syncConfig: defaultSyncConfig(),
+        outputDir,
+      });
 
-    await service.start();
+      await service.start();
 
-    // Insert an element and mark it dirty (simulating a mutation)
-    const task = createTestElement({ id: 'el-task2' as ElementId });
-    insertElement(backend, task);
-    backend.markDirty('el-task2');
+      // Insert an element and mark it dirty (simulating a mutation)
+      const task = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task);
+      backend.markDirty('el-task2');
 
-    // Wait for at least one poll cycle
-    await sleep(120);
+      // Wait for the export to happen by observing its EFFECT (dirty
+      // tracking cleared) rather than sleeping a fixed window — under a
+      // concurrent build the 50ms poll interval can be delayed past any
+      // fixed window while the service still behaves correctly (el-19vmmo).
+      await waitFor(() => backend.getDirtyElements().length === 0);
 
-    // The dirty element should have been exported and dirty tracking cleared
-    const dirty = backend.getDirtyElements();
-    expect(dirty).toHaveLength(0);
+      const content = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+      expect(content).toContain('el-task2');
 
-    const content = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
-    expect(content).toContain('el-task2');
+      service.stop();
+    },
+    20_000
+  );
 
-    service.stop();
-  });
+  test(
+    'incremental ticks keep every element in the file',
+    async () => {
+      // Regression test: an incremental tick used to overwrite elements.jsonl
+      // with only the dirty elements, destroying the git-tracked source of truth.
+      const task1 = createTestElement({ id: 'el-task1' as ElementId });
+      const task2 = createTestElement({ id: 'el-task2' as ElementId });
+      insertElement(backend, task1);
+      insertElement(backend, task2);
 
-  test('incremental ticks keep every element in the file', async () => {
-    // Regression test: an incremental tick used to overwrite elements.jsonl
-    // with only the dirty elements, destroying the git-tracked source of truth.
-    const task1 = createTestElement({ id: 'el-task1' as ElementId });
-    const task2 = createTestElement({ id: 'el-task2' as ElementId });
-    insertElement(backend, task1);
-    insertElement(backend, task2);
+      const outputDir = join(tempDir, 'sync');
+      const service = createAutoExportService({
+        syncService,
+        backend,
+        syncConfig: defaultSyncConfig({ exportDebounce: 40 }),
+        outputDir,
+      });
 
-    const outputDir = join(tempDir, 'sync');
-    const service = createAutoExportService({
-      syncService,
-      backend,
-      syncConfig: defaultSyncConfig({ exportDebounce: 40 }),
-      outputDir,
-    });
+      await service.start();
 
-    await service.start();
+      const afterStart = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+      expect(afterStart).toContain('el-task1');
+      expect(afterStart).toContain('el-task2');
 
-    const afterStart = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
-    expect(afterStart).toContain('el-task1');
-    expect(afterStart).toContain('el-task2');
+      // First tick: modify task1, mark dirty — wait until the export has
+      // RUN (dirty cleared) instead of sleeping a fixed window, so the
+      // second tick is sequenced after the first even when the poll
+      // interval is delayed by a loaded machine (el-19vmmo).
+      backend.run('UPDATE elements SET data = ? WHERE id = ?', [
+        JSON.stringify({ title: 'Tick One', status: 'open', priority: 3, complexity: 3, taskType: 'task', metadata: {} }),
+        'el-task1',
+      ]);
+      backend.markDirty('el-task1');
+      await waitFor(() => backend.getDirtyElements().length === 0);
 
-    // First tick: modify task1, mark dirty
-    backend.run('UPDATE elements SET data = ? WHERE id = ?', [
-      JSON.stringify({ title: 'Tick One', status: 'open', priority: 3, complexity: 3, taskType: 'task', metadata: {} }),
-      'el-task1',
-    ]);
-    backend.markDirty('el-task1');
-    await sleep(100);
+      // Second tick: add a brand new element
+      const task3 = createTestElement({ id: 'el-task3' as ElementId });
+      insertElement(backend, task3);
+      backend.markDirty('el-task3');
+      await waitFor(() => backend.getDirtyElements().length === 0);
 
-    // Second tick: add a brand new element
-    const task3 = createTestElement({ id: 'el-task3' as ElementId });
-    insertElement(backend, task3);
-    backend.markDirty('el-task3');
-    await sleep(100);
+      const content = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
+      const lines = content.split('\n').filter((l) => l.trim().length > 0);
+      const ids = lines.map((l) => (JSON.parse(l) as { id: string }).id);
 
-    const content = readFileSync(join(outputDir, 'elements.jsonl'), 'utf-8');
-    const lines = content.split('\n').filter((l) => l.trim().length > 0);
-    const ids = lines.map((l) => (JSON.parse(l) as { id: string }).id);
+      // All three elements survive both incremental ticks
+      expect(ids).toHaveLength(3);
+      expect(ids).toContain('el-task1');
+      expect(ids).toContain('el-task2');
+      expect(ids).toContain('el-task3');
 
-    // All three elements survive both incremental ticks
-    expect(ids).toHaveLength(3);
-    expect(ids).toContain('el-task1');
-    expect(ids).toContain('el-task2');
-    expect(ids).toContain('el-task3');
+      // The modified element carries its new content
+      const tick1 = lines.find((l) => l.includes('el-task1'));
+      expect(tick1).toContain('Tick One');
 
-    // The modified element carries its new content
-    const tick1 = lines.find((l) => l.includes('el-task1'));
-    expect(tick1).toContain('Tick One');
+      // The file keeps the terminal-newline convention (exactly one)
+      expect(content.endsWith('\n')).toBe(true);
+      expect(content.endsWith('\n\n')).toBe(false);
 
-    // The file keeps the terminal-newline convention (exactly one)
-    expect(content.endsWith('\n')).toBe(true);
-    expect(content.endsWith('\n\n')).toBe(false);
+      // Nothing left pending
+      expect(backend.getDirtyElements()).toHaveLength(0);
 
-    // Nothing left pending
-    expect(backend.getDirtyElements()).toHaveLength(0);
-
-    service.stop();
-  });
+      service.stop();
+    },
+    20_000
+  );
 
   // --------------------------------------------------------------------------
   // Skips when no dirty elements
@@ -298,42 +334,65 @@ describe('AutoExportService', () => {
   // Overlapping exports prevented
   // --------------------------------------------------------------------------
 
-  test('prevents overlapping exports', async () => {
-    const outputDir = join(tempDir, 'sync');
+  test(
+    'prevents overlapping exports',
+    async () => {
+      const outputDir = join(tempDir, 'sync');
 
-    // Track export calls
-    let exportCount = 0;
-    const originalExport = syncService.export.bind(syncService);
-    syncService.export = async (options) => {
-      exportCount++;
-      // Simulate slow export
-      await sleep(100);
-      return originalExport(options);
-    };
+      // Track CONCURRENT exports: the invariant this service guarantees is
+      // that at most one export runs at a time. The old version asserted
+      // exportCount <= 3 after a fixed 150ms window — on a loaded machine
+      // the window stretches, more sequential (non-overlapping) exports
+      // legitimately complete inside it, and the count bound fails with no
+      // overlap having occurred (el-19vmmo). maxActive directly expresses
+      // the property the test name promises and is load-independent.
+      let active = 0;
+      let maxActive = 0;
+      let exportCount = 0;
+      const originalExport = syncService.export.bind(syncService);
+      syncService.export = async (options) => {
+        active++;
+        exportCount++;
+        maxActive = Math.max(maxActive, active);
+        try {
+          await sleep(100); // simulate slow export
+          return await originalExport(options);
+        } finally {
+          active--;
+        }
+      };
 
-    const service = createAutoExportService({
-      syncService,
-      backend,
-      syncConfig: defaultSyncConfig({ exportDebounce: 10 }),
-      outputDir,
-    });
+      const service = createAutoExportService({
+        syncService,
+        backend,
+        syncConfig: defaultSyncConfig({ exportDebounce: 10 }),
+        outputDir,
+      });
 
-    await service.start();
+      await service.start();
 
-    // Mark dirty to trigger export
-    const task = createTestElement({ id: 'el-task4' as ElementId });
-    insertElement(backend, task);
-    backend.markDirty('el-task4');
+      // Mark dirty to trigger export
+      const task = createTestElement({ id: 'el-task4' as ElementId });
+      insertElement(backend, task);
+      backend.markDirty('el-task4');
 
-    // Wait enough for multiple ticks but the slow export should block overlaps
-    await sleep(150);
+      // Wait until the initial full export plus at least one slow
+      // incremental export has STARTED (not finished — overlap is the point)
+      await waitFor(() => exportCount >= 2);
 
-    service.stop();
+      // Await the drain: an export is deliberately in flight here, and
+      // stop() resolving means it settled — the fire-and-forget call the
+      // old version used would let afterEach close the database under the
+      // sleeping mock and log 'Database is closed' teardown noise.
+      await service.stop();
 
-    // The initial full export + at most one incremental (not many overlapping ones)
-    // Initial export = 1, then the slow incremental should block further ones
-    expect(exportCount).toBeLessThanOrEqual(3);
-  });
+      // Never overlapped: no second export began while one was running.
+      // Without the in-flight-tick skip, ticks every 10ms against a 100ms
+      // export would push this to ~10.
+      expect(maxActive).toBe(1);
+    },
+    20_000
+  );
 
   // --------------------------------------------------------------------------
   // Factory function
@@ -464,8 +523,11 @@ describe('AutoExportService', () => {
     insertElement(backend, task);
     backend.markDirty('el-race2');
 
-    // Wait until a tick export is parked in the gate
-    await sleep(40);
+    // Wait until a tick export is parked in the gate — by OBSERVING the
+    // count rather than sleeping a fixed window, which assumes the poll
+    // interval fired inside it (not true on a loaded machine; el-19vmmo).
+    // The gated export holds the count at >= 1, so this is stable.
+    await waitFor(() => tickExportCount >= 1);
     expect(tickExportCount).toBeGreaterThanOrEqual(1);
 
     const stopped = service.stop();
@@ -483,5 +545,5 @@ describe('AutoExportService', () => {
 
     // The tick finished cleanly — dirty tracking acknowledged
     expect(backend.getDirtyElements()).toHaveLength(0);
-  });
+  }, 20_000);
 });
