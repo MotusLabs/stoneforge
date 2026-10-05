@@ -22,6 +22,7 @@ export function ViewModeToggle({ mode, onChange }: ViewModeToggleProps) {
             : 'text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100'
         }`}
         data-testid="view-mode-list"
+        aria-label="List view"
       >
         <List className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
         <span className="hidden xs:inline">List</span>
@@ -34,6 +35,7 @@ export function ViewModeToggle({ mode, onChange }: ViewModeToggleProps) {
             : 'text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100'
         }`}
         data-testid="view-mode-horizontal"
+        aria-label="Timeline view"
       >
         <Clock className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
         <span className="hidden xs:inline">Timeline</span>

@@ -369,8 +369,16 @@ export function TimelinePage() {
             )}
           </div>
 
-          {/* Events list with time period grouping */}
-          <div className="flex-1 overflow-y-auto min-h-0 px-3 -mx-3" data-testid="events-list">
+          {/* Events list with time period grouping.
+              Scrollable region: tabIndex + role/label so keyboard users can
+              reach and scroll it (axe scrollable-region-focusable). */}
+          <div
+            className="flex-1 overflow-y-auto min-h-0 px-3 -mx-3"
+            role="region"
+            aria-label="Events list"
+            tabIndex={0}
+            data-testid="events-list"
+          >
             {isLoading && (
               <div className="text-center py-8 text-gray-500">
                 <div className="flex flex-col items-center gap-2">
