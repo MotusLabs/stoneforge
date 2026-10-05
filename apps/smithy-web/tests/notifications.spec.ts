@@ -23,6 +23,28 @@ async function expectSidebarClosed(page: Page) {
 }
 
 /**
+ * Wait for the notification bell to render before asserting on the header.
+ *
+ * The e2e web server is the Vite dev server, and page delivery under
+ * parallel-suite load is nothing like production: measured on this suite's
+ * CI box with 8 concurrent contexts, the module graph can take ~13s to
+ * arrive after goto() commits, the vite client may replace the document
+ * (same-URL reload) when module fetches are slow, and navigating to `/`
+ * additionally redirects to `/activity` via the router's beforeLoad. A
+ * locator can resolve against a first document that is then immediately
+ * replaced, so an assertion made right after goto() (or right after the
+ * bell appears) can run against a page with no DOM at all. Waiting on the
+ * bell (the badge's parent) with an explicit budget — and navigating
+ * directly to /activity in tests that assert immediately, avoiding the
+ * redirect — separates "app delivered slowly" (waits) from "header rendered
+ * but badge missing/wrong" (the clobber regression signature, which still
+ * fails once the header is stable).
+ */
+async function awaitBell(page: Page, timeout = 30_000) {
+  await expect(page.getByTestId('notification-bell')).toBeVisible({ timeout });
+}
+
+/**
  * Build unread notification objects suitable for localStorage seeding.
  */
 function makeNotifications(count: number, idPrefix = 'test'): Record<string, unknown>[] {
@@ -55,6 +77,13 @@ async function seedNotifications(page: Page, notifications: Record<string, unkno
 }
 
 test.describe('TB-O25a: Notification System', () => {
+  // The dev server can take >30s to deliver the app under parallel-suite load
+  // (see awaitBell). The suite default of 30s per test turns that environment
+  // slowness into infra failures unrelated to what these tests assert; give
+  // them headroom. Timeouts are upper bounds — runs on a fast/uncontended
+  // server finish in the usual ~10-20s.
+  test.setTimeout(90_000);
+
   // The /activity landing page auto-starts the onboarding tour ~800ms after
   // load whenever a workflow preset is configured (the e2e server ships one).
   // Mark it completed so its fixed-inset backdrop can't intercept clicks.
@@ -68,8 +97,8 @@ test.describe('TB-O25a: Notification System', () => {
     test('displays notification bell in header', async ({ page }) => {
       await page.goto('/');
 
-      // Wait for the app shell to render
-      await expect(page.getByTestId('app-shell')).toBeVisible();
+      // Wait for the app shell to render (explicit budget — see awaitBell)
+      await expect(page.getByTestId('app-shell')).toBeVisible({ timeout: 30_000 });
 
       // Notification center should be visible in header
       await expect(page.getByTestId('notification-center')).toBeVisible();
@@ -145,7 +174,9 @@ test.describe('TB-O25a: Notification System', () => {
       });
       await page.reload();
 
-      // Badge should not be visible
+      // Badge should not be visible once the header has rendered (asserting
+      // absence before the app renders would vacuously pass)
+      await expect(page.getByTestId('notification-bell')).toBeVisible({ timeout: 30_000 });
       await expect(page.getByTestId('notification-badge')).not.toBeVisible();
     });
 
@@ -171,11 +202,14 @@ test.describe('TB-O25a: Notification System', () => {
           dismissed: false,
         },
       ]);
-      await page.goto('/');
+      await page.goto('/activity');
 
-      // Badge should show count of 2
+      // Header first (see awaitBell), then the badge with a window that
+      // crosses dev-server document transients but still fails on a stable
+      // header whose badge never renders.
+      awaitBell(page);
       const badge = page.getByTestId('notification-badge');
-      await expect(badge).toBeVisible();
+      await expect(badge).toBeVisible({ timeout: 10_000 });
       await expect(badge).toHaveText('2');
     });
 
@@ -185,11 +219,15 @@ test.describe('TB-O25a: Notification System', () => {
       // the badge never rendered after reload because a save-on-change
       // overwrote the 100 seeded entries before the reload read them back).
       await seedNotifications(page, makeNotifications(100));
-      await page.goto('/');
+      await page.goto('/activity');
 
-      // Badge should show 99+ for > 99 unread notifications
+      // Header first, then the badge. The badge window is generous enough to
+      // cross the dev server's transient document replacements (see the
+      // awaitBell docstring) but still fails deterministically if the header
+      // is stable and the badge never renders — the clobber signature.
+      awaitBell(page);
       const badge = page.getByTestId('notification-badge');
-      await expect(badge).toBeVisible();
+      await expect(badge).toBeVisible({ timeout: 10_000 });
       await expect(badge).toHaveText('99+');
     });
   });
@@ -223,8 +261,9 @@ test.describe('TB-O25a: Notification System', () => {
           dismissed: false,
         },
       ]);
-      await page.goto('/');
-      await expect(page.getByTestId('notification-badge')).toHaveText('2');
+      await page.goto('/activity');
+      awaitBell(page);
+      await expect(page.getByTestId('notification-badge')).toHaveText('2', { timeout: 10_000 });
 
       // External, same-tab write AFTER the app mounted. Same-tab writes fire
       // no storage event, so the app's in-memory state does not know about
@@ -265,6 +304,64 @@ test.describe('TB-O25a: Notification System', () => {
       for (const id of ['seeded-1', 'seeded-2', 'external-0', 'external-1', 'external-2']) {
         expect(persistedIds, `expected ${id} to survive the state change`).toContain(id);
       }
+    });
+
+    test('adopts a cross-tab external write via the storage event', async ({ page, context }) => {
+      // Fix direction (c): a live tab must adopt an external write performed
+      // by ANOTHER page sharing the same localStorage — the storage event
+      // fires only in contexts other than the writer. A second page of the
+      // same context shares storage; its write must show up in the first
+      // page's live state, not be overwritten by its next save.
+      const seed = Array.from({ length: 2 }, (_, i) => ({
+        id: `cross-seeded-${i}`,
+        type: 'info',
+        title: `Cross Seeded ${i}`,
+        timestamp: new Date().toISOString(),
+        read: false,
+        dismissed: false,
+      }));
+      await seedNotifications(page, seed);
+      await page.goto('/activity');
+      awaitBell(page);
+      await expect(page.getByTestId('notification-badge')).toHaveText('2', { timeout: 10_000 });
+
+      // Second page in the SAME context. It only needs to be a same-origin
+      // document to share localStorage — navigating to a static asset avoids
+      // paying the app's module-graph delivery a second time (which under
+      // parallel-suite load can exceed 30s and has nothing to do with what
+      // this test asserts).
+      const page2 = await context.newPage();
+      await page2.goto('/favicon.ico');
+
+      // External write from page 2 — page 1 receives a storage event.
+      await page2.evaluate(() => {
+        const stored = JSON.parse(
+          localStorage.getItem('orchestrator-notifications') || '[]'
+        );
+        stored.push({
+          id: 'cross-external-0',
+          type: 'warning',
+          title: 'Cross External 0',
+          timestamp: new Date().toISOString(),
+          read: false,
+          dismissed: false,
+        });
+        localStorage.setItem('orchestrator-notifications', JSON.stringify(stored));
+      });
+
+      // Page 1 adopts the external entry into its live state.
+      await expect(page.getByTestId('notification-badge')).toHaveText('3', { timeout: 10_000 });
+      await openSidebar(page);
+      await expect(page.getByTestId('notification-cross-external-0')).toBeVisible();
+
+      // And the adopted state is what persists — the external entry survives.
+      const persistedIds = await page.evaluate(() =>
+        (JSON.parse(localStorage.getItem('orchestrator-notifications') || '[]') as Array<{ id: string }>).map(
+          (n) => n.id
+        )
+      );
+      expect(persistedIds).toContain('cross-external-0');
+      await page2.close();
     });
   });
 
@@ -352,10 +449,11 @@ test.describe('TB-O25a: Notification System', () => {
           dismissed: false,
         },
       ]);
-      await page.goto('/');
+      await page.goto('/activity');
 
       // Badge should show 2 unread
-      await expect(page.getByTestId('notification-badge')).toHaveText('2');
+      awaitBell(page);
+      await expect(page.getByTestId('notification-badge')).toHaveText('2', { timeout: 10_000 });
 
       // Open sidebar and mark all as read
       await openSidebar(page);
