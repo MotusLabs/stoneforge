@@ -573,6 +573,17 @@ function buildTaskWhereClause(
     params.push(filter.deadlineBefore);
   }
 
+  // Completion-date filter. closedAt (in the data JSON) is the canonical
+  // completion timestamp — set exactly at the close transition, cleared on
+  // reopen. Paths that close without recording it (e.g. the HTTP PATCH task
+  // route) bump updated_at at close time, so it is the fallback. Both sides
+  // of the comparison are ISO 8601 strings, where lexicographic order equals
+  // chronological order — the same convention as deadlineBefore above.
+  if (filter.closedAfter !== undefined) {
+    conditions.push("COALESCE(JSON_EXTRACT(e.data, '$.closedAt'), e.updated_at) >= ?");
+    params.push(filter.closedAfter);
+  }
+
   const where = conditions.length > 0 ? conditions.join(' AND ') : '';
   return { where, params };
 }

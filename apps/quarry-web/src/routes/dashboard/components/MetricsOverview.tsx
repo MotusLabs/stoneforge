@@ -75,7 +75,8 @@ export function MetricsOverview() {
           <div className="min-w-0">
             <p className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 truncate">Completed Today</p>
             <p className="text-lg sm:text-xl lg:text-2xl font-semibold text-gray-900 dark:text-gray-100">
-              {completedToday.isLoading ? '...' : completedToday.data || 0}
+              {/* Show '—' on error: a failed fetch is unknown, not zero */}
+              {completedToday.isLoading ? '...' : completedToday.isError ? '—' : completedToday.data}
             </p>
           </div>
         </div>

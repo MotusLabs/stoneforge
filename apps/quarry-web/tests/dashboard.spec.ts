@@ -45,6 +45,52 @@ test.describe('TB41: Dashboard Overview Panel', () => {
     await expect(page.getByText('Completed Today')).toBeVisible();
   });
 
+  test('completed today metric shows the exact server-side count', async ({ page }) => {
+    // Regression test (el-119bz5): the hook used to fetch GET /api/tasks (a
+    // ListResult envelope, not an array) and call .filter() on it — TypeError,
+    // metric stuck at 0. It now reads the exact cross-page total from
+    // GET /api/tasks/completed?after=<todayStart>.
+    //
+    // Seed MORE tasks closed today than any page size (the completed endpoint
+    // pages at 20 by default): a metric computed from a single page would
+    // undercount. The assertion is relative to a baseline read through the
+    // same contract the hook uses, so leftover data from other runs/specs
+    // doesn't matter.
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const after = encodeURIComponent(today.toISOString());
+
+    const baselineResponse = await page.request.get(`/api/tasks/completed?after=${after}&limit=1`);
+    expect(baselineResponse.ok()).toBe(true);
+    const baseline = (await baselineResponse.json()).total as number;
+    expect(typeof baseline).toBe('number');
+
+    // Seed 25 tasks and close them (PATCH close records closedAt)
+    const seedCount = 25;
+    for (let i = 0; i < seedCount; i++) {
+      const createResponse = await page.request.post('/api/tasks', {
+        data: {
+          title: `e2e completed-today metric ${Date.now()} #${i}`,
+          createdBy: 'el-0000',
+        },
+      });
+      expect(createResponse.ok()).toBe(true);
+      const task = await createResponse.json();
+      const closeResponse = await page.request.patch(`/api/tasks/${task.id}`, {
+        data: { status: 'closed' },
+      });
+      expect(closeResponse.ok()).toBe(true);
+    }
+
+    await page.goto('/dashboard');
+    await expect(page.getByTestId('dashboard-page')).toBeVisible({ timeout: 10000 });
+
+    // The tile must show baseline + 25 exactly — not 0 (the old TypeError),
+    // not a page-truncated count (≤ 20), not '—' (fetch error).
+    const valueLocator = page.getByTestId('metric-completed-today').locator('p.font-semibold');
+    await expect(valueLocator).toHaveText(String(baseline + seedCount), { timeout: 10000 });
+  });
+
   test('dashboard shows quick actions section', async ({ page }) => {
     await page.goto('/dashboard');
     await expect(page.getByTestId('dashboard-page')).toBeVisible({ timeout: 10000 });

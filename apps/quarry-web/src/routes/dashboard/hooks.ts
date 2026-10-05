@@ -82,29 +82,41 @@ export function useEntities() {
 }
 
 /**
- * Fetch count of tasks completed today
+ * Fetch count of tasks completed today.
+ *
+ * "Completed Today" = tasks whose completion timestamp — `closedAt` (set
+ * exactly when the task was closed, cleared on reopen), falling back to
+ * `updatedAt` only for tasks closed through paths that don't record
+ * `closedAt` — falls within the local calendar day. A task closed yesterday
+ * but edited today does NOT count.
+ *
+ * The rule is enforced server-side: `after` maps to TaskFilter.closedAfter
+ * (a SQL filter applied before pagination), and the endpoint returns the
+ * exact match count in `total` — see the response envelope documented in the
+ * "Quarry Task List API Envelopes" workspace doc. No client-side filtering
+ * or page-walking is needed (or correct: GET /api/tasks returns a ListResult
+ * envelope, not an array — calling .filter() on it throws, which is how this
+ * metric used to read as a permanent 0).
  */
 export function useCompletedTodayCount() {
   return useQuery<number>({
     queryKey: ['tasks', 'completedToday'],
     queryFn: async () => {
-      const response = await fetch('/api/tasks');
-      if (!response.ok) throw new Error('Failed to fetch tasks');
-      const tasks = await response.json();
-
-      // Get today's start timestamp
       const today = new Date();
       today.setHours(0, 0, 0, 0);
-      const todayStart = today.toISOString();
 
-      // Count tasks completed today
-      const completed = tasks.filter((task: Task & { closedAt?: string }) => {
-        if (task.status !== 'closed') return false;
-        const closedAt = task.closedAt || task.updatedAt;
-        return closedAt >= todayStart;
-      });
+      // limit=1: only the count is needed; `total` is exact regardless of
+      // page size, and a one-row page keeps the response cheap.
+      const response = await fetch(`/api/tasks/completed?after=${encodeURIComponent(today.toISOString())}&limit=1`);
+      if (!response.ok) throw new Error('Failed to fetch completed-today count');
 
-      return completed.length;
+      const data: { total?: unknown } = await response.json();
+      if (typeof data.total !== 'number') {
+        // Fail loudly rather than report a wrong count — a missing `total`
+        // means the contract changed, not that zero tasks completed today.
+        throw new Error('GET /api/tasks/completed returned no total count');
+      }
+      return data.total;
     },
   });
 }

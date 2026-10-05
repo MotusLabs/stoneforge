@@ -123,6 +123,16 @@ export interface TaskFilter extends ElementFilter {
   /** Filter tasks with deadline before this timestamp */
   deadlineBefore?: Timestamp;
   /**
+   * Filter tasks whose completion timestamp falls on or after this timestamp
+   * (inclusive). The completion timestamp is `closedAt` — set exactly at the
+   * close transition and cleared on reopen (see `updateTaskStatus` in
+   * @stoneforge/core) — falling back to `updatedAt` for tasks closed through
+   * paths that don't record `closedAt` (e.g. the HTTP PATCH task route, which
+   * bumps `updatedAt` at close time). Unlike `updatedAfter`, a task closed
+   * before this timestamp but edited later does NOT match.
+   */
+  closedAfter?: Timestamp;
+  /**
    * Include tasks belonging to ephemeral workflows.
    * By default, tasks from ephemeral workflows are excluded from ready() queries.
    */

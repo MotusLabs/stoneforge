@@ -523,24 +523,33 @@ app.get('/api/tasks/completed', async (c) => {
       filter.offset = parseInt(offsetParam, 10);
     }
 
-    // Note: 'after' date filtering needs to be done post-query since the API
-    // may not support date filtering directly on updated_at
-    let tasks = await api.list(filter as Parameters<typeof api.list>[0]);
-
-    // Save the fetched count before filtering to determine if there are more pages
-    const fetchedCount = tasks.length;
-
-    // Apply date filter if provided
+    // `after` filters on the COMPLETION timestamp, not on updatedAt: a task
+    // closed before `after` but edited later must not match. The rule is
+    // TaskFilter.closedAfter (closedAt, falling back to updated_at for tasks
+    // closed through paths that don't record closedAt), applied in SQL
+    // pre-pagination — unlike the previous post-query filter, which could
+    // return a short page that misreported hasMore and could never produce
+    // an exact total.
     if (afterParam) {
       const afterDate = new Date(afterParam);
-      tasks = tasks.filter((task) => new Date(task.updatedAt) >= afterDate);
+      if (isNaN(afterDate.getTime())) {
+        return c.json({ error: { code: 'VALIDATION_ERROR', message: '`after` must be an ISO 8601 timestamp' } }, 400);
+      }
+      filter.closedAfter = afterDate.toISOString();
     }
 
-    // Return with total count for pagination info
-    // hasMore is based on whether we got a full page from the DB (before date filtering)
+    // listPaginated runs the COUNT pass over the same WHERE clause, so
+    // `total` is the exact number of matching tasks across ALL pages — the
+    // number a dashboard "completed today" counter should read — and hasMore
+    // accounts for the date filter.
+    const result = await api.listPaginated(filter as Parameters<typeof api.listPaginated>[0]);
+
     return c.json({
-      items: tasks,
-      hasMore: fetchedCount === (filter.limit as number),
+      items: result.items,
+      total: result.total,
+      offset: result.offset,
+      limit: result.limit,
+      hasMore: result.hasMore,
     });
   } catch (error) {
     console.error('[stoneforge] Failed to get completed tasks:', error);
@@ -670,6 +679,19 @@ app.patch('/api/tasks/:id', async (c) => {
       if (body[field] !== undefined) {
         updates[field] = body[field];
       }
+    }
+
+    // Maintain the completion timestamp on status transitions, mirroring
+    // updateTaskStatus (@stoneforge/core): set closedAt exactly when a task
+    // transitions INTO closed (so "completed today" counts by close time, not
+    // by last edit), clear it when transitioning out. Without this, tasks
+    // closed via PATCH had no closedAt and completion-date filters had to
+    // fall back to updatedAt permanently.
+    const existingTask = existing as { status?: string };
+    if (updates.status === 'closed' && existingTask.status !== 'closed') {
+      updates.closedAt = new Date().toISOString();
+    } else if (existingTask.status === 'closed' && updates.status !== undefined && updates.status !== 'closed') {
+      updates.closedAt = undefined;
     }
 
     // Handle description field - creates or updates linked Document (TB124)
