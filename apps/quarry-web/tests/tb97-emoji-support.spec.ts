@@ -77,6 +77,28 @@ async function navigateToDocumentEditMode(page: Page, doc: DocumentData) {
   await page.waitForTimeout(300);
 }
 
+// Open the emoji picker from the block editor toolbar.
+//
+// The toolbar switches to compact/overflow mode when its container is narrower
+// than 420px (BlockEditor.tsx checkOverflow). Inside the documents detail
+// panel the editor is ~394px wide even on a 1400px viewport, so the emoji
+// control usually lives inside the overflow dropdown; on wide containers it
+// renders as a top-level toolbar button. Handle both so these tests do not
+// depend on panel width. The toolbar-${id} testid is the same in either mode.
+async function openEmojiPickerFromToolbar(page: Page) {
+  const overflowButton = page.getByTestId('toolbar-overflow-menu');
+  const isOverflowVisible = await overflowButton.isVisible().catch(() => false);
+
+  if (isOverflowVisible) {
+    await overflowButton.click();
+    await page.waitForSelector('[data-testid="toolbar-overflow-content"]', { timeout: 5000 });
+  }
+
+  const emojiButton = page.getByTestId('toolbar-emoji');
+  await expect(emojiButton).toBeVisible({ timeout: 5000 });
+  await emojiButton.click();
+}
+
 // Save the document
 async function saveDocument(page: Page) {
   await page.getByTestId('document-save-button').click();
@@ -97,14 +119,14 @@ test.describe('TB97: Emoji Support', () => {
       const doc = await createTestDocument(page, 'Emoji Toolbar Test');
       await navigateToDocumentEditMode(page, doc);
 
-      // Click emoji button in toolbar
-      const emojiButton = page.getByTestId('toolbar-emoji');
-      await expect(emojiButton).toBeVisible();
-      await emojiButton.click();
+      // Click emoji button in toolbar (top-level or inside overflow menu)
+      await openEmojiPickerFromToolbar(page);
 
       // Modal should open
       await expect(page.getByTestId('emoji-picker-modal')).toBeVisible();
-      await expect(page.getByTestId('emoji-picker-content')).toBeVisible();
+      // Modal chrome testids are derived by ResponsiveModal as
+      // `${modalId}-${part}`: emoji-picker-modal-content/-close/-backdrop
+      await expect(page.getByTestId('emoji-picker-modal-content')).toBeVisible();
     });
 
     test('should close emoji picker with close button', async ({ page }) => {
@@ -112,11 +134,11 @@ test.describe('TB97: Emoji Support', () => {
       await navigateToDocumentEditMode(page, doc);
 
       // Open emoji picker
-      await page.getByTestId('toolbar-emoji').click();
+      await openEmojiPickerFromToolbar(page);
       await expect(page.getByTestId('emoji-picker-modal')).toBeVisible();
 
       // Click close button
-      await page.getByTestId('emoji-picker-close').click();
+      await page.getByTestId('emoji-picker-modal-close').click();
       await expect(page.getByTestId('emoji-picker-modal')).not.toBeVisible();
     });
 
@@ -125,7 +147,7 @@ test.describe('TB97: Emoji Support', () => {
       await navigateToDocumentEditMode(page, doc);
 
       // Open emoji picker
-      await page.getByTestId('toolbar-emoji').click();
+      await openEmojiPickerFromToolbar(page);
       await expect(page.getByTestId('emoji-picker-modal')).toBeVisible();
 
       // Press Escape
@@ -138,11 +160,12 @@ test.describe('TB97: Emoji Support', () => {
       await navigateToDocumentEditMode(page, doc);
 
       // Open emoji picker
-      await page.getByTestId('toolbar-emoji').click();
+      await openEmojiPickerFromToolbar(page);
       await expect(page.getByTestId('emoji-picker-modal')).toBeVisible();
 
-      // Click backdrop
-      await page.getByTestId('emoji-picker-backdrop').click();
+      // Click backdrop — the backdrop's center is covered by the centered
+      // dialog, so click the dim area beside it (far left of the backdrop box)
+      await page.getByTestId('emoji-picker-modal-backdrop').click({ position: { x: 10, y: 450 } });
       await expect(page.getByTestId('emoji-picker-modal')).not.toBeVisible();
     });
   });
