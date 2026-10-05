@@ -5,6 +5,11 @@
  * These tests measure execution time and ensure operations complete
  * within acceptable thresholds for various dataset sizes.
  *
+ * Load-sensitive assertions (single-op thresholds and scaling ratios)
+ * measure CPU time via process.cpuUsage() rather than wall clock — wall
+ * clock on a shared or concurrently-loaded machine measures the load, not
+ * the code (see measureCpu below and el-50x1, el-1ao326).
+ *
  * Benchmark categories:
  * - CRUD operations (create, get, list, update, delete)
  * - Task queries (ready, blocked)
@@ -152,6 +157,45 @@ async function measurePerCall(
     }
     batch *= 2;
   }
+}
+
+/**
+ * Measure CPU time (user + system, ms) consumed by an async block.
+ *
+ * Used instead of wall clock for assertions that must hold while the machine
+ * is loaded (a concurrent `bun run build`, CI neighbors, k8s CPU quotas).
+ * Wall clock for small operations is dominated by descheduling: a ~0.25ms
+ * addDependency has been observed at 260ms and a flat per-item cost at 6x
+ * ratio purely from scheduler stalls (el-1ao326). CPU time ignores stalls
+ * and throttling, so it tracks the code's intrinsic cost — what performance
+ * assertions actually intend to measure.
+ *
+ * Two rules still apply (see the Test Runner Convention doc, el-50x1):
+ * - Batch enough calls into one sample that the CPU delta is far above
+ *   clock granularity (~tens of µs); a single sub-millisecond call is not
+ *   a measurable CPU sample either.
+ * - Take the min of several samples: GC and JIT warmup run on-CPU and
+ *   inflate individual samples.
+ */
+async function measureCpu<T>(fn: () => Promise<T>): Promise<number> {
+  const startCpu = process.cpuUsage();
+  await fn();
+  const delta = process.cpuUsage(startCpu);
+  return (delta.user + delta.system) / 1000;
+}
+
+/**
+ * Per-call CPU cost of `fn`: runs `batch` calls inside one CPU-timed block
+ * and divides. `fn` must be safe to call `batch` times (use distinct inputs
+ * for mutating operations like addDependency).
+ */
+async function measureCpuPerCall(fn: () => Promise<unknown>, batch: number): Promise<number> {
+  const cpu = await measureCpu(async () => {
+    for (let i = 0; i < batch; i++) {
+      await fn();
+    }
+  });
+  return cpu / batch;
 }
 
 /**
@@ -444,20 +488,51 @@ describe('Query API Performance', () => {
 
   describe('Dependency Operation Performance', () => {
     it('should add dependency within threshold', async () => {
-      const task1 = await createTestTask();
-      const task2 = await createTestTask();
-      await api.create(toCreateInput(task1));
-      await api.create(toCreateInput(task2));
+      // What this asserts: one addDependency call (dependency row insert +
+      // dirty mark) costs far less than THRESHOLDS.addDependency — 50ms is
+      // ~200x its intrinsic ~0.25ms of CPU.
+      //
+      // Why the old version flaked (el-1ao326): it timed a SINGLE call and
+      // asserted its wall clock. Under a concurrent root build a ~0.25ms op
+      // measured 57.9ms purely from descheduling (an intermediate
+      // batch-until->=1ms attempt was also defeated: a single stalled call
+      // is itself ">= 1ms", so the floor admits exactly the bad sample it
+      // was meant to exclude). Wall clock here measures the machine's load,
+      // not the code.
+      //
+      // Fix: measure CPU time (process.cpuUsage), which ignores stalls and
+      // throttling, over a batch of DISTINCT dependency pairs (distinct
+      // because addDependency mutates — duplicates are rejected), and take
+      // the min of 3 batches to shed GC/JIT noise. The fixed-count loop
+      // shape is separately covered by "should add multiple dependencies
+      // efficiently" below.
+      const BATCH = 64; // ~15ms CPU per sample, far above clock granularity
+      const RUNS = 3;
+      const pairPool = await createTaskBatch(api, BATCH * RUNS * 2 + 2);
+      // Warmup (JIT + statement preparation) on the LAST pair so it cannot
+      // collide with a measured pair.
+      await api.addDependency({
+        blockerId: pairPool[pairPool.length - 1].id,
+        blockedId: pairPool[pairPool.length - 2].id,
+        type: DependencyType.BLOCKS,
+      });
 
-      const { duration } = await measureTime(() =>
-        api.addDependency({
-          blockerId: task2.id,
-          blockedId: task1.id,
-          type: DependencyType.BLOCKS,
-        })
-      );
+      let call = 0;
+      const samples: number[] = [];
+      for (let r = 0; r < RUNS; r++) {
+        samples.push(
+          await measureCpuPerCall(() => {
+            const i = call++;
+            return api.addDependency({
+              blockerId: pairPool[i * 2 + 1].id,
+              blockedId: pairPool[i * 2].id,
+              type: DependencyType.BLOCKS,
+            });
+          }, BATCH)
+        );
+      }
 
-      expect(duration).toBeLessThan(THRESHOLDS.addDependency);
+      expect(Math.min(...samples)).toBeLessThan(THRESHOLDS.addDependency);
     });
 
     it('should add multiple dependencies efficiently', async () => {
@@ -598,29 +673,52 @@ describe('Query API Performance', () => {
 
   describe('Scaling Performance', () => {
     it('should maintain consistent per-item performance as dataset grows', async () => {
-      const sizes = [10, 50, 100];
+      // What this asserts: per-item create cost is flat in dataset size
+      // (SQLite B-tree insert is O(log n); measured CPU ratio ~0.8-0.95
+      // across these sizes — fixed per-batch cost amortizes, so the small
+      // size is usually the most expensive per item).
+      //
+      // Why the old version flaked (el-1ao326): it compared WALL-CLOCK
+      // per-item times from one batch per size, sizes [10, 50, 100]. The
+      // size-10 denominator was a ~1ms sample, so scheduler noise under a
+      // concurrent build produced ratios up to 6.2 despite flat underlying
+      // cost — and wall-clock per-item keeps drifting with machine load even
+      // at larger sizes. Wall clock measures the load, not the scaling.
+      //
+      // Fix: measure CPU time (process.cpuUsage — immune to descheduling
+      // and CPU-quota throttling), MIN of 3 fresh-database runs per size to
+      // shed GC/JIT noise.
+      //
+      // Bound: flat cost measures ~0.8-0.95 in CPU. If inserts were O(table
+      // size), creating S tasks would cost ~(S+1)/2 per item, giving a ratio
+      // of (200+1)/(50+1) ~= 3.9 over 50 -> 200. Asserting < 2 catches that
+      // quadratic signature with headroom on both sides.
+      const sizes = [50, 100, 200];
+      const RUNS_PER_SIZE = 3;
       const perItemTimes: number[] = [];
 
       for (const size of sizes) {
-        // Fresh database for each size
-        if (backend.isOpen) {
-          backend.close();
-        }
-        backend = createStorage({ path: ':memory:' });
-        initializeSchema(backend);
-        api = new QuarryAPIImpl(backend);
+        const runs: number[] = [];
+        for (let r = 0; r < RUNS_PER_SIZE; r++) {
+          // Fresh database for each run
+          if (backend.isOpen) {
+            backend.close();
+          }
+          backend = createStorage({ path: ':memory:' });
+          initializeSchema(backend);
+          api = new QuarryAPIImpl(backend);
 
-        // Create batch
-        const { duration: createDuration } = await measureTime(async () => {
-          await createTaskBatch(api, size);
-        });
-        perItemTimes.push(createDuration / size);
+          // Create batch
+          const cpuMs = await measureCpu(async () => {
+            await createTaskBatch(api, size);
+          });
+          runs.push(cpuMs / size);
+        }
+        perItemTimes.push(Math.min(...runs));
       }
 
-      // Per-item time should not grow significantly (less than 4x from smallest to largest)
-      // Note: This threshold is generous to account for test environment variability
       const ratio = perItemTimes[perItemTimes.length - 1] / perItemTimes[0];
-      expect(ratio).toBeLessThan(4);
+      expect(ratio).toBeLessThan(2);
     });
 
     it('should maintain list performance as dataset grows', async () => {
@@ -679,11 +777,29 @@ describe('Query API Performance', () => {
     });
 
     it('should maintain ready query performance as dependencies grow', async () => {
+      // What this asserts: ready() does not get dramatically more expensive
+      // as the dependency table grows. True behavior is nearly flat with a
+      // slight rise (measured CPU ratio ~1.0-1.2 from 0 to 50 deps) — each
+      // BLOCKS pair also removes a task from the ready set, which partly
+      // offsets the bigger dependency table — while a per-dependency scan
+      // per task (O(deps x tasks)) would blow far past the bound at 50 deps.
+      //
+      // Why the old version flaked (el-1ao326): it compared two single-shot
+      // WALL-CLOCK timings. The 0-dep baseline was ~1-2ms (less on a warm
+      // cache), so the ratio's denominator was scheduler noise — 11.6 was
+      // observed during a concurrent root build.
+      //
+      // Fix: measure CPU time (process.cpuUsage — immune to descheduling),
+      // 8 calls per sample (~15ms CPU, above clock granularity; ready() is
+      // a read, so repetition is safe), MIN of 5 samples after a warmup to
+      // shed GC/JIT noise.
       const tasks = await createTaskBatch(api, 100);
       const timesWithDeps: number[] = [];
 
       // Measure with increasing number of dependencies
       const depCounts = [0, 10, 25, 50];
+      const BATCH = 8;
+      const RUNS = 5;
 
       for (let i = 0; i < depCounts.length; i++) {
         const depCount = depCounts[i];
@@ -698,12 +814,19 @@ describe('Query API Performance', () => {
           });
         }
 
-        const { duration } = await measureTime(() => api.ready());
-        timesWithDeps.push(duration);
+        // Warmup, then min of batched CPU-time per-call samples
+        await api.ready();
+        const runs: number[] = [];
+        for (let r = 0; r < RUNS; r++) {
+          runs.push(await measureCpuPerCall(() => api.ready(), BATCH));
+        }
+        timesWithDeps.push(Math.min(...runs));
       }
 
-      // Ready query time should not explode as dependencies increase
-      // Allow 4x slowdown for 50 deps vs 0 deps
+      // Flat cost measured (~1.0-1.2 in CPU). 4x headroom absorbs residual
+      // measurement noise while still sitting far below a dependency-count-
+      // driven regression (which at 50 deps vs 0 would exceed 4x by a wide
+      // margin). Do not tighten without re-measuring under load.
       const ratio = timesWithDeps[timesWithDeps.length - 1] / timesWithDeps[0];
       expect(ratio).toBeLessThan(4);
     });
