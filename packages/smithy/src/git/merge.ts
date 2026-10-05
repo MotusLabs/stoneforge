@@ -431,25 +431,77 @@ export async function mergeBranch(options: MergeBranchOptions): Promise<MergeBra
   let mergeResult: MergeBranchResult = { success: false, hasConflict: false, error: 'Merge did not complete' };
 
   try {
-    let commitHash: string;
+    let commitHash = '';
 
-    if (mergeStrategy === 'squash') {
-      await execGitSafe(`merge --squash ${sourceBranch}`, mergeDir, workspaceRoot);
-      await execGitSafe(`commit -m "${message.replace(/"/g, '\\"')}"`, mergeDir, workspaceRoot);
-      const { stdout: hash } = await execGitSafe('rev-parse HEAD', mergeDir, workspaceRoot);
-      commitHash = hash.trim();
-    } else {
-      await execGitSafe(
-        `merge --no-ff -m "${message.replace(/"/g, '\\"')}" ${sourceBranch}`,
-        mergeDir, workspaceRoot
-      );
+    // Live sync-state snapshots (machine-local .stoneforge/sync/*.jsonl) are
+    // untracked on the target branch. Branches cut before that untracking may
+    // still carry modifications to them, producing modify/delete conflicts.
+    // A branch-side snapshot of machine-local state is never authoritative,
+    // so such conflicts are resolved by deletion instead of failing the merge.
+    let resolvedLiveStateConflicts = false;
+
+    const mergeCommand = mergeStrategy === 'squash'
+      ? `merge --squash ${sourceBranch}`
+      : `merge --no-ff -m "${message.replace(/"/g, '\\"')}" ${sourceBranch}`;
+
+    try {
+      await execGitSafe(mergeCommand, mergeDir, workspaceRoot);
+    } catch (mergeError) {
+      const mergeOut = execOutput(mergeError);
+      if (!mergeOut.includes('CONFLICT') && !mergeOut.includes('Automatic merge failed')) {
+        throw mergeError;
+      }
+
+      const conflictFiles = extractConflictPaths(mergeOut);
+      const realConflicts = conflictFiles.filter((f) => !isLiveSyncStatePath(f));
+      if (conflictFiles.length === 0 || realConflicts.length > 0) {
+        throw mergeError;
+      }
+
+      // Only resolvable when the TARGET no longer tracks these paths (the
+      // worktree starts at the target ref). If the target still tracks a
+      // conflicting live-state file, this is a genuine content conflict —
+      // never auto-resolve it.
+      const trackedOnTarget: string[] = [];
+      for (const f of conflictFiles) {
+        if (await worktreeRefHasPath(mergeDir, workspaceRoot, `HEAD:${f}`)) {
+          trackedOnTarget.push(f);
+        }
+      }
+      if (trackedOnTarget.length > 0) {
+        throw mergeError;
+      }
+
+      // Every conflict is live sync state the target no longer tracks:
+      // resolve by deletion, then conclude the merge commit below.
+      for (const f of conflictFiles) {
+        await execGitSafe(`rm -f -- "${f}"`, mergeDir, workspaceRoot);
+      }
+      resolvedLiveStateConflicts = true;
+    }
+
+    if (mergeStrategy === 'squash' || resolvedLiveStateConflicts) {
+      try {
+        await execGitSafe(`commit -m "${message.replace(/"/g, '\\"')}"`, mergeDir, workspaceRoot);
+      } catch (commitError) {
+        const commitOut = execOutput(commitError);
+        if (!(resolvedLiveStateConflicts && /nothing to commit/.test(commitOut))) {
+          throw commitError;
+        }
+        // The source branch carried only live sync-state changes: after
+        // resolving them to deletions there is nothing left to merge.
+        mergeResult = { success: true, hasConflict: false, alreadyMerged: true };
+      }
+    }
+
+    if (!mergeResult.alreadyMerged) {
       const { stdout: hash } = await execGitSafe('rev-parse HEAD', mergeDir, workspaceRoot);
       commitHash = hash.trim();
     }
 
-    // 6. Push to remote (skip when local-only or push disabled)
+    // 6. Push to remote (skip when local-only, push disabled, or nothing to push)
     let pushFailed = false;
-    if (autoPush && !localOnly) {
+    if (autoPush && !localOnly && !mergeResult.alreadyMerged) {
       try {
         await execGitSafe(`push origin HEAD:${targetBranch}`, mergeDir, workspaceRoot);
 
@@ -481,7 +533,7 @@ export async function mergeBranch(options: MergeBranchOptions): Promise<MergeBra
       }
     }
 
-    if (!pushFailed) {
+    if (!pushFailed && !mergeResult.alreadyMerged) {
       mergeResult = { success: true, commitHash, hasConflict: false };
     }
   } catch (error) {
@@ -500,11 +552,7 @@ export async function mergeBranch(options: MergeBranchOptions): Promise<MergeBra
         // Ignore abort errors
       }
 
-      const conflictMatch = output.match(/CONFLICT \([^)]+\): Merge conflict in (.+)/g);
-      const conflictFiles = conflictMatch?.map((m) => {
-        const match = m.match(/in (.+)$/);
-        return match ? match[1] : '';
-      }).filter(Boolean);
+      const conflictFiles = extractConflictPaths(output);
 
       mergeResult = {
         success: false,
@@ -559,6 +607,205 @@ function gitErrorDetail(err: unknown): string {
 }
 
 /**
+ * Concatenate all output carried by an execAsync rejection.
+ */
+function execOutput(err: unknown): string {
+  const e = err as { stdout?: unknown; stderr?: unknown; message?: unknown };
+  return `${typeof e.stdout === 'string' ? e.stdout : ''}` +
+    `${typeof e.stderr === 'string' ? e.stderr : ''}` +
+    `${typeof e.message === 'string' ? e.message : ''}`;
+}
+
+/**
+ * Whether a repo path is a live orchestration sync-state file
+ * (machine-local JSONL export under `.stoneforge/sync/`).
+ *
+ * These files hold per-checkout live daemon state. Workspaces that run a
+ * live daemon against the main checkout untrack them (see
+ * `.stoneforge/.gitignore`); committed snapshots of them are never
+ * authoritative, so merges resolve conflicts on them by deletion.
+ */
+export function isLiveSyncStatePath(repoPath: string): boolean {
+  const normalized = repoPath.replace(/\\/g, '/');
+  return normalized.startsWith('.stoneforge/sync/') && normalized.endsWith('.jsonl');
+}
+
+/**
+ * Extract conflicted paths from `git merge` output.
+ *
+ * Covers both content conflicts ("CONFLICT (content): Merge conflict in <path>")
+ * and structural conflicts such as modify/delete
+ * ("CONFLICT (modify/delete): <path> deleted in HEAD and modified in <branch>").
+ */
+export function extractConflictPaths(output: string): string[] {
+  const paths = new Set<string>();
+  for (const m of output.matchAll(/CONFLICT \([^)]+\): Merge conflict in (.+)/g)) {
+    if (m[1]) paths.add(m[1].trim());
+  }
+  for (const m of output.matchAll(/CONFLICT \([^)]+\): (\S+) (?:deleted|added) in /g)) {
+    if (m[1]) paths.add(m[1]);
+  }
+  return [...paths];
+}
+
+/**
+ * Parse the file list out of git's overwrite-protection refusal:
+ *
+ *   error: Your local changes to the following files would be overwritten by merge:
+ *   	<path>
+ *   	<path>
+ *   Please commit your changes or stash them before you merge.
+ *
+ * Returns [] when the error is not an overwrite-protection refusal.
+ */
+export function parseOverwrittenFiles(errOutput: string): string[] {
+  const match = errOutput.match(
+    /local changes to the following files would be overwritten by merge:\n((?:\t.+\n?)+)/
+  );
+  if (!match) return [];
+  return match[1]
+    .split('\n')
+    .filter((line) => line.startsWith('\t'))
+    .map((line) => line.slice(1).trim())
+    .filter(Boolean);
+}
+
+/**
+ * Whether a path exists in a git ref's tree (`git cat-file -e <ref>:<path>`).
+ */
+async function refHasPath(workspaceRoot: string, ref: string, filePath: string): Promise<boolean> {
+  try {
+    await execAsync(`git cat-file -e "${ref}:${filePath}"`, {
+      cwd: workspaceRoot, encoding: 'utf8',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `<ref>:<path>` exists, run inside a (temp) worktree via
+ * execGitSafe rather than directly in the workspace root.
+ */
+async function worktreeRefHasPath(
+  worktreePath: string,
+  workspaceRoot: string,
+  refPath: string
+): Promise<boolean> {
+  try {
+    await execGitSafe(`cat-file -e "${refPath}"`, worktreePath, workspaceRoot);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Quote a path for interpolation into a shell command. */
+function shellQuote(value: string): string {
+  return `"${value.replace(/(["\\$`])/g, '\\$1')}"`;
+}
+
+/**
+ * Fast-forward the branch checked out in `workspaceRoot` to `targetRef`,
+ * safely stepping over git's overwrite-protection refusal when the only
+ * blocking files are machine-local live state that the target ref no
+ * longer tracks (e.g. the main checkout's `.stoneforge/sync/*.jsonl`
+ * across the commit that untracked them).
+ *
+ * Dance: snapshot the blocking files, restore them to their committed
+ * content so the checkout is clean, fast-forward (which deletes them from
+ * the working tree), then write the snapshots back — the files are
+ * untracked and gitignored from that point on, so no future sync touches
+ * them again.
+ *
+ * Only engages when EVERY blocking file lives under `.stoneforge/` AND is
+ * absent from the target ref's tree (i.e. the fast-forward deletes it).
+ * Anything else (genuine divergence, hand-edited tracked files) keeps the
+ * warn-and-return behavior.
+ */
+async function fastForwardTargetInCheckout(
+  workspaceRoot: string,
+  targetRef: string,
+  targetBranch: string
+): Promise<void> {
+  let firstError: unknown;
+  try {
+    await execAsync(`git merge --ff-only ${targetRef}`, {
+      cwd: workspaceRoot, encoding: 'utf8',
+    });
+    return;
+  } catch (err) {
+    firstError = err;
+  }
+
+  const detail = gitErrorDetail(firstError);
+  const blocking = parseOverwrittenFiles(detail);
+
+  let danceable = blocking.length > 0;
+  for (const f of blocking) {
+    if (!f.replace(/\\/g, '/').startsWith('.stoneforge/')) {
+      danceable = false;
+      break;
+    }
+    // The target ref must no longer track the file (the fast-forward
+    // deletes it); anything still tracked needs a real reconcile instead.
+    if (await refHasPath(workspaceRoot, targetRef, f)) {
+      danceable = false;
+      break;
+    }
+  }
+
+  if (!danceable) {
+    console.warn(
+      `[git/merge] Failed to fast-forward local target branch '${targetBranch}' in ${workspaceRoot}. Git error: ${detail}` +
+      ' Cause: locally-modified tracked files in that checkout block the fast-forward (there is no divergence; `git pull` fails the same way). Snapshot/reconcile those files, then fast-forward manually.'
+    );
+    return;
+  }
+
+  // Snapshot the live state before cleaning it for the fast-forward.
+  const snapshots = new Map<string, Buffer>();
+  for (const f of blocking) {
+    try {
+      snapshots.set(f, fs.readFileSync(path.join(workspaceRoot, f)));
+    } catch {
+      // File unreadable (e.g. deleted locally) — nothing to preserve.
+    }
+  }
+
+  const restoreSnapshots = () => {
+    for (const [f, content] of snapshots) {
+      const abs = path.join(workspaceRoot, f);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, content);
+    }
+  };
+
+  try {
+    await execAsync(
+      `git checkout -- ${blocking.map(shellQuote).join(' ')}`,
+      { cwd: workspaceRoot, encoding: 'utf8' }
+    );
+    await execAsync(`git merge --ff-only ${targetRef}`, {
+      cwd: workspaceRoot, encoding: 'utf8',
+    });
+  } catch (retryError) {
+    // Fast-forward still refused: put the live state back exactly as it was.
+    restoreSnapshots();
+    console.warn(
+      `[git/merge] Failed to fast-forward local target branch '${targetBranch}' in ${workspaceRoot} even after setting aside live state files (${blocking.join(', ')}). Git error: ${gitErrorDetail(retryError)}`
+    );
+    return;
+  }
+
+  restoreSnapshots();
+  console.warn(
+    `[git/merge] Fast-forwarded '${targetBranch}' in ${workspaceRoot}; restored ${snapshots.size} machine-local live-state file(s) (${blocking.join(', ')}) that the target no longer tracks.`
+  );
+}
+
+/**
  * Fast-forward the local target branch ref to match origin, without
  * the dangerous checkout dance.
  *
@@ -566,13 +813,14 @@ function gitErrorDetail(err: unknown): string {
  *   updates the local ref without touching the working tree at all.
  * - When ON the target branch: `git merge --ff-only origin/target`
  *   fast-forwards in place (unavoidably touches working tree files).
- * - If either fails: logs a warning including the real git error and
- *   returns silently. The merge is already pushed to remote. NOTE: the
- *   recurring failure in this workspace is NOT non-ff divergence — it is
- *   git's overwrite-protection refusal ("Your local changes ... would be
- *   overwritten by merge") when the main checkout holds locally-modified
- *   tracked files (live .stoneforge/sync state). `git pull` fails
- *   identically in that case, so the warning must not blindly advise it.
+ *   If git's overwrite protection refuses because the only blocking
+ *   files are machine-local live state that the target no longer tracks
+ *   (live `.stoneforge/sync/*.jsonl` across the untracking commit), the
+ *   files are snapshotted, the fast-forward is retried on a clean
+ *   checkout, and the live content is restored afterwards (see
+ *   fastForwardTargetInCheckout).
+ * - Any other failure: logs a warning including the real git error and
+ *   returns silently. The merge is already pushed to remote.
  */
 export async function syncLocalBranch(
   workspaceRoot: string,
@@ -597,10 +845,9 @@ export async function syncLocalBranch(
     }
 
     if (currentBranch === targetBranch) {
-      // We're on the target branch — fast-forward in place
-      await execAsync(`git merge --ff-only origin/${targetBranch}`, {
-        cwd: workspaceRoot, encoding: 'utf8',
-      });
+      // We're on the target branch — fast-forward in place (with the
+      // live-state snapshot dance when overwrite protection refuses)
+      await fastForwardTargetInCheckout(workspaceRoot, `origin/${targetBranch}`, targetBranch);
     } else {
       // Not on target branch — update the ref without touching the worktree
       await execAsync(`git fetch origin ${targetBranch}:${targetBranch}`, {
@@ -630,7 +877,9 @@ export async function syncLocalBranch(
  *
  * Used in local-only mode where there is no remote to sync from.
  * Updates the branch ref directly using `git branch -f` when not on
- * the target branch, or `git merge --ff-only <hash>` when on it.
+ * the target branch, or `git merge --ff-only <hash>` when on it (with
+ * the live-state snapshot dance for machine-local files the target no
+ * longer tracks, as in syncLocalBranch).
  */
 export async function syncLocalBranchFromCommit(
   workspaceRoot: string,
@@ -652,9 +901,7 @@ export async function syncLocalBranchFromCommit(
 
     if (currentBranch === targetBranch) {
       // On the target branch — fast-forward in place
-      await execAsync(`git merge --ff-only ${commitHash}`, {
-        cwd: workspaceRoot, encoding: 'utf8',
-      });
+      await fastForwardTargetInCheckout(workspaceRoot, commitHash, targetBranch);
     } else {
       // Not on target branch — force-update the ref to point at the merge commit
       await execAsync(`git branch -f ${targetBranch} ${commitHash}`, {

@@ -10,7 +10,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mergeBranch, detectTargetBranch, execGitSafe, hasRemote, syncLocalBranchFromCommit, ensureTargetBranchExists } from './merge.js';
+import { mergeBranch, detectTargetBranch, execGitSafe, hasRemote, syncLocalBranch, syncLocalBranchFromCommit, ensureTargetBranchExists, isLiveSyncStatePath, extractConflictPaths, parseOverwrittenFiles } from './merge.js';
 
 const execAsync = promisify(exec);
 
@@ -957,6 +957,255 @@ describe('syncLocalBranchFromCommit', () => {
       expect(mainHash.trim()).toBe(featureHash.trim());
     } finally {
       rmrf(repoDir);
+    }
+  });
+});
+
+// ============================================================================
+// Live sync-state handling (.stoneforge/sync/*.jsonl)
+// ============================================================================
+
+/**
+ * Commits live sync-state files (tracked) on main and pushes.
+ */
+async function commitTrackedSyncState(repoDir: string): Promise<void> {
+  fs.mkdirSync(path.join(repoDir, '.stoneforge/sync'), { recursive: true });
+  fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), '{"id":"el-1"}\n');
+  fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/dependencies.jsonl'), '{"blocked":"el-1"}\n');
+  await execAsync('git add .stoneforge && git commit -m "Track live sync state"', { cwd: repoDir });
+  await execAsync('git push origin main', { cwd: repoDir });
+}
+
+/**
+ * Untracks the live sync-state files on main (via a detached worktree push)
+ * and returns to main, leaving local main one commit behind origin/main.
+ */
+async function untrackSyncStateOnTarget(repoDir: string): Promise<void> {
+  await execAsync('git checkout --detach', { cwd: repoDir });
+  await execAsync('git rm --cached .stoneforge/sync/elements.jsonl .stoneforge/sync/dependencies.jsonl', { cwd: repoDir });
+  fs.writeFileSync(path.join(repoDir, '.stoneforge/.gitignore'), 'sync/elements.jsonl\nsync/dependencies.jsonl\n');
+  await execAsync('git add .stoneforge/.gitignore && git commit -m "Untrack live sync state"', { cwd: repoDir });
+  await execAsync('git push origin HEAD:main', { cwd: repoDir });
+  await execAsync('git checkout main', { cwd: repoDir });
+}
+
+describe('isLiveSyncStatePath', () => {
+  test('matches JSONL under .stoneforge/sync/', () => {
+    expect(isLiveSyncStatePath('.stoneforge/sync/elements.jsonl')).toBe(true);
+    expect(isLiveSyncStatePath('.stoneforge/sync/dependencies.jsonl')).toBe(true);
+  });
+
+  test('rejects other paths', () => {
+    expect(isLiveSyncStatePath('.stoneforge/config.yaml')).toBe(false);
+    expect(isLiveSyncStatePath('.stoneforge/sync/state.db')).toBe(false);
+    expect(isLiveSyncStatePath('packages/smithy/src/git/merge.ts')).toBe(false);
+  });
+});
+
+describe('extractConflictPaths', () => {
+  test('extracts content conflicts', () => {
+    const out = 'Auto-merging README.md\nCONFLICT (content): Merge conflict in README.md\nAutomatic merge failed;';
+    expect(extractConflictPaths(out)).toEqual(['README.md']);
+  });
+
+  test('extracts modify/delete conflicts', () => {
+    const out = 'CONFLICT (modify/delete): .stoneforge/sync/elements.jsonl deleted in HEAD and modified in feature/x.  Version feature/x of .stoneforge/sync/elements.jsonl left in tree.';
+    expect(extractConflictPaths(out)).toEqual(['.stoneforge/sync/elements.jsonl']);
+  });
+
+  test('deduplicates and handles both kinds', () => {
+    const out = [
+      'CONFLICT (content): Merge conflict in README.md',
+      'CONFLICT (modify/delete): .stoneforge/sync/elements.jsonl deleted in HEAD and modified in feature/x.',
+      'CONFLICT (modify/delete): .stoneforge/sync/dependencies.jsonl deleted in HEAD and modified in feature/x.',
+    ].join('\n');
+    expect(extractConflictPaths(out).sort()).toEqual([
+      '.stoneforge/sync/dependencies.jsonl',
+      '.stoneforge/sync/elements.jsonl',
+      'README.md',
+    ]);
+  });
+});
+
+describe('parseOverwrittenFiles', () => {
+  test('parses git overwrite-protection file list', () => {
+    const err = 'error: Your local changes to the following files would be overwritten by merge:\n\t.stoneforge/sync/elements.jsonl\n\t.stoneforge/sync/dependencies.jsonl\nPlease commit your changes or stash them before you merge.\nAborting';
+    expect(parseOverwrittenFiles(err)).toEqual([
+      '.stoneforge/sync/elements.jsonl',
+      '.stoneforge/sync/dependencies.jsonl',
+    ]);
+  });
+
+  test('returns empty for unrelated errors', () => {
+    expect(parseOverwrittenFiles('fatal: Not possible to fast-forward, aborting.')).toEqual([]);
+    expect(parseOverwrittenFiles('')).toEqual([]);
+  });
+});
+
+describe('mergeBranch live sync-state conflicts', () => {
+  test('resolves modify/delete conflict by deletion and merges real changes', async () => {
+    const { repoDir, remoteDir } = await setup();
+    try {
+      await commitTrackedSyncState(repoDir);
+
+      // Branch cut before the untracking: modifies the tracked sync state
+      // and carries a real change.
+      await execAsync('git checkout -b feature/pre-untrack', { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), '{"id":"el-1","v":2}\n');
+      fs.writeFileSync(path.join(repoDir, 'real-feature.ts'), 'export const real = 1;\n');
+      await execAsync('git add . && git commit -m "Change sync state + real feature"', { cwd: repoDir });
+      await execAsync('git push origin feature/pre-untrack', { cwd: repoDir });
+
+      // Target untracks the live state files.
+      await execAsync('git checkout main', { cwd: repoDir });
+      await untrackSyncStateOnTarget(repoDir);
+
+      const result = await mergeBranch({
+        workspaceRoot: repoDir,
+        sourceBranch: 'feature/pre-untrack',
+        targetBranch: 'main',
+        commitMessage: 'Merge pre-untrack branch',
+        syncLocal: false,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.hasConflict).toBe(false);
+      expect(result.commitHash).toBeDefined();
+
+      // The landed tree has the real change but not the sync-state snapshot.
+      const { stdout: realFile } = await execAsync(
+        'git cat-file -e origin/main:real-feature.ts && echo present',
+        { cwd: repoDir }
+      );
+      expect(realFile.trim()).toBe('present');
+      const syncAbsent = await execAsync(
+        'git cat-file -e origin/main:.stoneforge/sync/elements.jsonl 2>/dev/null && echo present || echo absent',
+        { cwd: repoDir }
+      ).then((r) => r.stdout.trim()).catch(() => 'absent');
+      expect(syncAbsent).toBe('absent');
+    } finally {
+      cleanup(repoDir, remoteDir);
+    }
+  });
+
+  test('treats a live-state-only branch as merged (nothing left after resolution)', async () => {
+    const { repoDir, remoteDir } = await setup();
+    try {
+      await commitTrackedSyncState(repoDir);
+
+      await execAsync('git checkout -b feature/state-only', { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), '{"id":"el-1","v":3}\n');
+      await execAsync('git add . && git commit -m "Only sync state changes"', { cwd: repoDir });
+      await execAsync('git push origin feature/state-only', { cwd: repoDir });
+
+      await execAsync('git checkout main', { cwd: repoDir });
+      await untrackSyncStateOnTarget(repoDir);
+
+      const result = await mergeBranch({
+        workspaceRoot: repoDir,
+        sourceBranch: 'feature/state-only',
+        targetBranch: 'main',
+        commitMessage: 'Merge state-only branch',
+        syncLocal: false,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.alreadyMerged).toBe(true);
+    } finally {
+      cleanup(repoDir, remoteDir);
+    }
+  });
+
+  test('still fails content conflicts on sync files the target tracks', async () => {
+    const { repoDir, remoteDir } = await setup();
+    try {
+      await commitTrackedSyncState(repoDir);
+
+      await execAsync('git checkout -b feature/sync-content', { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), '{"id":"el-1","branch":true}\n');
+      await execAsync('git add . && git commit -m "Branch sync change"', { cwd: repoDir });
+      await execAsync('git push origin feature/sync-content', { cwd: repoDir });
+
+      // Target ALSO modifies the same lines while still tracking the file.
+      await execAsync('git checkout main', { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), '{"id":"el-1","main":true}\n');
+      await execAsync('git add . && git commit -m "Main sync change"', { cwd: repoDir });
+      await execAsync('git push origin main', { cwd: repoDir });
+
+      const result = await mergeBranch({
+        workspaceRoot: repoDir,
+        sourceBranch: 'feature/sync-content',
+        targetBranch: 'main',
+        commitMessage: 'Should conflict',
+        syncLocal: false,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.hasConflict).toBe(true);
+    } finally {
+      cleanup(repoDir, remoteDir);
+    }
+  });
+});
+
+describe('syncLocalBranch live-state fast-forward', () => {
+  test('snapshots live state, fast-forwards over the untracking commit, restores it', async () => {
+    const { repoDir, remoteDir } = await setup();
+    try {
+      await commitTrackedSyncState(repoDir);
+      await untrackSyncStateOnTarget(repoDir);
+
+      // The checkout is on main (now behind origin/main) with live state
+      // written over the tracked files — the exact main-checkout situation.
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), '{"id":"el-live"}\n');
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/dependencies.jsonl'), '{"blocked":"el-live"}\n');
+
+      await syncLocalBranch(repoDir, 'main');
+
+      // Local main caught up with origin/main.
+      const { stdout: local } = await execAsync('git rev-parse main', { cwd: repoDir });
+      const { stdout: remote } = await execAsync('git rev-parse origin/main', { cwd: repoDir });
+      expect(local.trim()).toBe(remote.trim());
+
+      // Live state preserved verbatim...
+      expect(fs.readFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), 'utf8'))
+        .toBe('{"id":"el-live"}\n');
+      expect(fs.readFileSync(path.join(repoDir, '.stoneforge/sync/dependencies.jsonl'), 'utf8'))
+        .toBe('{"blocked":"el-live"}\n');
+
+      // ...and now untracked + ignored, so the checkout is clean.
+      const { stdout: status } = await execAsync('git status --porcelain', { cwd: repoDir });
+      expect(status.trim()).toBe('');
+    } finally {
+      cleanup(repoDir, remoteDir);
+    }
+  });
+
+  test('does not discard local changes to files the target still tracks', async () => {
+    const { repoDir, remoteDir } = await setup();
+    try {
+      await commitTrackedSyncState(repoDir);
+
+      // Advance origin/main with a tracked change to the sync file while the
+      // local checkout keeps locally-modified live state.
+      await execAsync('git checkout --detach', { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), '{"id":"el-remote"}\n');
+      await execAsync('git add . && git commit -m "Remote sync change"', { cwd: repoDir });
+      await execAsync('git push origin HEAD:main', { cwd: repoDir });
+      await execAsync('git checkout main', { cwd: repoDir });
+
+      fs.writeFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), '{"id":"el-live"}\n');
+
+      await syncLocalBranch(repoDir, 'main');
+
+      // Refused: local main unchanged, live content intact.
+      const { stdout: local } = await execAsync('git rev-parse main', { cwd: repoDir });
+      const { stdout: remote } = await execAsync('git rev-parse origin/main', { cwd: repoDir });
+      expect(local.trim()).not.toBe(remote.trim());
+      expect(fs.readFileSync(path.join(repoDir, '.stoneforge/sync/elements.jsonl'), 'utf8'))
+        .toBe('{"id":"el-live"}\n');
+    } finally {
+      cleanup(repoDir, remoteDir);
     }
   });
 });
