@@ -1,0 +1,5 @@
+---
+"@stoneforge/quarry-web": patch
+---
+
+Guard the remaining `"/"`-to-focus-search listeners against contenteditable targets (same fix as the DocumentSearchBar one, applied preventively). `TaskSearchBar` (tasks page) and the local `routes/plans/components/PlanSearchBar` copy both registered a global keydown listener that focused the search input on `"/"`, excluding only `HTMLInputElement`/`HTMLTextAreaElement` — so a `"/"` typed into a contenteditable surface (e.g. a rich-text block editor like the TipTap one on the documents page) would have been `preventDefault()`-ed with focus jumping to the search box, had such an editor landed on those pages. Both now use the shared `isEditableTarget()` helper in `apps/quarry-web/src/lib/keyboard.ts` (INPUT/TEXTAREA/`isContentEditable`, the same check `KeyboardShortcutManager` uses), so the shortcut still fires when `"/"` is pressed outside editable regions. Regression e2e tests in `tb82-task-search.spec.ts` and `tb87-plan-search.spec.ts` inject a contenteditable element and assert the search input does not steal focus.

@@ -1,0 +1,5 @@
+---
+"@stoneforge/ui": patch
+---
+
+Guard `PlanSearchBar`'s `"/"`-to-focus shortcut against contenteditable targets, and export a shared `isEditableTarget()` helper to build that guard on. `PlanSearchBar` (mounted on the plans page in both quarry-web and smithy-web) registered a global keydown listener that focused its input on `"/"`, excluding only `HTMLInputElement`/`HTMLTextAreaElement` — a `"/"` typed into a contenteditable surface (a rich-text block editor's editable area is a contenteditable `<div>`, not an input) would have been `preventDefault()`-ed with focus jumping to the search box. The new `isEditableTarget(target)` in `packages/ui/src/lib/keyboard.ts` (also re-exported from the package root) mirrors quarry-web's `KeyboardShortcutManager` check — INPUT/TEXTAREA/`isContentEditable` — for ad-hoc global shortcut listeners; packages/ui keeps its own copy because it cannot import from an app. The shortcut still fires when `"/"` is pressed outside editable regions (covered by the new contenteditable regression test in quarry-web's `tb87-plan-search.spec.ts`, which exercises this component via the plans page).

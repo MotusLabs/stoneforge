@@ -167,6 +167,40 @@ test.describe('TB82: Task Search', () => {
     await expect(searchInput).toBeFocused();
   });
 
+  // Regression (el-3zunf1): TaskSearchBar's global "/"-to-focus listener used
+  // to guard only against HTMLInputElement/HTMLTextAreaElement, so a "/"
+  // typed into a contenteditable surface (e.g. a rich-text block editor like
+  // the one on the documents page) was preventDefault-ed and focus jumped to
+  // the search box. The guard must also exclude contenteditable targets.
+  test('pressing / inside a contenteditable element does not steal focus to the search input', async ({ page }) => {
+    await page.goto('/tasks');
+    await expect(page.getByTestId('tasks-page')).toBeVisible({ timeout: 10000 });
+
+    // Inject a contenteditable surface (what a block editor's editable area
+    // looks like to a keydown listener) and focus it.
+    await page.evaluate(() => {
+      const el = document.createElement('div');
+      el.setAttribute('contenteditable', 'true');
+      el.setAttribute('data-testid', 'regression-contenteditable');
+      el.style.minHeight = '20px';
+      el.style.minWidth = '100px';
+      document.body.prepend(el);
+      el.focus();
+    });
+
+    const editable = page.getByTestId('regression-contenteditable');
+    const searchInput = page.getByTestId('task-search-input');
+    await expect(editable).toBeFocused();
+
+    // Press / while the editable surface has focus
+    await page.keyboard.press('/');
+
+    // The search input must not have stolen focus, and the editable
+    // surface must still hold it (the "/" belongs to the editor).
+    await expect(searchInput).not.toBeFocused();
+    await expect(editable).toBeFocused();
+  });
+
   test('search highlights matching characters in task titles', async ({ page }) => {
     const { count, titles } = await ensureTestTasks(page);
     if (count === 0) {

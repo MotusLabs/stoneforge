@@ -22,6 +22,24 @@ export interface Shortcut {
 
 export type ShortcutCategory = 'navigation' | 'actions' | 'views' | 'editing' | 'other';
 
+/**
+ * True when an event target is a text-entry surface: <input>, <textarea>,
+ * or a contenteditable element (the TipTap/ProseMirror block editor's
+ * editable surface is a contenteditable <div>, not an input).
+ *
+ * Global single-key shortcuts ("/" to focus search, "G T" sequences, ...)
+ * must not fire — and especially must not preventDefault — for these
+ * targets, or they steal keystrokes from the editor. This is exactly how
+ * the slash-command menu broke: DocumentSearchBar's "/" listener
+ * preventDefault-ed the "/" typed into the block editor and moved focus
+ * to the search box, so the menu could never open. Same check as
+ * KeyboardShortcutManager.handleKeyDown, extracted for ad-hoc listeners.
+ */
+export function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+}
+
 /** Default shortcuts mapping action IDs to their default key bindings */
 export const DEFAULT_SHORTCUTS: Record<string, { keys: string; description: string; category: ShortcutCategory }> = {
   // Navigation

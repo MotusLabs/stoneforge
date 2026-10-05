@@ -10,6 +10,7 @@
 
 import { useRef, useEffect } from 'react';
 import { Search, X } from 'lucide-react';
+import { isEditableTarget } from '../../lib/keyboard';
 
 interface TaskSearchBarProps {
   value: string;
@@ -35,11 +36,9 @@ export function TaskSearchBar({
         onClear();
         inputRef.current?.blur();
       }
-      // Focus search on / when not in an input/textarea
-      if (
-        e.key === '/' &&
-        !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)
-      ) {
+      // Focus search on / when not in a text-entry surface (input,
+      // textarea, or contenteditable — e.g. a block editor)
+      if (e.key === '/' && !isEditableTarget(e.target)) {
         e.preventDefault();
         inputRef.current?.focus();
       }

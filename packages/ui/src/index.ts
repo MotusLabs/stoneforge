@@ -56,3 +56,6 @@ export { WorkflowCard } from './domain';
 // Plans components/utils take precedence for StatusBadge, StatusFilter, TaskStatusSummary, formatRelativeTime
 export { StatusBadge, StatusFilter, TaskStatusSummary } from './plans';
 export { formatRelativeTime } from './plans';
+
+// Shared keyboard utilities (editable-target guard for global shortcut listeners)
+export { isEditableTarget } from './lib/keyboard';
