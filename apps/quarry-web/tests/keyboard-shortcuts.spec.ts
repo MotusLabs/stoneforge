@@ -80,17 +80,21 @@ test.describe('Keyboard Shortcuts', () => {
       await expect(page.getByTestId('dashboard-page')).toBeVisible();
     });
 
-    test('G F navigates to Task Flow page', async ({ page }) => {
+    test('G F is unbound (task-flow surface removed)', async ({ page }) => {
       await page.goto('/dashboard');
       await expect(page.getByTestId('dashboard-page')).toBeVisible();
 
+      // The task-flow lens was removed: the /tasks kanban view carries the
+      // task-flow columns, so 'G F' is no longer registered ('G T' navigates
+      // to Tasks; the legacy /dashboard/task-flow route redirects to /tasks).
+      // See src/lib/keyboard.ts and the Quarry Web Reference (el-4iiz).
       // Press G then F in sequence
       await page.keyboard.press('g');
       await page.keyboard.press('f');
 
-      // Should navigate to task flow page
-      await expect(page).toHaveURL(/\/dashboard\/task-flow/);
-      await expect(page.getByTestId('task-flow-page')).toBeVisible();
+      // Unbound sequence is inert — stay on the dashboard
+      await expect(page).toHaveURL(/\/dashboard\/overview/);
+      await expect(page.getByTestId('dashboard-page')).toBeVisible();
     });
 
     test('G L navigates to Timeline page', async ({ page }) => {
